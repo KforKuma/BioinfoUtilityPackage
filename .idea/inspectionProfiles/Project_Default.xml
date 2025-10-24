@@ -1,0 +1,34 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="PyPackageRequirementsInspection" enabled="false" level="WARNING" enabled_by_default="false">
+      <option name="ignoredPackages">
+        <list>
+          <option value="anndata" />
+          <option value="seaborn" />
+          <option value="tqdm" />
+          <option value="numba" />
+          <option value="scipy" />
+          <option value="scanpy" />
+          <option value="leidenalg" />
+          <option value="numpy" />
+          <option value="joblib" />
+          <option value="pandas" />
+          <option value="statsmodels" />
+          <option value="matplotlib" />
+          <option value="plotly" />
+          <option value="adjustText" />
+          <option value="cycler" />
+          <option value="python_igraph" />
+          <option value="typing_extensions" />
+          <option value="scikit-learn" />
+          <option value="scikit-misc" />
+          <option value="simpleppt" />
+          <option value="elpigraph-python" />
+          <option value="networkx" />
+          <option value="igraph" />
+        </list>
+      </option>
+    </inspection_tool>
+  </profile>
+</component>
