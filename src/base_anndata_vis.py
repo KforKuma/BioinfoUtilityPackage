@@ -1,16 +1,18 @@
+from argparse import ArgumentError
+
 import anndata
 import pandas as pd
 import numpy as np
 import scanpy as sc
-import sys
-sys.path.append("/data/HeLab/bio/IBD_analysis/")
 
+import seaborn as sns
 import matplotlib
+import matplotlib.pyplot as plt
 matplotlib.use('Agg')  # 使用无GUI的后端
 
 from src.utils.plot_wrapper import ScanpyPlotWrapper
 from src.base_anndata_ops import sanitize_filename
-from src.utils.geneset_editor import Geneset
+# from src.utils.geneset_editor import Geneset
 
 def geneset_dotplot(adata,
                     markers, marker_sheet,
@@ -91,3 +93,51 @@ def geneset_dotplot(adata,
 
         dotplot(**dotplot_kwargs)
         print(f"--> Dotplot saved: {filename}")
+
+
+def plot_stacked_bar(cluster_counts,
+                     cluster_palette=None,
+                     xlabel_rotation=0,
+                     plot=True,filename=None):
+    '''
+    配合 base_anndata_ops 中的 get_cluster_counts/props 使用，下同
+
+    Example
+    -------
+    fig = plot_cluster_counts()
+
+
+    :param cluster_counts:
+    :param cluster_palette:
+    :param xlabel_rotation:
+    :return:
+    '''
+    if not plot and filename is None:
+        raise ValueError("When plot=False, filename must be provided to save the fig.")
+
+    fig, ax = plt.subplots(dpi=300)
+    fig.patch.set_facecolor("white")
+
+    if cluster_palette is not None:
+        cluster_counts.plot(kind="bar", stacked=True, ax=ax, color=cluster_palette)
+    else:
+        cluster_counts.plot(kind="bar", stacked=True, ax=ax)
+
+    ax.legend(bbox_to_anchor=(1.01, 1), frameon=False, title="Cluster")
+    sns.despine(fig, ax)
+    ax.tick_params(axis="x", rotation=xlabel_rotation)
+    ax.set_xlabel(cluster_counts.index.name.capitalize())
+    ax.set_ylabel("Counts")
+    fig.tight_layout()
+
+    if filename is not None:
+        fig.savefig(filename, bbox_inches="tight")
+
+    if plot:
+        return fig
+    else:
+        plt.close(fig)
+
+
+
+

@@ -289,5 +289,48 @@ def score_gene_analysis(marker_dict, adata_subset,
 def sanitize_filename(filename):
     return re.sub(r'[<>:"/\\|?*]', '_', filename)
 
+def get_cluster_counts(adata, obs_key="Subset_Identity", group_by="orig.project",
+                       drop_values=None, drop_axis="index"):
+    """
+    统计每个 group_by 下各个 obs_key 的细胞数量。
+    """
+    counts = (
+        adata.obs.groupby([group_by, obs_key])
+        .size()
+        .unstack(fill_value=0)
+    )
+
+    if drop_values is not None:
+        counts.drop(drop_values, axis=0 if drop_axis=="index" else 1, inplace=True)
+
+    counts.attrs["obs_key"] = obs_key
+    counts.attrs["group_by"] = group_by
+    return counts
+
+
+def get_cluster_proportions(adata, obs_key="Subset_Identity", group_by="orig.project",
+                            drop_values=None, drop_axis="index"):
+    """
+    统计每个 group_by 下各个 obs_key 的百分比（行和为100%）。
+    """
+    props = (
+        adata.obs.groupby([group_by, obs_key])
+        .size()
+        .groupby(level=0)
+        .apply(lambda x: 100 * x / x.sum())
+        .unstack(fill_value=0)
+    )
+
+    if drop_values is not None:
+        props.drop(drop_values, axis=0 if drop_axis=="index" else 1, inplace=True)
+
+    props.attrs["obs_key"] = obs_key
+    props.attrs["group_by"] = group_by
+    return props
+
+
+
+
+
 
 
