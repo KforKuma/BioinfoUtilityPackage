@@ -5,15 +5,27 @@ class Geneset():
     """
     用于读写基因标志物，并用于绘图的 class。
     构建 Geneset 可读取的文件时，需要时 xlsx, xls
-
-    使用例：my_markers = Geneset(save_addr + "Markers-updated.xlsx")
-
-    需要加个版本识别：
-    v0: cell_type	gene_set
-    v1: cell_type	gene_set	disabled	facet	remark  (sheet_name)
-    v2: signature_id	genes	status	facet	description	source	species (sheet_name)
     """
     def __init__(self, file_path, version=None):
+        '''
+        使用例：my_markers = Geneset(save_addr + "Markers-updated.xlsx")
+
+        需要加个版本识别：
+        v0: cell_type
+        gene_set
+        v1: cell_type
+        gene_set
+        disabled
+        facet
+        remark(sheet_name)
+        v2: signature_id
+        genes
+        status
+        facet
+        description
+        source
+        species(sheet_name)
+        '''
         self.file_path = file_path
         self.data = self._load_file(file_path)
         if version is not None:
