@@ -72,3 +72,17 @@ def generate_subclusters_by_identity(
         # 清理内存
         del adata_subset
         gc.collect()
+
+
+def analysis_DEG(adata_subset, file_name, groupby_key, output_dir,downsample,use_raw,skip_QC=False):
+    from src.base_anndata_ops import easy_DEG
+    # from
+    print(f"--> Starting differential expression analysis for group '{groupby_key}'...")
+    easy_DEG(adata_subset, save_addr=output_dir, filename=file_name, obs_key=groupby_key,
+             save_plot=True, plot_gene_num=5, downsample=downsample,use_raw=use_raw)
+    # 基础QC图
+    Basic_QC_Plot(
+        adata_subset,
+        prefixx=f"{file_name}_{groupby_key}",
+        out_dir=output_dir
+    )

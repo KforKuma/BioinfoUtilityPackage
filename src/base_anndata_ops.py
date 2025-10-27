@@ -286,4 +286,8 @@ def score_gene_analysis(marker_dict, adata_subset,
     return adata_score
 
 
+def sanitize_filename(filename):
+    return re.sub(r'[<>:"/\\|?*]', '_', filename)
+
+
 

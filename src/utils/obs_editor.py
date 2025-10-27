@@ -12,19 +12,26 @@ class ObsEditor:
     def __init__(self, adata: ad.AnnData):
         self.adata = adata
 
-    def add_category(self, col, values):
+    @staticmethod
+    def _log(msg):
+        print(f"[ObsEditor Message] {msg}")
+
+    def add_category(self, col, default):
         """添加一个新的 obs 列"""
-        self.adata.obs[col] = values
+        self.adata.obs[col] = default
+        self._log("New category '{}' added".format(col))
         return self.adata
 
     def rename_column(self, old, new):
         """重命名 obs 列"""
         self.adata.obs.rename(columns={old: new}, inplace=True)
+        self._log("Rename column '{}' to '{}'".format(old, new))
         return self.adata
 
     def drop_missing(self, col):
         """去掉指定列中缺失值的细胞"""
         self.adata = self.adata[~self.adata.obs[col].isna()]
+        self._log("Drop missing column '{}'".format(col))
         return self.adata
 
     def filter_by_value(self, col, value):
@@ -44,6 +51,7 @@ class ObsEditor:
             self.adata = self.adata[self.adata.obs[col] == value]
         else:
             raise ValueError("Argument value must be list, str or int.")
+        self._log("Filter by value successfully: '{}'".format(value))
         return self.adata
 
     def assign_cluster_identities(self, annotator, anno_obs_key, target_obs_keys):
@@ -77,12 +85,14 @@ class ObsEditor:
                 f"The number in new identities: ({len(annotator)}) does not match the number of the reference cluster:  ({len(cluster_ids)})."
             )
         if isinstance(annotator, dict):
-            print("Received annotator as a dict.")
+            self._log("Received annotator as a dict.")
             cl_annotation = annotator
         elif isinstance(annotator, list):
-            print("Received annotator as a list.")
+            self._log("Received annotator as a list.")
             cl_annotation = dict(zip(cluster_ids, annotator))
-            print("Generate the dict for you, as following: \n", cl_annotation)
+            self._log("Generate the dict for you, as following: \n", cl_annotation)
+        else:
+            raise ValueError("Argument annotator must be a list or dict.")
 
         for key in target_obs_keys:
             self.adata.obs[key] = self.adata.obs[anno_obs_key].map(cl_annotation)
@@ -116,10 +126,10 @@ class ObsEditor:
 
         # 按照来源列内容更新
         for new_ident in obs_data.unique().tolist():
-            print(new_ident)
             index = obs_data[obs_data == new_ident].index
             self.adata.obs.loc[index, to_obs_key] = new_ident
-            print(len(self.adata.obs[self.adata.obs[to_obs_key] == new_ident]))
+            cell_counts = len(self.adata.obs[self.adata.obs[to_obs_key] == new_ident])
+            self._log(f"New cell identity '{new_ident}' updated, total count: {cell_counts}")
 
     def change_one_ident_fast(self, obs_key, old, new):
         """
@@ -132,12 +142,11 @@ class ObsEditor:
             # 布尔索引一次完成
             mask = self.adata.obs[obs_key] == old
             self.adata.obs.loc[mask, obs_key] = new
-
-            print(f"Replaced {mask.sum()} cells from '{old}' to '{new}'.")
+            self._log(f"Replaced {mask.sum()} cells from '{old}' to '{new}'.")
         else:
             mask = self.adata.obs[key] == old
             self.adata.obs.loc[mask, key] = new
-            print(f"Replaced {mask.sum()} cells from '{old}' to '{new}'.")
+            self._log(f"Replaced {mask.sum()} cells from '{old}' to '{new}'.")
 
 
 
