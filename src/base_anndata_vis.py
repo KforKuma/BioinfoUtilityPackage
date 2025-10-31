@@ -4,7 +4,7 @@ import anndata
 import pandas as pd
 import numpy as np
 import scanpy as sc
-
+import os
 import seaborn as sns
 import matplotlib
 import matplotlib.pyplot as plt
@@ -95,49 +95,108 @@ def geneset_dotplot(adata,
         print(f"--> Dotplot saved: {filename}")
 
 
+
 def plot_stacked_bar(cluster_counts,
                      cluster_palette=None,
                      xlabel_rotation=0,
-                     plot=True,filename=None):
-    '''
-    配合 base_anndata_ops 中的 get_cluster_counts/props 使用，下同
+                     plot=True,
+                     filename=None,
+                     save=True):
+    """
+    绘制堆叠条形图，可选择保存为PNG和PDF格式。
+    一般配合 get_cluster_counts / get_cluster_props 使用。
 
-    Example
+    Parameters
+    ----------
+    cluster_counts : pd.DataFrame
+        行为组别（如样本、疾病类型），列为子群或类别（如细胞类型）。
+    cluster_palette : list or dict, optional
+        自定义颜色方案。
+    xlabel_rotation : int, optional
+        X轴标签旋转角度。
+    plot : bool, default True
+        是否直接显示图像（Jupyter中）。
+    filename : str, optional
+        保存文件的路径（不带后缀时会自动生成 .png/.pdf）。
+    save : bool, default True
+        是否保存图像。
+
+    Returns
     -------
-    fig = plot_cluster_counts()
-
-
-    :param cluster_counts:
-    :param cluster_palette:
-    :param xlabel_rotation:
-    :return:
-    '''
-    if not plot and filename is None:
-        raise ValueError("When plot=False, filename must be provided to save the fig.")
+    fig : matplotlib.figure.Figure or None
+        当 plot=True 时返回 Figure 对象，否则返回 None。
+    """
+    if not plot and not save:
+        raise ValueError("At least one of `plot` or `save` must be True.")
 
     fig, ax = plt.subplots(dpi=300)
     fig.patch.set_facecolor("white")
 
-    if cluster_palette is not None:
-        cluster_counts.plot(kind="bar", stacked=True, ax=ax, color=cluster_palette)
-    else:
-        cluster_counts.plot(kind="bar", stacked=True, ax=ax)
-
+    # 绘图部分
+    cluster_counts.plot(kind="bar", stacked=True, ax=ax, color=cluster_palette)
     ax.legend(bbox_to_anchor=(1.01, 1), frameon=False, title="Cluster")
     sns.despine(fig, ax)
     ax.tick_params(axis="x", rotation=xlabel_rotation)
-    ax.set_xlabel(cluster_counts.index.name.capitalize())
+    ax.set_xlabel(cluster_counts.index.name.capitalize() if cluster_counts.index.name else "")
     ax.set_ylabel("Counts")
     fig.tight_layout()
 
-    if filename is not None:
-        fig.savefig(filename, bbox_inches="tight")
+    # 保存图像部分
+    if save and filename is not None:
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        base, ext = os.path.splitext(filename)
+        if ext.lower() not in [".png", ".pdf"]:
+            fig.savefig(base + ".png", bbox_inches="tight")
+            fig.savefig(base + ".pdf", bbox_inches="tight")
+        else:
+            fig.savefig(filename, bbox_inches="tight")
 
+    # 返回或关闭图像
     if plot:
         return fig
     else:
         plt.close(fig)
 
 
+def plot_stacked_violin(adata,
+                      output_dir,file_suffix,save_addr,
+                      gene_dict,
+                      cell_type,obs_key="Subset_Identity",
+                      group_by="disease",**kwargs):
+
+    if len(gene_dict) == 0 or next(iter(gene_dict.values())) is None:
+        raise ValueError("[easy_stack_violin] gene_dict must contain at least one gene.")
+
+    from src.utils.plot_wrapper import ScanpyPlotWrapper
+    stacked_violin = ScanpyPlotWrapper(func=sc.pl.stacked_violin)
+
+    for k, v in gene_dict.items():
+        gene_name = k
+        gene_list = v
+
+        filename = f"{file_suffix}_{gene_name}_StViolin{'(split)' if split else ''}.png"
+
+        if isinstance(cell_type, list):
+            adata_subset = adata[adata.obs[obs_key].isin(cell_type)]
+        elif isinstance(cell_type, str):
+            adata_subset = adata[adata.obs[obs_key] == cell_type]
+        else:
+            raise ValueError("[easy_stack_violin] cell type must be a list or string.")
+
+        default_params = {"swap_axes":False,
+                          "cmap":"viridis_r",
+                          "use_raw":False,
+                          "layer":"log1p_norm",
+                          "show":False
+        }
+        default_params.update(kwargs)
+        if kwargs:
+            print(f"[easy_stack_violin] Overriding defaults with: {kwargs}")
+
+        stacked_violin(
+            filename=filename,save_addr=output_dir,
+            adata=adata_subset,var_names=gene_list,groupby=group_by,
+            **default_params
+            )
 
 
