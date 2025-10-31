@@ -13,6 +13,8 @@ DEFAULT_SPEC_PAT = "/|:|\\?|\\*|\\+|\\(|\\)|\\/|\\[|\\]"
 DEFAULT_CELLSIGN_ALPHA = 0.5
 DEFAULT_COLUMNS = ["interaction_group", "celltype_group"]
 
+INTERACTION_COLUMNS = ['interacting_pair', 'partner_a', 'partner_b', 'gene_a', 'gene_b', 'directionality', 'classification']
+
 DEFAULT_V5_COL_START = 13
 DEFAULT_V5_COL_NAMES = ["id_cp_interaction","interacting_pair","partner_a","partner_b",
                         "gene_a","gene_b","secreted","receptor_a","receptor_b","annotation_strategy",
