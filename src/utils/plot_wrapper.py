@@ -24,6 +24,11 @@ class ScanpyPlotWrapper(object):
     """
     Decorator-like wrapper: 调用 scanpy.pl 系列绘图函数后，
     根据 filename 后缀自动保存 PDF/PNG。
+
+    Example
+    -------
+
+
     """
 
     def __init__(self, func):

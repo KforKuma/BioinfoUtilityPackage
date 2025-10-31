@@ -8,7 +8,9 @@ class Geneset():
     """
     def __init__(self, file_path, version=None):
         '''
-        使用例：my_markers = Geneset(save_addr + "Markers-updated.xlsx")
+        Example
+        -------
+        my_markers = Geneset(save_addr + "Markers-updated.xlsx")
 
         需要加个版本识别：
         v0: cell_type
@@ -251,7 +253,7 @@ class Geneset():
         # 1.2 查询多个 sig，返回一个包含 {sig:[genes]} 的字典
         signatures=gs.get(siganature=['B Cell','T Cell'])
         # 1.3 查询一整个 sheet，就算只有一行，默认返回也是一个字典，类似于多个 sig；也可以同时给出两个参数
-        signatures=gs.get(siganature=['B Cell','T Cell']， sheet_name="Immunocyte")
+        signatures=gs.get(siganature=['B Cell','T Cell'], sheet_name="Immunocyte")
         ...对于下游的可视化，通常只需要
         sc.pl.dotplot(
                 adata=adata, groupby=groupby_key, layer="log1p_norm", standard_scale="var",
@@ -306,7 +308,8 @@ class Geneset():
                 # 不分组，直接构建 gene_dict
                 self._log("Retrieved genes in signature id '%s'" % signature)
                 return build_gene_dict(df)
-        else: # 如果什么都不填，那你肯定是想要整个表格；当然，也有可能已经填了 sheet_name 了，总之 return 一个字典给你
+        elif signature is None: # 如果什么都不填，那你肯定是想要整个表格；当然，也有可能已经填了 sheet_name 了，总之 return 一个字典给你
+            self._log("No signature ids given.")
             if facet_split:
                 # 按 'facet' 列进行分组，并对每组应用 build_gene_dict
                 gene_dicts = {facet: build_gene_dict(sub_df) for facet, sub_df in df.groupby('facet')}
@@ -315,6 +318,8 @@ class Geneset():
             else:
                 self._log("Retrieved genes, without signature assigned.")
                 return build_gene_dict(df)
+        else:
+            raise ValueError("signature must be str or list, or None when sheet_name is provided.")
 
     def update(self, gene_dict, inplace=False,
                sheet_name=None, species=None, status=None, facet=None):
