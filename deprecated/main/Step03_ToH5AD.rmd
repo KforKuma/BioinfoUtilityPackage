@@ -1,0 +1,120 @@
+
+```{r}
+library(Seurat)
+library(Matrix)
+library(dplyr)
+library(ggplot2)
+
+options(repos = c(USTC="https://mirrors.ustc.edu.cn/CRAN/"))
+```
+
+测试
+```{r}
+fn <- "GSE198616"
+read_addr <- "/data/HeLab/bio/IBD_analysis/output/Step02_QC"
+save_addr <- "/data/HeLab/bio/IBD_analysis/output/Step03_Toh5ad"
+filelist <- list.files(read_addr)
+filename <- filelist[grepl(fn,filelist)]
+load(file.path(read_addr,filename))
+
+scData_clean[[1]]
+check_seurat_assay_slots_simple(scData_clean[[1]])
+
+head(scData_clean[[1]]@meta.data)
+if(is.null(names(scData_clean))){
+    names(scData_clean) <- paste0("Sample", seq_along(scData_clean))
+  }
+# names(scData_clean) <- paste0("Sample", seq_along(scData_clean))
+scData_combined <- Sce_Cleanse(scData_clean,keep_cols = c(
+      "orig.ident", "disease", "orig.project", "Patient",
+      "tissue-type", "pp",
+      "percent.mt", "percent.ribo", "percent.hb"
+    ))
+check_seurat_assay_slots_simple(scData_combined)
+colnames(scData_combined@meta.data)[2] <- "disease"
+new_fn <- paste0("Step03_Combined_",fn,".Rdata")
+save(scData_combined,file = file.path(save_addr,new_fn))
+```
+
+ h5ad转换优先用一个小文件
+
+```{r}
+library(sceasy)
+
+fn <- "GSE157477"
+read_addr <- "/data/HeLab/bio/IBD_analysis/output/Step02_QC"
+save_addr <- "/data/HeLab/bio/IBD_analysis/output/Step03_Toh5ad"
+load(file.path(save_addr,paste0("Step03_Combined_",fn,".Rdata")))
+
+DefaultAssay(scData_combined) <- "RNA"
+check_seurat_assay_slots_simple(scData_combined)
+sceasy::convertFormat(
+  obj          = scData_combined,
+  from         = "seurat",
+  to           = "anndata",
+  outFile      = file.path(save_addr,paste0("Step03_Combined_",fn,".h5ad")),
+  main_layer   = "counts",
+)                         # 直接写出 H5AD 文件
+# 测试
+```
+
+
+批量二合一
+```{r}
+# fn <- "GSE157477"
+fn_list <- c("GSE116222","GSE198616","GSE189754","XY","GSE225199")
+read_addr <- "/data/HeLab/bio/IBD_analysis/output/Step02_QC"
+save_addr <- "/data/HeLab/bio/IBD_analysis/output/Step03_Toh5ad"
+filelist <- list.files(read_addr)
+
+for (fn in fn_list) {
+  pattern <- paste0( fn, ".*\\.Rdata$")
+  files   <- list.files(read_addr, pattern = pattern, full.names = TRUE)
+  if (length(files) != 1) {
+    warning("样本 ", fn, " 匹配到 ", length(files), " 个文件，跳过。")
+    next
+  }
+
+  # 安全加载
+  env <- new.env()
+  load(files, envir = env)
+  if (!"scData_clean" %in% ls(env)) {
+    warning("文件 ", files, " 中未找到 scData_clean，对", fn, " 跳过。")
+    next
+  }
+  scData_clean <- env$scData_clean
+  rm(env); gc()
+
+  # 清洗并合并
+  scData_combined <- Sce_Cleanse(
+    scData_clean,
+    keep_cols = c("orig.ident", "disease.y", "orig.project",
+                  "Patient", "tissue-type", "presorted",
+                  "percent.mt", "percent.ribo", "percent.hb")
+  )
+
+  # 更稳健的重命名
+  md <- scData_combined@meta.data
+  if ("disease.y" %in% colnames(md)) {
+    colnames(md)[colnames(md) == "disease.y"] <- "disease"
+    scData_combined@meta.data <- md
+  }
+
+  # 保存 Rdata
+  savefile <- file.path(save_addr, paste0("Step03_Combined_", fn, ".Rdata"))
+  save(scData_combined, file = savefile)
+
+  # 导出 H5AD
+  sceasy::convertFormat(
+    obj      = scData_combined,
+    from     = "seurat",
+    to       = "anndata",
+    outFile  = file.path(save_addr, paste0("Step03_Combined_", fn, ".h5ad")),
+    main_layer = "counts"
+  )
+
+  # 清理内存
+  rm(scData_clean, scData_combined); gc()
+}
+
+```
