@@ -14,5 +14,9 @@ An integrated package mainly devoted for anndata/scanpy workflow, helps you:
 
 Currently under construction. So just go import lol.
 
-
-
+<pre>```
+   (\_ _/)
+   ( •_• )  Gimme a star
+  / >🍪   / and I'll give u a cookie
+```
+</pre>
