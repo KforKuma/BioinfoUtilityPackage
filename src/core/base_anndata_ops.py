@@ -293,6 +293,11 @@ def get_cluster_counts(adata, obs_key="Subset_Identity", group_by="orig.project"
                        drop_values=None, drop_axis="index"):
     """
     统计每个 group_by 下各个 obs_key 的细胞数量。
+
+    Examples
+    --------
+    counts = get_cluster_counts(adata,obs_key="Subset_Identity", group_by="disease")
+
     """
     counts = (
         adata.obs.groupby([group_by, obs_key])
@@ -312,6 +317,12 @@ def get_cluster_proportions(adata, obs_key="Subset_Identity", group_by="orig.pro
                             drop_values=None, drop_axis="index"):
     """
     统计每个 group_by 下各个 obs_key 的百分比（行和为100%）。
+
+    Examples
+    --------
+    props = get_cluster_proportions(adata,obs_key="Subset_Identity", group_by="disease")
+
+
     """
     props = (
         adata.obs.groupby([group_by, obs_key])

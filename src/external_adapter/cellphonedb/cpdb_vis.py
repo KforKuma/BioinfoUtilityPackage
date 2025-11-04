@@ -13,7 +13,7 @@ import ktplotspy as kpy
 
 def cpdb_heatmap(CIObject,
                  output_dir,
-                 file_suffix,
+                 filename_prefix,
                  save_pdf=True,
                  save_png=True,
                  show=False,
@@ -27,8 +27,8 @@ def cpdb_heatmap(CIObject,
         CellphoneInspector 类实例，需包含 .data["pvalues"] 与 .deg。
     output_dir : str
         图像输出目录。
-    file_suffix : str
-        输出文件名后缀（不带扩展名）。
+    filename_prefix : str
+        输出文件名前缀（不带扩展名）。
     save_pdf : bool, default True
         是否保存 PDF 格式。
     save_png : bool, default True
@@ -72,13 +72,14 @@ def cpdb_heatmap(CIObject,
 
     # --- 输出路径与保存 ---
     os.makedirs(output_dir, exist_ok=True)
-    base_path = os.path.join(output_dir, file_suffix)
+    filename="CPDB_Heatmap" if filename_prefix is None else f"{filename_prefix}_CPDB_Heatmap"
+    base_path = os.path.join(output_dir, filename)
     if save_pdf:
         fig.savefig(f"{base_path}.pdf", dpi=300, bbox_inches="tight")
     if save_png:
         fig.savefig(f"{base_path}.png", dpi=300, bbox_inches="tight")
 
-    print(f"[cpdb_heatmap] Saved: {file_suffix} (.pdf/.png)")
+    print(f"[cpdb_heatmap] Saved: {filename} (.pdf/.png)")
     if show:
         plt.show()
     else:
@@ -90,7 +91,7 @@ def cpdb_heatmap(CIObject,
 def cpdb_dotplot(CIObject,AnndataObject,
                  cell_type1,cell_type2,celltype_key,
                  output_dir,
-                 file_suffix,
+                 filename_prefix,
                  interacting_pairs=None,
                  save_pdf=True,
                  save_png=True,
@@ -114,7 +115,7 @@ def cpdb_dotplot(CIObject,AnndataObject,
     :param cell_type2: 
     :param celltype_key:
     :param output_dir: 
-    :param file_suffix:
+    :param filename_prefix:
     :param interacting_pairs:
     :param save_pdf: 
     :param save_png: 
@@ -149,13 +150,14 @@ def cpdb_dotplot(CIObject,AnndataObject,
 
     # --- 输出路径与保存 ---
     os.makedirs(output_dir, exist_ok=True)
-    base_path = os.path.join(output_dir, file_suffix)
+    filename = "CPDB_Dotplot" if filename_prefix is None else f"{filename_prefix}_CPDB_Heatmap"
+    base_path = os.path.join(output_dir, filename)
     if save_pdf:
         g.save(f"{base_path}.pdf", dpi=300, bbox_inches="tight")
     if save_png:
         g.save(f"{base_path}.png", dpi=300, bbox_inches="tight")
 
-    print(f"[cpdb_dotmap] Saved: {file_suffix} (.pdf/.png)")
+    print(f"[cpdb_dotmap] Saved: {filename} (.pdf/.png)")
     if show:
         print(g)
 
@@ -167,7 +169,7 @@ def cpdb_dotplot(CIObject,AnndataObject,
 
 def cpdb_chordplot(CIObject,AnndataObject,
                    cell_type1,cell_type2,celltype_key,interaction,
-                   output_dir, file_suffix,
+                   output_dir, filename_prefix,
                    save_pdf=True,
                    save_png=True,
                    show=False,**kwargs):
@@ -210,13 +212,14 @@ def cpdb_chordplot(CIObject,AnndataObject,
 
     # --- 输出路径与保存 ---
     os.makedirs(output_dir, exist_ok=True)
-    base_path = os.path.join(output_dir, file_suffix)
+    filename = "CPDB_Chordplot" if filename_prefix is None else f"{filename_prefix}_CPDB_Heatmap"
+    base_path = os.path.join(output_dir, filename)
     if save_pdf:
         g.save(f"{base_path}.pdf", dpi=300, bbox_inches="tight")
     if save_png:
         g.save(f"{base_path}.png", dpi=300, bbox_inches="tight")
 
-    print(f"[cpdb_chordplot] Saved: {file_suffix} (.pdf/.png)")
+    print(f"[cpdb_chordplot] Saved: {filename} (.pdf/.png)")
     if show:
         print(g)
 

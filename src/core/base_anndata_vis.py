@@ -1,5 +1,3 @@
-from argparse import ArgumentError
-
 import anndata
 import pandas as pd
 import numpy as np
@@ -10,8 +8,8 @@ import matplotlib
 import matplotlib.pyplot as plt
 matplotlib.use('Agg')  # 使用无GUI的后端
 
-from src.utils.plot_wrapper import ScanpyPlotWrapper
-from src.base_anndata_ops import sanitize_filename
+from src.core.utils.plot_wrapper import ScanpyPlotWrapper
+from src.core.base_anndata_ops import sanitize_filename
 # from src.utils.geneset_editor import Geneset
 
 def geneset_dotplot(adata,
@@ -100,11 +98,21 @@ def plot_stacked_bar(cluster_counts,
                      cluster_palette=None,
                      xlabel_rotation=0,
                      plot=True,
-                     filename=None,
+                     filename_prefix=None,
                      save=True):
     """
     绘制堆叠条形图，可选择保存为PNG和PDF格式。
     一般配合 get_cluster_counts / get_cluster_props 使用。
+
+    Examples
+    --------
+    counts = get_cluster_counts(adata,obs_key="Subset_Identity", group_by="disease")
+    props = get_cluster_proportions(adata,obs_key="Subset_Identity", group_by="disease")
+
+    plot_stacked_bar(cluster_counts,
+                     cluster_palette=adata.uns["leiden_res1_colors"],
+                     filename_prefix="AllSample_Counts",save=True)
+
 
     Parameters
     ----------
@@ -142,7 +150,8 @@ def plot_stacked_bar(cluster_counts,
     fig.tight_layout()
 
     # 保存图像部分
-    if save and filename is not None:
+    if save:
+        filename = "StackedBarplot" if filename_prefix is None else f"{filename_prefix}_StackedBarplot"
         os.makedirs(os.path.dirname(filename), exist_ok=True)
         base, ext = os.path.splitext(filename)
         if ext.lower() not in [".png", ".pdf"]:
@@ -159,22 +168,35 @@ def plot_stacked_bar(cluster_counts,
 
 
 def plot_stacked_violin(adata,
-                      output_dir,file_suffix,save_addr,
+                      output_dir,filename_prefix,save_addr,
                       gene_dict,
                       cell_type,obs_key="Subset_Identity",
                       group_by="disease",**kwargs):
+    '''
+
+    :param adata:
+    :param output_dir:
+    :param file_suffix:
+    :param save_addr:
+    :param gene_dict:
+    :param cell_type:
+    :param obs_key:
+    :param group_by:
+    :param kwargs:
+    :return:
+    '''
 
     if len(gene_dict) == 0 or next(iter(gene_dict.values())) is None:
         raise ValueError("[easy_stack_violin] gene_dict must contain at least one gene.")
 
-    from src.utils.plot_wrapper import ScanpyPlotWrapper
+    from src.core.utils.plot_wrapper import ScanpyPlotWrapper
     stacked_violin = ScanpyPlotWrapper(func=sc.pl.stacked_violin)
 
     for k, v in gene_dict.items():
         gene_name = k
         gene_list = v
 
-        filename = f"{file_suffix}_{gene_name}_StViolin{'(split)' if split else ''}.png"
+        filename = f"{filename_prefix}_{gene_name}_StViolin{'(split)' if split else ''}.png"
 
         if isinstance(cell_type, list):
             adata_subset = adata[adata.obs[obs_key].isin(cell_type)]

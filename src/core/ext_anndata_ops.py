@@ -75,7 +75,7 @@ def generate_subclusters_by_identity(
 
 
 def analysis_DEG(adata_subset, file_name, groupby_key, output_dir,downsample,use_raw,skip_QC=False):
-    from src.base_anndata_ops import easy_DEG
+    from src.core.base_anndata_ops import easy_DEG
     # from
     print(f"--> Starting differential expression analysis for group '{groupby_key}'...")
     easy_DEG(adata_subset, save_addr=output_dir, filename=file_name, obs_key=groupby_key,

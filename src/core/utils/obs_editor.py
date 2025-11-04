@@ -1,6 +1,9 @@
 import pandas as pd
 import anndata
-import os,gc
+import scanpy as sc
+import os,gc,re
+
+from src.utils.env_utils import ensure_package
 
 '''
 主要函数功能来自先前的src.EasyInterface.Anndata_Annotator.py
@@ -149,6 +152,90 @@ class ObsEditor:
             self._log(f"Replaced {mask.sum()} cells from '{old}' to '{new}'.")
 
 
+
+def gene_annotator(adata: AnnData, chr_annot_path=None, cyc_annot_path=None):
+    for name, func, path in [
+        ("chromosomal", _chr_annotator, chr_annot_path),
+        ("cell cycle", _cyc_annotator, cyc_annot_path),
+        ("mito/ribo/hb", _mrh_annotator, None),
+    ]:
+        try:
+            func(adata, path)
+            print(f"[gene_annotator] {name} info successfully annotated.")
+        except Exception as e:
+            print(f"[gene_annotator] Failed {name} info annotation due to {e}")
+
+    return adata
+
+
+def _chr_annotator(adata: AnnData, chr_annot_path: str = None):
+
+    # 数据库准备
+    if chr_annot_path is None or not os.path.exists(chr_annot_path):
+        print("[gene_annotator] Try retrieving chromosomal info from Ensembl Biomart.")
+        try:
+            annot = sc.queries.biomart_annotations(
+                "hsapiens",
+                ["ensembl_gene_id", "external_gene_name", "start_position", "end_position", "chromosome_name"],
+            ).set_index("external_gene_name")
+            chr_annot_path = os.path.join(os.getcwd(),"HSA_Genome_Annotation.csv") if chr_annot_path is None else chr_annot_path
+            annot.to_csv(chr_annot_path)
+        except Exception as e:
+            print(f"[gene_annotator] Failed to retrieve database because of {e}, \n "
+                  f"try downloading manually, from https://www.ensembl.org/biomart/martview")
+            return
+    else:
+        annot = pd.read_csv(chr_annot_path)
+        annot = annot.set_index("external_gene_name")
+
+    adata.var["X"] = adata.var_names.isin(annot.index[annot.chromosome_name == "X"])
+    adata.var["Y"] = adata.var_names.isin(annot.index[annot.chromosome_name == "Y"])
+
+def _cyc_annotator(adata: AnnData, cyc_annot_path: str = None):
+    '''
+
+    :param adata:
+    :param cyc_annot_path:
+    :return: adata.obs['phase'],adata.obs['G2M_score'], adata.obs['S_score']
+    '''
+    if cyc_annot_path is None or not os.path.exists(cyc_annot_path):
+        ensure_package("zipfile")
+        import zipfile
+        print("[gene_annotator] Try retrieving chromosomal info from Ensembl Biomart.")
+        try:
+            ensure_package("pooch")
+            import pooch
+            path, filename = os.getcwd(), "cell_cycle_vignette_files.zip"
+            p_zip = pooch.retrieve(
+                "https://www.dropbox.com/s/3dby3bjsaf5arrw/cell_cycle_vignette_files.zip?dl=1",
+                known_hash="sha256:6557fe2a2761d1550d41edf61b26c6d5ec9b42b4933d56c3161164a595f145ab",
+                path=path,fname=filename
+            )
+        except Exception as e:
+            print(f"[gene_annotator] Failed to retrieve database because of {e}, \n "
+                  f"try downloading manually, from https://www.ensembl.org/biomart/martview")
+            return
+    else:
+        p_zip = cyc_annot_path
+
+    with zipfile.ZipFile(p_zip, "r") as f_zip:
+        cell_cycle_genes = zipfile.Path(f_zip, "regev_lab_cell_cycle_genes.txt").read_text().splitlines()
+
+    s_genes = [x for x in cell_cycle_genes[:43] if x in adata.var_names]
+    g2m_genes = [x for x in cell_cycle_genes[43:] if x in adata.var_names]
+    adata.uns["s_genes"] = s_genes
+    adata.uns["g2m_genes"] = g2m_genes
+    sc.tl.score_genes_cell_cycle(adata, s_genes=s_genes, g2m_genes=g2m_genes)
+
+def _mrh_annotator(adata):
+    # 基本基因注释
+    # mitochondrial genes
+    adata.var["mt"] = adata.var_names.str.startswith("MT-")
+    # ribosomal genes
+    # adata.var["ribo"] = adata.var_names.str.startswith(("RPS", "RPL"))
+    adata.var["ribo"] = [bool(re.search(r"^RP[SL]\d|^RPLP\d|^RPSA", x)) for x in adata.var_names]
+    # hemoglobin genes.
+    adata.var["hb"] = adata.var_names.str.contains("^HB[^(P)]")
 
 
 
