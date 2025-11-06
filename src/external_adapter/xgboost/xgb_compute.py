@@ -1,8 +1,7 @@
 # Standard library
 import os
-import sys
-import gc
 from collections import Counter
+from typing import Any
 
 # Third-party
 import numpy as np
@@ -10,17 +9,16 @@ import scanpy as sc
 import xgboost as xgb
 import seaborn as sns
 import shap
+
 from sklearn.model_selection import StratifiedGroupKFold
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import (StandardScaler, label_binarize)
 from sklearn.decomposition import PCA
+from sklearn.metrics import (accuracy_score, classification_report, plot_confusion_matrix,
+                                 roc_curve, roc_auc_score)
 
 import matplotlib
 matplotlib.use("Agg")  # 必须在导入 pyplot 之前设置后端
 import matplotlib.pyplot as plt
-
-
-# from src.core.base_anndata_ops import subcluster
-
 
 
 class SkipThis(Exception):
@@ -111,11 +109,12 @@ def _xgb_oversample_data(
         raise ValueError("mode must be 'random' or 'smote'")
 
 
-def _prepare_subset(adata, obs_select, obs_key, group_key, min_samples_per_class=10, verbose=True):
+def _prepare_subset(adata, obs_select, obs_key, group_key,
+                    categorical_key="disease_type", min_samples_per_class=10, verbose=True):
     """
     根据 obs_select 选择子集，并做初步过滤：
     - 如果 obs_select=None，返回全数据
-    - 如果 obs_select 是单个亚群，要求该亚群每个 disease 至少有2个 patient，且总样本数>=min_samples_per_class
+    - 如果 obs_select 是单个亚群，要求该亚群每个 disease 至少有 2个 patient，且总样本数 >= min_samples_per_class
     - 如果 obs_select 是多个亚群，逐个检查，去掉不满足条件的
     """
     import numpy as np
@@ -133,12 +132,12 @@ def _prepare_subset(adata, obs_select, obs_key, group_key, min_samples_per_class
 
     # （1）单亚群情况
     if isinstance(obs_select, str) or (isinstance(obs_select, (list, np.ndarray)) and len(obs_select) == 1):
-        counts_per_disease = adata_sub.obs.groupby("disease_type")[group_key].nunique()
+        counts_per_disease = adata_sub.obs.groupby(categorical_key)[group_key].nunique()
         valid_diseases = counts_per_disease[(counts_per_disease >= 2) &
                                             (adata_sub.obs.groupby(
-                                                "disease_type").size() >= min_samples_per_class)].index
+                                                categorical_key).size() >= min_samples_per_class)].index
         removed = counts_per_disease.index.difference(valid_diseases)
-        adata_sub = adata_sub[adata_sub.obs["disease_type"].isin(valid_diseases)].copy()
+        adata_sub = adata_sub[adata_sub.obs[categorical_key].isin(valid_diseases)].copy()
         if verbose and len(removed) > 0:
             print(
                 f"--> Removed disease groups (not enough patients or samples <{min_samples_per_class}): {list(removed)}")
@@ -148,7 +147,7 @@ def _prepare_subset(adata, obs_select, obs_key, group_key, min_samples_per_class
         valid_celltypes = []
         for ct in obs_select:
             adata_ct = adata_sub[adata_sub.obs[obs_key] == ct]
-            counts_per_disease = adata_ct.obs.groupby("disease_type")[group_key].nunique()
+            counts_per_disease = adata_ct.obs.groupby(categorical_key)[group_key].nunique()
             total_counts = adata_ct.shape[0]
             if (counts_per_disease >= 2).all() and total_counts >= min_samples_per_class:
                 valid_celltypes.append(ct)
@@ -161,37 +160,37 @@ def _prepare_subset(adata, obs_select, obs_key, group_key, min_samples_per_class
     return adata_sub
 
 
-def _check_and_filter_diseases(adata_sub, group_key, min_samples_per_class=10, verbose=True):
+def _check_and_filter_diseases(adata_sub, group_key, categorical_key="disease_type", min_samples_per_class=10, verbose=True):
     """
     检查并过滤疾病分组：
     - 每个疾病至少有 2 个不同的 patient
     - 每个疾病总样本数 >= min_samples_per_class
     - 至少保留 2 个疾病分类，否则报错
     """
-    counts_per_disease = adata_sub.obs.groupby("disease_type")[group_key].nunique()
-    total_counts = adata_sub.obs.groupby("disease_type").size()
+    counts_per_disease = adata_sub.obs.groupby(categorical_key)[group_key].nunique()
+    total_counts = adata_sub.obs.groupby(categorical_key).size()
 
     valid_diseases = counts_per_disease[(counts_per_disease >= 2) & (total_counts >= min_samples_per_class)].index
     removed = counts_per_disease.index.difference(valid_diseases)
 
-    adata_sub = adata_sub[adata_sub.obs["disease_type"].isin(valid_diseases)].copy()
+    adata_sub = adata_sub[adata_sub.obs[categorical_key].isin(valid_diseases)].copy()
 
     if verbose:
         if len(removed) > 0:
-            print(f"--> Removed disease groups: {list(removed)}")
-        print("--> Remaining diseases:", list(adata_sub.obs["disease_type"].unique()))
+            print(f"--> Removed categories: {list(removed)}")
+        print("--> Remaining categories:", list(adata_sub.obs[categorical_key].unique()))
 
-    if adata_sub.obs["disease_type"].nunique() <= 1:
+    if adata_sub.obs[categorical_key].nunique() <= 1:
         raise SkipThis("Not enough disease groups left for classification after filtering.")
 
     return adata_sub
 
 
-def _encode_labels(adata_sub, label_key="disease_type", verbose=True):
+def _encode_labels(adata_sub, categorical_key="disease_type", verbose=True):
     """
     将标签编码为整数 codes，同时返回映射字典
     """
-    y = adata_sub.obs[label_key].astype("category")
+    y = adata_sub.obs[categorical_key].astype("category")
     y = y.cat.remove_unused_categories()
 
     y_codes = y.cat.codes.values
@@ -336,19 +335,20 @@ def _compute_sample_weights(y_train):
     return sample_weights
 
 
-def _save_dataset(save_path, method, X_train, X_test, y_train, y_test,
+def _save_dataset(save_path, X_train, X_test, y_train, y_test,
                   train_obs_index, test_obs_index, sample_weights, mapping,
-                  file_name=None, verbose=True):
+                  filename_prefix=None, verbose=True):
     """
     保存数据集为压缩 npz 文件
     """
 
     os.makedirs(save_path, exist_ok=True)
 
-    if file_name is None:
-        file_path = os.path.join(save_path, f"dataset_{method}.npz")
+    if filename_prefix is None:
+        file_path = os.path.join(save_path, f"dataset.npz")
     else:
-        file_path = os.path.join(save_path, f"{file_name}_{method}.npz")
+        file_path = os.path.join(save_path, f"{filename_prefix}_dataset.npz")
+
     np.savez_compressed(
         file_path,
         X_train=X_train,
@@ -372,6 +372,7 @@ def xgb_data_prepare(
         method="scvi",
         obs_key="Subset_Identity",
         group_key="Patient",
+        categorical_key="disease_type",
         test_size=0.2,
         verbose=True,
         random_state=42,
@@ -384,17 +385,30 @@ def xgb_data_prepare(
     print("[xgb_data_prepare] Start preparting XGB training data.")
     # 1. 子集 & 初步过滤
     print("[xgb_data_prepare] Start filtering.")
-    adata_sub = _prepare_subset(adata, obs_select, obs_key, group_key, min_samples_per_class, verbose)
-    adata_sub = _check_and_filter_diseases(adata_sub, group_key, min_samples_per_class, verbose)
+    # 最小实验单元是 patient
+    adata_sub = _prepare_subset(adata,
+                                obs_select=obs_select,
+                                obs_key=obs_key,
+                                group_key=group_key,
+                                categorical_key=categorical_key,
+                                min_samples_per_class=min_samples_per_class,
+                                verbose=verbose)
+    adata_sub = _check_and_filter_diseases(adata_sub,
+                                           group_key=group_key,
+                                           categorical_key=categorical_key,
+                                           min_samples_per_class=min_samples_per_class,
+                                           verbose=verbose)
 
     # 2. 标签编码
     print("[xgb_data_prepare] Start labeling tags.")
-    y_codes, mapping, y = _encode_labels(adata_sub, "disease_type", verbose)
+    y_codes, mapping, y = _encode_labels(adata_sub,
+                                         categorical_key=categorical_key,
+                                         verbose=verbose)
 
     # 3. 分层分组划分
     print("[xgb_data_prepare] Start stratifying.")
     groups = adata_sub.obs[group_key].values
-    min_patients_per_disease = adata_sub.obs.groupby("disease_type")[group_key].nunique().min()
+    min_patients_per_disease = adata_sub.obs.groupby(categorical_key)[group_key].nunique().min()
     n_splits = min(int(1 / test_size), min_patients_per_disease)
     sgkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     train_idx, test_idx, y_codes, class_mapping = _stratified_group_split(
@@ -440,6 +454,7 @@ def xgb_data_prepare(
     sample_weights = _compute_sample_weights(y_train) if weightsample else None
 
     # 7. 保存
+    # 默认保存在 f"{save_path}/dataset.npz"
     _save_dataset(save_path, method, X_train, X_test, y_train, y_codes[test_idx],
                   train_obs_index, adata_sub.obs.index[test_idx],
                   sample_weights, mapping)
@@ -449,12 +464,12 @@ def xgb_data_prepare(
 
 
 def xgb_data_prepare_lodo(
-        adata,
+        adata,save_path,
         obs_select=None,
-        save_path=None,
-        method="scvi",
         obs_key="Subset_Identity",
+        method="combined",
         group_key="Patient",
+        categorical_key="disease_type",
         test_size=0.2,
         verbose=False,
         random_state=42,
@@ -462,25 +477,65 @@ def xgb_data_prepare_lodo(
         weightsample=True,
         min_samples_per_class=10
 ):
-    '''
-    lodo 模式的数据准备，虽然数据量大但是还是一次性准备了，
-    一次性生成符合标准
-    有助于函数的整体性，时候可以清理保存的数据
-    :return: 不返回，只保存
-    '''
+    """
+    Prepare XGB data for Leave-One-Out (LODO) cross-validation.
+
+    Parameters
+    ----------
+    adata : anndata object
+        The input data.
+    obs_select : list or str
+        The list of observation keys to select for.
+    obs_key : str
+        The key to use for the observation index.
+    group_key : str
+        The key to use as the minimal unit of experiment, usually a patient.
+    categorical_key : str
+        The key to use for the celltype to learn.
+    save_path : str
+        The directory to save the results.
+    method : str
+        The method to use for feature extraction.
+    test_size : float
+        The proportion of the data to use for testing.
+    verbose : bool
+        Whether to print the results.
+    random_state : int
+        The random seed to use.
+    oversample : bool
+        Whether to oversample the data.
+    weightsample : bool
+        Whether to use sample weights.
+    min_samples_per_class : int
+        The minimum number of samples per class.
+
+    Returns
+    -------
+    None
+    """
     os.makedirs(save_path, exist_ok=True)
     print("[xgb_data_prepare_lodo] Start preparting XGB-lodo data.")
 
     # 1. 子集 & 初步过滤
     # 这一步规则完全相同：确保每个样本有 >= 2个patient，这样才能lodo；>= 2个疾病分类，这样才能学习
     print("[xgb_data_prepare_lodo] Start filtering.")
-    adata_sub = _prepare_subset(adata, obs_select, obs_key, group_key, min_samples_per_class, verbose)
-    adata_sub = _check_and_filter_diseases(adata_sub, group_key, min_samples_per_class, verbose)
+    adata_sub = _prepare_subset(adata,
+                                obs_select=obs_select,
+                                obs_key=obs_key,
+                                group_key=group_key,
+                                categorical_key=categorical_key,
+                                min_samples_per_class=min_samples_per_class,
+                                verbose=verbose)
+    adata_sub = _check_and_filter_diseases(adata_sub,
+                                           group_key=group_key,
+                                           categorical_key=categorical_key,
+                                           min_samples_per_class=min_samples_per_class,
+                                           verbose=verbose)
 
     # 2. 标签编码
     # 这一步完全相同
     print("[xgb_data_prepare_lodo] Start labeling tags.")
-    y_codes, mapping, y = _encode_labels(adata_sub, "disease_type", verbose)
+    y_codes, mapping, y = _encode_labels(adata_sub, categorical_key=categorical_key, verbose=verbose)
 
     # 3. 更新：循环分组生成子数据集，并顺带检查是否有幽灵类别不能满足
     # 由于在子集规范步骤（_check_and_filter_diseases）已经做了基本的保证，
@@ -507,7 +562,7 @@ def xgb_data_prepare_lodo(
             continue
 
         # 4. 特征提取（PCA 必须在 train 上 fit）
-        X_train, X_test = _extract_features(adata_sub, method, train_idx, test_idx,verbose)
+        X_train, X_test = _extract_features(adata_sub, method, train_idx, test_idx, verbose)
         y_train = y_codes[train_idx]
         y_test = y_codes[test_idx]
         train_obs_index = adata_sub.obs.index[train_idx.values]
@@ -516,21 +571,152 @@ def xgb_data_prepare_lodo(
         # 5: 省略了 oversample 这一步
 
         # 6. Sample weights
-        sample_weights = _compute_sample_weights(y_train,verbose) if weightsample else None
+        sample_weights = _compute_sample_weights(y_train) if weightsample else None
 
         # 7. 保存
         # 按照新格式来命名
+        # 默认保存在 f"{save_path}/LODO_{donor}_dataset.npz"
         file_name = f"LODO_{donor}"
-        _save_dataset(save_path, method, X_train, X_test, y_train, y_test,
+        _save_dataset(save_path, X_train, X_test, y_train, y_test,
                       train_obs_index, test_obs_index,
                       sample_weights, mapping, file_name)
-        print(f"[xgb_data_prepare_lodo] Sample successfully finished and saved.)
+        print(f"[xgb_data_prepare_lodo] Sample successfully finished and saved.")
 
     return
 
 
-def xgboost_read(save_path, method_suffix):
-    data = np.load(os.path.join(save_path, f"dataset_{method_suffix}.npz"), allow_pickle=True)
-    file_list = data.files
-    print(f"Containing files: {file_list}.")
-    return data
+
+def polarised_f1(y_true, y_pred):
+    '''
+    TODO：有待测试是否能够作为 XGBClassifier 对象的 eval_metric 参数传入
+    :param y_true:
+    :param y_pred:
+    :return:
+    '''
+    from sklearn.metrics import f1_score
+    mask = np.isin(y_true, [a_class, b_class])
+    return 'polarised_f1', f1_score(y_true[mask], y_pred[mask], average='macro')
+
+
+def xgboost_process(save_path, filename_prefix=None, eval_metric="mlogloss",
+                    npz_file=None, do_return=False, verbose=True, **kwargs):
+    """
+    Function to process XGB data.
+    训练 XGBoost 模型，多分类，使用 sample_weights
+    可单独指定 npz_file（便于 LODO 循环调用）
+
+    Parameters
+    ----------
+    save_path : str
+        directory to save the results
+    filename_prefix : str or None
+        suffix to add to the file name
+    eval_metric : str
+        evaluation metric
+    npz_file : str or None
+        file path to the npz file containing the data
+    do_return : bool
+        whether to return the model
+    verbose : bool
+        whether to print the results
+    **kwargs : dict
+        additional parameters to pass to the XGBClassifier
+
+    Returns
+    -------
+    clf : xgb.XGBClassifier
+        the trained model, if do_return is True
+    """
+    os.makedirs(save_path, exist_ok=True)
+
+    # 读取数据，默认不使用 npz_file 参数
+    if npz_file is None:
+        if filename_prefix is None:
+            data_path = os.path.join(save_path, f"{filename_prefix}_dataset.npz")
+        else:
+            data_path = os.path.join(save_path, f"dataset.npz")
+    else:
+        data_path = npz_file
+
+    data = np.load(data_path, allow_pickle=True)
+    X_train, X_test = data["X_train"], data["X_test"]
+    y_train, y_test = data["y_train"], data["y_test"]
+    sample_weights = data.get("sample_weights", None)
+
+    # 默认参数
+    default_pars = {
+        "objective": "softmax", # 目标函数 - 所有类被视为等价。
+
+        # 当存在过拟合/离群值的考虑时：
+        "max_depth":6, # 小群体往往在高深度树里被“单独捕捉”，过拟合时调小
+        "colsample_bytree":0.8, # 构建每棵树时列的子采样比例，越小对离群值越不敏感
+        "min_split_loss":1, # 树分裂阈值（所需最小 loss reduction），越大越保守
+        "min_child_weight":1, # 每个叶子节点最少样本数，即加权的样本量，越大越保守
+        "reg_lambda":0, # L2 正则化强度，越大越保守
+
+        # 一般不动
+        "n_estimators":500, # 提升轮数
+        "learning_rate":0.1, # 学习率/eta
+        "subsample":0.8, # 训练实例的子采样率
+        "tree_method": "exact",
+        "random_state": 42,
+        "use_label_encoder": False
+    }
+
+    default_pars.update(kwargs)
+
+    clf = xgb.XGBClassifier(**default_pars)
+
+    # 训练
+    clf.fit(
+        X_train, y_train,
+        eval_set=[(X_train, y_train), (X_test, y_test)],
+        eval_metric=eval_metric,
+        sample_weight=sample_weights,
+        verbose=False
+    )
+
+    y_pred = clf.predict(X_test)
+
+    if verbose:
+        print(f"[xgboost_process] Accuracy: {accuracy_score(y_test, y_pred):.4f}")
+        print(classification_report(y_test, y_pred))
+
+    # 保存模型
+    # 默认保存在（无filename）model.json
+    prefix = f"{filename_prefix}_" if filename_prefix else ""
+    abs_path = os.path.join(save_path, f"{prefix}model.json")
+    clf.save_model(abs_path)
+
+    if verbose:
+        print(f"[xgboost_process] Model saved at {abs_path}")
+
+    if do_return:
+        return clf
+
+
+def xgboost_process_lodo(save_path, filename_prefix=None, eval_metric="mlogloss",
+                         verbose=False, **kwargs):
+    """
+    Leave-One-Donor-Out（LODO）版本：
+    循环读取 LODO_*.npz 文件并调用 xgboost_process
+    """
+    files = [f for f in os.listdir(save_path)
+             if f.startswith("LODO_") and f.endswith(f"dataset.npz")]
+    total = len(files)
+
+    for i, file in enumerate(files, start=1):
+        donor = file.split("_")[1]
+        print(f"[xgboost_process_lodo] ({i}/{total}) Processing donor: {donor}")
+        npz_path = os.path.join(save_path, file)
+
+        xgboost_process(
+            save_path=save_path,
+            filename_prefix=filename_prefix,
+            eval_metric=eval_metric,
+            npz_file=str(npz_path),
+            verbose=verbose,
+            **kwargs
+        )
+
+    print("[xgboost_process_lodo] All donors processed.")
