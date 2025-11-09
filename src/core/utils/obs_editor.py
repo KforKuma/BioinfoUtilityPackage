@@ -12,7 +12,7 @@ from src.utils.env_utils import ensure_package
 class ObsEditor:
     """工具类：专门用于编辑 AnnData.obs 的各种操作"""
 
-    def __init__(self, adata: ad.AnnData):
+    def __init__(self, adata: AnnData):
         self.adata = adata
 
     @staticmethod
@@ -60,7 +60,7 @@ class ObsEditor:
     def assign_cluster_identities(self, annotator, anno_obs_key, target_obs_keys):
         """
         将聚类结果的身份注释写入 AnnData.obs 中.
-        函数曾用名：make_new_ident.
+        函数曾用名：make_new_ident, easy_new_ident.
 
         使用例：
         ObsEditorClass.assign_cluster_identities(annotator = ["T_cell", "B_cell", "Mono", ...],
@@ -154,6 +154,33 @@ class ObsEditor:
 
 
 def gene_annotator(adata: AnnData, chr_annot_path=None, cyc_annot_path=None):
+    """
+    Annotate genes with chromosomal, cell cycle and mito/ribo/hb information.
+
+    Parameters
+    ----------
+    adata : AnnData
+        The AnnData object to be annotated.
+    chr_annot_path : str
+        The path to the chromosomal information file. If not given, it will be downloaded from Ensembl Biomart.
+    cyc_annot_path : str
+        The path to the cell cycle information file. If not given, it will be downloaded from the vignette server.
+
+    Example
+    -------
+    adata = gene_annotator(adata)
+
+    Returns
+    -------
+    adata : AnnData
+        The AnnData object with chromosomal, cell cycle and mito/ribo/hb information annotated.
+
+    Notes
+    -----
+    The chromosomal information will be annotated to adata.var. The key "X" will be set to True for genes on the X chromosome, and the key "Y" will be set to True for genes on the Y chromosome.
+    The cell cycle information will be annotated to adata.obs. The key "phase" will store the phase information, the key "G2M_score" will store the G2/M score, and the key "S_score" will store the S score.
+    The mito/ribo/hb information will be annotated to adata.var. The key "mt" will be set to True for mitochondrial genes, the key "ribo" will be set to True for ribosomal genes, and the key "hb" will be set to True for hemoglobin genes.
+    """
     for name, func, path in [
         ("chromosomal", _chr_annotator, chr_annot_path),
         ("cell cycle", _cyc_annotator, cyc_annot_path),
@@ -169,8 +196,24 @@ def gene_annotator(adata: AnnData, chr_annot_path=None, cyc_annot_path=None):
 
 
 def _chr_annotator(adata: AnnData, chr_annot_path: str = None):
+    """
+    Annotates chromosomal information to adata.
 
-    # 数据库准备
+    Parameters
+    ----------
+    adata : AnnData
+        The AnnData object to be annotated.
+    chr_annot_path : str
+        The path to the chromosomal information file. If not given, it will be downloaded from Ensembl Biomart.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    The chromosomal information will be annotated to adata.var. The key "X" will be set to True for genes on the X chromosome, and the key "Y" will be set to True for genes on the Y chromosome.
+    """
     if chr_annot_path is None or not os.path.exists(chr_annot_path):
         print("[gene_annotator] Try retrieving chromosomal info from Ensembl Biomart.")
         try:

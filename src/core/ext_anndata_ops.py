@@ -6,7 +6,7 @@ def generate_subclusters_by_identity(
         adata: anndata.AnnData,
         identity_key: str = "Subset_Identity",
         cell_idents_list: list = None,
-        resolutions: list = [0.5, 1.0],
+        resolutions: list = None,
         output_dir: str = ".",
         use_rep: str = "X_scVI",
         subcluster_func=None,
@@ -40,6 +40,8 @@ def generate_subclusters_by_identity(
     os.makedirs(output_dir, exist_ok=True)
     if cell_idents_list is None:
         cell_idents_list = adata.obs[identity_key].unique()
+    if resolutions is None:
+        resolutions = [0.5, 1.0]
 
     for ident in cell_idents_list:
         print(f"\n🔍 Now processing subset: {ident}")
@@ -85,4 +87,50 @@ def analysis_DEG(adata_subset, file_name, groupby_key, output_dir,downsample,use
         adata_subset,
         prefixx=f"{file_name}_{groupby_key}",
         out_dir=output_dir
+    )
+
+from src.utils.env_utils import count_element_list_occurrence
+from src.core.base_anndata_ops import easy_DEG, remap_obs_clusters
+
+
+def run_pca_and_deg_for_celltype(celltype, merged_df_filtered, adata, save_dir,
+                                 figsize=(12, 10),
+                                 pca_fig_prefix="among_disease", DEG_file_suffix="by_PCA_cluster"):
+    if isinstance(celltype, (list, tuple)):
+        print(f"Processing multiple celltypes.")
+        column_mask = [col for col in merged_df_filtered.columns if col.split("_")[-2] in celltype]
+        celltype_use_as_name = "-".join(celltype)
+    else:
+        print(f"Processing {celltype}")
+        column_mask = [col for col in merged_df_filtered.columns if col.split("_")[-2] == celltype]
+        celltype_use_as_name = celltype
+
+    celltype_use_as_name = celltype_use_as_name.replace(" ", "-")
+
+    if not column_mask:
+        print(f"No columns found for {celltype}")
+        return None
+
+    df_split = merged_df_filtered.loc[:, column_mask]
+    result_df, pca = pca_process(df_split, save_dir, figname=f"{pca_fig_prefix}({celltype_use_as_name})",
+                                 figsize=figsize)
+    cluster_to_labels = pca_cluster_process(result_df, save_dir,
+                                            figname=f"{pca_fig_prefix}({celltype_use_as_name})", figsize=figsize)
+
+    if not cluster_to_labels:
+        print(f"!{celltype} cannot be clustered, skipped.")
+        return None
+
+    print(cluster_to_labels)
+    adata_combined = remap_obs_clusters(adata, cluster_to_labels)
+
+    easy_DEG(
+        adata_combined,
+        save_addr=save_dir,
+        filename=f"{pca_fig_prefix}_{celltype_use_as_name}({DEG_file_suffix})",
+        obs_key="cluster",
+        save_plot=True,
+        plot_gene_num=10,
+        downsample=5000,
+        use_raw=True
     )

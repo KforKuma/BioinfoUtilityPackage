@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import scanpy as sc
 import numpy as np
+import scipy as sp
 
 import gc, os
 import re
@@ -340,6 +341,91 @@ def get_cluster_proportions(adata, obs_key="Subset_Identity", group_by="orig.pro
     return props
 
 
+def check_counts_layer(adata, layer="counts"):
+    """
+    检查 adata.layers 中的 'counts' 层是否满足以下条件：
+    - 存在于 adata.layers 中
+    - 数据类型为整数
+    - 不包含负值
+    - 不包含 NaN 和 Inf
+    """
+
+    if layer not in adata.layers:
+        raise KeyError(f"Layer '{layer}' 不存在于 adata.layers 中。")
+
+    counts = adata.layers[layer]
+
+    # 数据类型检查
+    if isinstance(counts, np.ndarray):
+        dtype = counts.dtype
+    elif sp.isspmatrix(counts):
+        dtype = counts.dtype
+    else:
+        raise TypeError(f"{layer} 既不是 ndarray 也不是稀疏矩阵")
+    print(f"{layer}.dtype = {dtype}")
+    if not np.issubdtype(dtype, np.integer):
+        raise TypeError(f"{layer} 不是整数类型！")
+
+    # 非负性检查
+    if isinstance(counts, np.ndarray):
+        min_val = counts.min()
+    else:
+        min_val = counts.data.min()
+    print(f"{layer} 最小值 = {min_val}")
+    if min_val < 0:
+        raise ValueError(f"{layer} 存在负值 {min_val}！")
+
+    # NaN 与 Inf 检查
+    if isinstance(counts, np.ndarray):
+        has_nan = np.isnan(counts).any()
+        has_inf = np.isinf(counts).any()
+    else:
+        has_nan = np.isnan(counts.data).any()
+        has_inf = np.isinf(counts.data).any()
+    print(f"{layer} 含 NaN？{has_nan}, 含 Inf？{has_inf}")
+    if has_nan:
+        raise ValueError(f"{layer} 中存在 NaN！")
+    if has_inf:
+        raise ValueError(f"{layer} 中存在 Inf！")
+
+    print(f"{layer} 检查通过：未归一化、整数、无 NaN/Inf。")
+
+
+def remap_obs_clusters(adata, mapping, obs_key="tmp", new_key="cluster"):
+    """
+    将 adata.obs[obs_key] 中的多个标签映射到新的聚类标签（多对一映射）。
+
+    Example
+    -------
+    mapping = ["Immune":["T Cell", "B Cell"], "Non-Immune":["Fibroblast","Epithelium"]]
+    adata = remap_obs_cluster(adata, mapping, obs_key="Celltype", new_key="isImmune")
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        输入 AnnData 对象。
+    mapping : dict[str, list[str]]
+        映射关系，例如 {"clusterA": ["a1", "a2"], "clusterB": ["b1"]}。
+    obs_key : str, default "tmp"
+        原始 obs 列名。
+    new_key : str, default "cluster"
+        新的 obs 列名。
+
+    Returns
+    -------
+    anndata.AnnData
+        返回带有新 obs 列的 AnnData 对象。
+    """
+    # 反转 mapping：label -> cluster
+    label_to_cluster = {
+        label: cluster for cluster, labels in mapping.items() for label in labels
+    }
+
+    adata = adata.copy()
+    adata.obs[new_key] = adata.obs[obs_key].map(label_to_cluster)
+    adata.obs[new_key] = adata.obs[new_key].astype("category")
+
+    return adata
 
 
 

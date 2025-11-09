@@ -12,6 +12,16 @@ from src.core.utils.plot_wrapper import ScanpyPlotWrapper
 from src.core.base_anndata_ops import sanitize_filename
 # from src.utils.geneset_editor import Geneset
 
+def _matplotlib_savefig(fig, abs_file_path):
+    os.makedirs(os.path.dirname(abs_file_path), exist_ok=True)
+    base, ext = os.path.splitext(abs_file_path)
+    if ext.lower() not in [".png", ".pdf"]:
+        fig.savefig(base + ".png", bbox_inches="tight", dpi=300)
+        fig.savefig(base + ".pdf", bbox_inches="tight", dpi=300)
+    else:
+        fig.savefig(abs_file_path, bbox_inches="tight", dpi=300)
+
+
 def geneset_dotplot(adata,
                     markers, marker_sheet,
                     output_dir, filename_prefix, groupby_key, use_raw=True, **kwargs):
@@ -98,6 +108,7 @@ def plot_stacked_bar(cluster_counts,
                      cluster_palette=None,
                      xlabel_rotation=0,
                      plot=True,
+                     save_addr=None,
                      filename_prefix=None,
                      save=True):
     """
@@ -137,6 +148,12 @@ def plot_stacked_bar(cluster_counts,
     if not plot and not save:
         raise ValueError("At least one of `plot` or `save` must be True.")
 
+    # 处理图像名
+    if save_addr is None:
+        save_addr=os.getcwd()
+    filename = "Stacked_Barplot" if filename_prefix is None else f"{filename_prefix}_Stacked_Barplot"
+    abs_fig_path = os.path.join(save_addr, filename)
+
     fig, ax = plt.subplots(dpi=300)
     fig.patch.set_facecolor("white")
 
@@ -151,18 +168,11 @@ def plot_stacked_bar(cluster_counts,
 
     # 保存图像部分
     if save:
-        filename = "StackedBarplot" if filename_prefix is None else f"{filename_prefix}_StackedBarplot"
-        os.makedirs(os.path.dirname(filename), exist_ok=True)
-        base, ext = os.path.splitext(filename)
-        if ext.lower() not in [".png", ".pdf"]:
-            fig.savefig(base + ".png", bbox_inches="tight")
-            fig.savefig(base + ".pdf", bbox_inches="tight")
-        else:
-            fig.savefig(filename, bbox_inches="tight")
+        _matplotlib_savefig(fig, abs_fig_path)
 
     # 返回或关闭图像
     if plot:
-        return fig
+        fig.show()
     else:
         plt.close(fig)
 
@@ -189,7 +199,6 @@ def plot_stacked_violin(adata,
     if len(gene_dict) == 0 or next(iter(gene_dict.values())) is None:
         raise ValueError("[easy_stack_violin] gene_dict must contain at least one gene.")
 
-    from src.core.utils.plot_wrapper import ScanpyPlotWrapper
     stacked_violin = ScanpyPlotWrapper(func=sc.pl.stacked_violin)
 
     for k, v in gene_dict.items():
@@ -222,3 +231,211 @@ def plot_stacked_violin(adata,
             )
 
 
+def plot_cosg_rankplot(adata, groupby, save_addr=None,csv_name=None, filename=None, top_n=5, do_return=False):
+    """
+    Plot the rank plot for COSG marker genes.
+
+    Parameters
+    ----------
+    adata : AnnData
+        The annotated data matrix.
+    groupby : str
+        Key for grouping the data.
+    csv_name : str
+        The file name for saving the COSG marker genes.
+    save_addr : str, optional
+        The directory for saving the rank plot.
+    filename : str, optional
+        The file name for saving the rank plot.
+    top_n : int, optional
+        The number of top genes to select for each group.
+    do_return : bool, optional
+        Whether to return the data and markers.
+
+    Returns
+    -------
+    adata : AnnData
+        The data with COSG marker genes.
+    markers : dict
+        The top genes for each group.
+
+    """
+    import cosg
+
+    dotplot = ScanpyPlotWrapper(func=sc.pl.dotplot)
+
+    if filename is None:
+        filename="Cosg_HVG_Dotplot"
+
+    if save_addr is None:
+        save_addr=os.getcwd()
+
+    if csv_name is None:
+        csv_name="Cosg_HVG.csv"
+
+    abs_csv_path = os.path.join(save_addr, csv_name)
+
+    # 1. 计算COSG marker
+    cosg.cosg(adata, key_added='cosg', mu=1, n_genes_user=100, groupby=groupby)
+
+    # 2. 保存结果
+    result = adata.uns['cosg']
+    df = pd.concat(result, axis=1)
+    df.to_csv(abs_csv_path)
+
+    # 3. 提取top_n
+    markers = {c: df.loc[:top_n-1, ('names', c)].tolist()
+               for c in adata.obs[groupby].cat.categories}
+
+    # 4. 绘图
+    dotplot(save_addr, filename,
+            cmap='Spectral_r', use_raw=False, standard_scale='var',show=False)
+
+    if do_return:
+        return adata, markers
+
+
+def plot_piechart(outer_count, inner_count, colormaplist,
+                  plot_title=None, plot=False, save=True, save_path=None,filename=None):
+    """
+    绘制内外双层饼图（OO风格）
+    """
+    if plot_title is None:
+        plot_title = "Piechart"
+
+    if save_path is None:
+        save_path=os.getcwd()
+
+    if filename is None:
+        filename="Piechart"
+
+    abs_fig_path=os.path.join(save_path,filename)
+
+    # 1️⃣ 创建 Figure 与 Axes 对象
+    fig, ax = plt.subplots(figsize=(6, 6))
+
+    # 2️⃣ 绘制外环
+    ax.pie(
+        x=outer_count,
+        colors=colormaplist,
+        radius=0.8,
+        pctdistance=0.765,
+        autopct='%3.1f%%',
+        labels=outer_count.index.tolist(),
+        textprops=dict(color="w"),
+        wedgeprops=dict(width=0.3, edgecolor='w')
+    )
+
+    # 3️⃣ 绘制内环
+    ax.pie(
+        x=inner_count,
+        autopct="%3.1f%%",
+        radius=1.0,
+        pctdistance=0.85,
+        colors=colormaplist,
+        textprops=dict(color="w"),
+        labels=inner_count.index.tolist(),
+        wedgeprops=dict(width=0.3, edgecolor='w')
+    )
+
+    # 4️⃣ 标题和图例
+    ax.set_title(plot_title, fontsize=10)
+    ax.legend(
+        loc='upper center',
+        bbox_to_anchor=(1, 0.5)
+    )
+
+    # 5️⃣ 保存或显示
+    if save:
+        _matplotlib_savefig(fig,abs_fig_path)
+
+    if plot:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+def _format_labels_in_lines(labels, max_line_length=60, max_label=None):
+    '''
+    为图注自动换行：限制每行最大字符数
+    :param labels: list of str
+    :param max_line_length: 每行最多字符数
+    :param max_label: 最多展示多少个 label
+    :return: formatted string with \n
+    '''
+    if max_label:
+        labels = labels[:max_label]
+        if len(labels) < len(labels):
+            labels.append("...")
+
+    lines = []
+    current_line = ""
+
+    for label in labels:
+        label_str = label if current_line == "" else ", " + label
+        # 如果当前加上这个 label 会超限，先收行
+        if len(current_line + label_str) > max_line_length:
+            lines.append(current_line)
+            current_line = label
+        else:
+            current_line += label_str
+
+    if current_line:
+        lines.append(current_line)
+
+    return "  " + "\n  ".join(lines) + "\n  "
+
+
+def _formate_tidy_label(cluster_to_labels):
+    '''
+    返回一个重整细胞名的字典，格式为 "[disease] subtype"
+    '''
+    new_dict = {}
+    for cluster_id, labels in cluster_to_labels.items():
+        new_labels = []
+        labels.sort()
+        for label in labels:
+            try:
+                dis = "_".join(label.split("_")[:-2])
+                celltype = label.split("_")[-2]
+                cellsubtype = label.split("_")[-1]
+                new_label = f"[{dis}] {cellsubtype}"
+            except ValueError:
+                # 如果格式不符，保持原样
+                new_label = label
+            new_labels.append(new_label)
+        new_dict[cluster_id] = new_labels
+    return new_dict
+
+
+def plot_pca_with_cluster_legend(result_df, cluster_to_labels, save_dir, figname, only_show=5, figsize=(10, 6)):
+    plt.figure(figsize=figsize)
+
+    # Step 1: 画 PCA 聚类散点图
+    sns.scatterplot(
+        data=result_df,
+        x="PC1", y="PC2",
+        hue="cluster",
+        palette="tab10",
+        s=100,
+        legend='full'
+    )
+
+    # Step 2: 构造右侧图注文字
+    legend_text = ""
+    cluster_to_labels = _formate_tidy_label(cluster_to_labels)
+    for cluster_id, labels in cluster_to_labels.items():
+        label_str = _format_labels_in_lines(labels, max_label=only_show)
+        legend_text += f"Cluster {cluster_id}: \n{label_str}\n"
+
+    # Step 3: 添加注释文字（图右侧）
+    plt.gcf().text(0.8, 0.5, legend_text,
+                   fontsize=10, linespacing=1.8,
+                   va='center', ha='left')
+
+    # Step 4: 调整图布局
+    plt.title("PCA with KMeans Clustering")
+    plt.xlabel("PC1")
+    plt.ylabel("PC2")
+    plt.tight_layout(rect=[0, 0, 0.75, 1])  # 让右侧有空间
+    plt.savefig(f"{save_dir}/{figname}_PCA_cluster.png", dpi=300, bbox_inches="tight")
