@@ -10,6 +10,36 @@ An integrated package mainly devoted for anndata/scanpy workflow, helps you:
 
 (4) plug your data in and out of some external tools, like CPDB.
 
+
+**Features**
+
+- *ScanpyPlotWrapper* class: a wrapper helps u save every plot
+
+
+- *ObsEditor* class:
+
+  sometimes u need to adjust cell identities repetitively, copy idents from one object to the other.
+
+  This helps ur code get readable.
+
+  
+- *Geneset* class: for better reusing gene signatures.
+
+  Writing down gene signatures in the code is an eyesore, but sometimes u just pop up an idea.
+
+  This helps u read, update, and save a good format of gene signatures. No more `my_marker_dict` everywhere.
+
+- Anndata toolbox
+
+  Easiest ways for invoking some most standardised protocol, like finding DEG, or dim-reduction plus clustering.
+
+  Some better adjust for existing code, like `score_genes` or downsample. And more.
+
+- Adaptors for your AnnData to external function, currently including pyscenic, cellphonedb v5, and xgboost.
+
+
+ **Upcoming Plan**
+
 **Installation Instructions**
 
 Currently under construction. So just go import lol.
