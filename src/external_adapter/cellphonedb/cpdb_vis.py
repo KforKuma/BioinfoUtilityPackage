@@ -72,7 +72,8 @@ def cpdb_heatmap(CIObject,
 
     # --- 输出路径与保存 ---
     os.makedirs(output_dir, exist_ok=True)
-    filename="CPDB_Heatmap" if filename_prefix is None else f"{filename_prefix}_CPDB_Heatmap"
+    prefix = f"{filename_prefix}_" if filename_prefix else ""
+    filename=f"{prefix}CPDB_Heatmap"
     base_path = os.path.join(output_dir, filename)
     if save_pdf:
         fig.savefig(f"{base_path}.pdf", dpi=300, bbox_inches="tight")
@@ -150,7 +151,8 @@ def cpdb_dotplot(CIObject,AnndataObject,
 
     # --- 输出路径与保存 ---
     os.makedirs(output_dir, exist_ok=True)
-    filename = "CPDB_Dotplot" if filename_prefix is None else f"{filename_prefix}_CPDB_Heatmap"
+    prefix = f"{filename_prefix}_" if filename_prefix else ""
+    filename = f"{prefix}CPDB_Heatmap"
     base_path = os.path.join(output_dir, filename)
     if save_pdf:
         g.save(f"{base_path}.pdf", dpi=300, bbox_inches="tight")
@@ -212,7 +214,8 @@ def cpdb_chordplot(CIObject,AnndataObject,
 
     # --- 输出路径与保存 ---
     os.makedirs(output_dir, exist_ok=True)
-    filename = "CPDB_Chordplot" if filename_prefix is None else f"{filename_prefix}_CPDB_Heatmap"
+    prefix = f"{filename_prefix}_" if filename_prefix else ""
+    filename = f"{prefix}CPDB_Heatmap"
     base_path = os.path.join(output_dir, filename)
     if save_pdf:
         g.save(f"{base_path}.pdf", dpi=300, bbox_inches="tight")
