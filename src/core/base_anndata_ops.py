@@ -14,7 +14,8 @@ import sys
 sys.stdout.reconfigure(encoding='utf-8')
 matplotlib.use('Agg')  # 使用无GUI的后端
 
-# import src.ScanpyTools.Scanpy_Plot as scanpy_plot
+from src.utils.env_utils import ensure_package
+from src.core.base_anndata_vis import _plot_pca
 
 def subcluster(adata, n_neighbors=20, n_pcs=50, skip_DR=False, resolutions=None, use_rep="X_scVI"):
     """
@@ -129,7 +130,7 @@ def obs_keywise_downsample(adata, obs_key, downsample=1000):
     return adata[indices].copy()
 
 
-def easy_DEG(adata, save_addr, filename,
+def easy_DEG(adata, save_addr, filename_prefix,
              obs_key="Subset_Identity",
              save_plot=True, plot_gene_num=5, downsample=False,
              method='wilcoxon', use_raw=False):
@@ -159,12 +160,12 @@ def easy_DEG(adata, save_addr, filename,
 
     if save_plot:
         try:
-            with plt.rc_context():
-                sc.pl.rank_genes_groups_dotplot(adata, groupby=obs_key, key=deg_key, standard_scale="var",
-                                                n_genes=plot_gene_num, dendrogram=False, use_raw=use_raw, show=False)
-                plt.savefig(f"{save_addr}{filename}_DEG_dotplot_by_{obs_key}.pdf", bbox_inches="tight", dpi=300)
-                plt.savefig(f"{save_addr}{filename}_DEG_dotplot_by_{obs_key}.png", bbox_inches="tight", dpi=300)
-                _log("Dotplot saved successfully.")
+            from src.core.utils.plot_wrapper import ScanpyPlotWrapper
+            rank_genes_groups_dotplot = ScanpyPlotWrapper(sc.pl.rank_genes_groups_dotplot)
+            rank_genes_groups_dotplot(save_addr=save_addr,filename=f"{filename_prefix}_HVG_dotplot",
+                                      adata=adata, groupby=obs_key, key=deg_key, standard_scale="var",
+                                      n_genes=plot_gene_num, dendrogram=False, use_raw=use_raw, show=False)
+            _log("Dotplot saved successfully.")
         except Exception as e:
             _log(f"Plot generation failed: {e}")
 
@@ -182,8 +183,9 @@ def easy_DEG(adata, save_addr, filename,
     df_sorted_pval = df_all.sort_values(by=['cluster', 'pvals_adj'], ascending=[True, True])
 
     # 保存到 Excel 两个 sheet 中
+    abs_csv_path = os.path.join(save_addr,f"{filename_prefix}_HVG.xlsx")
     try:
-        with pd.ExcelWriter(f"{save_addr}{filename}_HVG_{method}_{obs_key}.xlsx", engine='xlsxwriter') as writer:
+        with pd.ExcelWriter(abs_csv_path, engine='xlsxwriter') as writer:
             df_sorted_logfc.to_excel(writer, sheet_name='Sorted_by_logFC', index=False)
             df_sorted_pval.to_excel(writer, sheet_name='Sorted_by_pval', index=False)
             _log("Excel file saved successfully.")
@@ -426,6 +428,72 @@ def remap_obs_clusters(adata, mapping, obs_key="tmp", new_key="cluster"):
     adata.obs[new_key] = adata.obs[new_key].astype("category")
 
     return adata
+
+
+def _elbow_detector(ts, cluster_counts, method="kneed", default_cluster=2):
+    """
+    :param ts: x轴，簇数列表
+    :param cluster_counts: y轴，对应的聚类指标（如 inertia）
+    :param method: "MSD" or "kneed"
+    :param min_cluster: 最小簇数下限
+    :param default_cluster: 检测失败时默认返回值
+    :return: optimal cluster number
+    """
+    optimal_t = None
+
+    if method == "MSD":
+        # 简单拐点检测：最大二阶差分
+        first_diff = np.diff(cluster_counts)
+        second_diff = np.diff(first_diff)
+
+        # 拐点 = 最大弯曲点
+        elbow_idx = np.argmax(np.abs(second_diff)) + 2  # +2 to align with ts index after 2 diffs
+        optimal_t = ts[elbow_idx]
+
+    elif method == "kneed":
+        ensure_package(kneed)
+        from kneed import KneeLocator
+        kneedle = KneeLocator(ts, cluster_counts, curve='convex', direction='decreasing')
+        optimal_t = kneedle.knee
+
+    # 检查有效性
+    if optimal_t is None:
+        print(f"[_elbow_detector] Failed to fetch the elbow, using default elbow number: {default_cluster}")
+        optimal_t = default_cluster
+
+    return optimal_t
+
+
+def _run_pca(logfc_matrix, n_components=2):
+    from sklearn.decomposition import PCA
+    from sklearn.preprocessing import RobustScaler
+
+    # 转置 → 每行是一个“celltype-disease”样本，每列是基因
+    df_T = logfc_matrix.T  # shape: [samples x genes]
+
+    # 标准化（按列，即基因）
+    scaler = RobustScaler()
+    X_scaled = scaler.fit_transform(df_T)
+
+    # PCA
+    pca = PCA(n_components=n_components)
+    pca_result = pca.fit_transform(X_scaled)
+
+    # 构造结果 dataframe
+    result_df = pd.DataFrame(
+        pca_result,
+        columns=[f"PC{i + 1}" for i in range(n_components)],
+        index=df_T.index  # 每个index是 like "UC_T Cell_NK.CD16+"
+    )
+    result_df = result_df.copy()
+    result_df['label'] = result_df.index
+    result_df = result_df.reset_index(drop=True)
+
+    # 解析 label 中的疾病 & 细胞类型（可根据你的格式微调）
+    result_df['group'] = result_df['label'].apply(lambda x: '_'.join(x.split('_')[:-2]))
+    result_df['cell_type'] = result_df['label'].apply(lambda x: '_'.join(x.split('_')[-2:]))
+
+    return result_df, pca
 
 
 

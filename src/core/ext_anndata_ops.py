@@ -1,7 +1,13 @@
 import pandas as pd
 import anndata
+import scanpy as sc
+import re
 import os,gc
 
+# from src.utils.env_utils import count_element_list_occurrence
+from src.core.base_anndata_ops import easy_DEG, remap_obs_clusters, sanitize_filename, _run_pca, subcluster
+from src.core.base_anndata_vis import _pca_cluster_process, process_resolution_umaps, geneset_dotplot, plot_QC_umap
+from src.core.utils.plot_wrapper import ScanpyPlotWrapper
 def generate_subclusters_by_identity(
         adata: anndata.AnnData,
         identity_key: str = "Subset_Identity",
@@ -76,61 +82,259 @@ def generate_subclusters_by_identity(
         gc.collect()
 
 
-def analysis_DEG(adata_subset, file_name, groupby_key, output_dir,downsample,use_raw,skip_QC=False):
-    from src.core.base_anndata_ops import easy_DEG
-    # from
-    print(f"--> Starting differential expression analysis for group '{groupby_key}'...")
-    easy_DEG(adata_subset, save_addr=output_dir, filename=file_name, obs_key=groupby_key,
-             save_plot=True, plot_gene_num=5, downsample=downsample,use_raw=use_raw)
-    # 基础QC图
-    Basic_QC_Plot(
-        adata_subset,
-        prefixx=f"{file_name}_{groupby_key}",
-        out_dir=output_dir
-    )
+def split_and_DEG(adata, subset_list, obs_key, groupby_key, output_dir, count_thr=30, downsample=5000):
+    '''
+    【探索】 对每个亚群进行分组拆分，观察其 DEG
 
-from src.utils.env_utils import count_element_list_occurrence
-from src.core.base_anndata_ops import easy_DEG, remap_obs_clusters
+    Example
+    -------
+    celllist = adata.obs["Subset_Identity"].unique().tolist()
+    split_and_DEG(subset_list=celllist,subset_key="Subset_Identity", split_by_key="disease", output_dir=output_dir)
+
+    :param adata:
+    :param subset_list:
+    :param obs_key:
+    :param groupby_key:
+    :param output_dir:
+    :param count_thr:
+    :param downsample:
+    :return:
+    '''
+    for subset in subset_list:
+        print(f"[split_and_DEG] Processing subset: {subset}")
+
+        save_dir = f"{output_dir}/_{subset}"
+        print(f"[split_and_DEG] Creating output directory: {save_dir}")
+        os.makedirs(save_dir, exist_ok=True)  # 避免目录已存在时报错
+
+        print(f"[split_and_DEG] Subsetting data for: {subset}")
+        adata_subset = adata[adata.obs[obs_key] == subset]
+
+        # 筛选掉计数小于 30 的疾病亚群；目的是其存在影响在后续 PCA 聚类中对其意义进行挖掘，而且可能存在较大的偏倚
+        value_count_df = adata_subset.obs[groupby_key].value_counts()
+        disease_accountable = value_count_df.index[value_count_df >= count_thr]
+        print(f"Disease group cell counts in {subset}:\n{value_count_df}")
+
+        adata_subset = adata_subset[adata_subset.obs[groupby_key].isin(disease_accountable)]
+
+        print(f"[split_and_DEG] Running easy_DEG for: {subset}")
+        if adata_subset.n_obs < (2*count_thr):
+            print(f"[split_and_DEG] Skipped DEG for {subset}: too few cells after filtering.")
+            continue
+        else:
+            easy_DEG(
+                adata_subset,
+                save_addr=save_dir,
+                filename=f"{subset}",
+                obs_key=groupby_key,
+                save_plot=True,
+                plot_gene_num=10,
+                downsample=downsample,
+                use_raw=True
+            )
+
+        print(f"[split_and_DEG] Completed DEG analysis for: {subset}\n")
+        write_path = f"{save_dir}/Subset_by_disease.h5ad"
+        adata_subset.write(write_path)
+        del adata_subset
+        gc.collect()
 
 
-def run_pca_and_deg_for_celltype(celltype, merged_df_filtered, adata, save_dir,
+def _pca_process(merged_df, save_addr, filename_prefix, figsize=(12, 10)):
+
+    if merged_df.columns.duplicated().any():
+        print("[pca_process] Warning: There are duplicated column names!")
+        # 可加前缀防止冲突，例如按df编号
+        df_list_renamed = [
+            df.add_prefix(f"df{i}_") for i, df in enumerate(merged_df)
+        ]
+        merged_df = pd.concat(df_list_renamed, axis=1)
+
+    result_df, pca = _run_pca(merged_df, n_components=3)
+    explained_var = pca.explained_variance_ratio_
+    print(f"[pca_process] PC1 explains {explained_var[0]:.2%} of variance")
+    print(f"[pca_process] PC2 explains {explained_var[1]:.2%} of variance")
+    print(f"[pca_process] PC3 explains {explained_var[2]:.2%} of variance")
+
+    _plot_pca(result_df, pca,
+              save_addr=save_addr, filename_prefix=filename_prefix, figsize=figsize,
+              color_by='cell_type')
+    return result_df, pca
+
+def run_pca_and_deg_for_celltype(celltype, merged_df_filtered, adata, save_addr,
                                  figsize=(12, 10),
-                                 pca_fig_prefix="among_disease", DEG_file_suffix="by_PCA_cluster"):
+                                 file_prefix="20251110"):
+    '''
+    对每个/每组细胞亚群按照分组信进行拆分后，进行 PCA 聚类，观察其模式
+
+    :param celltype: list or tuple or str
+    :param merged_df_filtered:
+    :param adata:
+    :param save_addr:
+    :param figsize:
+    :param file_prefix: 探索性任务推荐用时间批次进行文件管理
+    :return:
+    '''
     if isinstance(celltype, (list, tuple)):
-        print(f"Processing multiple celltypes.")
+        print(f"[run_pca_and_deg_for_celltype] Processing multiple celltypes.")
         column_mask = [col for col in merged_df_filtered.columns if col.split("_")[-2] in celltype]
         celltype_use_as_name = "-".join(celltype)
     else:
-        print(f"Processing {celltype}")
+        print(f"[run_pca_and_deg_for_celltype] Processing {celltype}")
         column_mask = [col for col in merged_df_filtered.columns if col.split("_")[-2] == celltype]
         celltype_use_as_name = celltype
 
     celltype_use_as_name = celltype_use_as_name.replace(" ", "-")
+    celltype_use_as_name = sanitize_filename(celltype_use_as_name)
 
     if not column_mask:
-        print(f"No columns found for {celltype}")
+        print(f"[run_pca_and_deg_for_celltype] No columns found for {celltype}")
         return None
 
     df_split = merged_df_filtered.loc[:, column_mask]
-    result_df, pca = pca_process(df_split, save_dir, figname=f"{pca_fig_prefix}({celltype_use_as_name})",
-                                 figsize=figsize)
-    cluster_to_labels = pca_cluster_process(result_df, save_dir,
-                                            figname=f"{pca_fig_prefix}({celltype_use_as_name})", figsize=figsize)
+    result_df, pca = _pca_process(df_split,
+                                  save_addr=save_addr,
+                                  filename_prefix=f"{file_prefix}({celltype_use_as_name})",
+                                  figsize=figsize)
+
+    cluster_to_labels = _pca_cluster_process(result_df,
+                                             save_addr=save_addr,
+                                             filename=f"{file_prefix}({celltype_use_as_name})",
+                                             figsize=figsize)
 
     if not cluster_to_labels:
-        print(f"!{celltype} cannot be clustered, skipped.")
+        print(f"[run_pca_and_deg_for_celltype] {celltype} cannot be clustered, skipped.")
         return None
 
-    print(cluster_to_labels)
-    adata_combined = remap_obs_clusters(adata, cluster_to_labels)
+    # 进行多对一的映射
+    adata_combined = remap_obs_clusters(adata, mapping=cluster_to_labels,
+                                        obs_key="tmp", new_key="cluster")
 
     easy_DEG(
         adata_combined,
-        save_addr=save_dir,
-        filename=f"{pca_fig_prefix}_{celltype_use_as_name}({DEG_file_suffix})",
+        save_addr=save_addr,
+        filename=f"{file_prefix}_{celltype_use_as_name})",
         obs_key="cluster",
         save_plot=True,
         plot_gene_num=10,
         downsample=5000,
         use_raw=True
     )
+
+
+def process_adata(
+        adata_subset,
+        filename_prefix,
+        my_markers,
+        marker_sheet,
+        save_addr,
+        do_subcluster=True,
+        do_DEG_enrich=True,
+        downsample=False,
+        DEG_enrich_key="leiden_res",
+        resolutions_list=None,
+        use_rep="X_scVI",
+        use_raw=True,
+        **kwargs
+):
+    """
+    主流程：处理子集 adata，对其进行子聚类、DEG富集、绘图。
+    """
+    os.makedirs(save_addr, exist_ok=True)
+
+    umap_plot = ScanpyPlotWrapper(func=sc.pl.umap)
+
+    # ==== 1. 可选：降维聚类 ====
+    if do_subcluster:
+        print("[process_adata] Starting subclustering...")
+        adata_subset = subcluster(
+            adata_subset,
+            n_neighbors=20,
+            n_pcs=min(adata_subset.obsm[use_rep].shape[1], 50),
+            resolutions=resolutions_list,
+            use_rep=use_rep
+        )
+        print("[process_adata] Subclustering completed.")
+
+    # ==== 2.1 使用 leiden_res 作为分组方式；如果省略第一步则依赖原有adata.obs中的列，需要确保`resolutions_list`能对应实际存在的列 ====
+    if DEG_enrich_key == "leiden_res":
+        if not resolutions_list:
+            raise ValueError("[process_adata] resolutions_list cannot be empty when using 'leiden_res' as DEG enrichment key.")
+        if not all(isinstance(res, (int, float)) for res in resolutions_list):
+            raise TypeError("[process_adata] All elements in resolutions_list must be integers or floats.")
+
+
+        # 2.1.1 分辨率比较图，和基础 QC 图
+        process_resolution_umaps(adata_subset, save_addr, resolutions_list, use_raw=use_raw, **kwargs)
+
+        # 自动识别 QC 关键字
+        plot_QC_umap(adata_subset,save_addr,filename_prefix=filename_prefix )
+
+        # 2.1.2 每个分辨率进行绘图 + DEG
+        for res in resolutions_list:
+            groupby_key = f"leiden_res{res}"
+
+            print(f"[process_adata] Creating UMAP plot for key '{groupby_key}'...")
+            umap_plot(
+                save_addr=save_addr, filename=f"{filename_prefix}_{groupby_key}",
+                adata=adata_subset,
+                color=groupby_key,
+                legend_loc="right margin",
+                use_raw=use_raw,
+                **kwargs
+            )
+
+            print(f"[process_adata] Drawing gene marker dotplot for key '{groupby_key}'...")
+            geneset_dotplot(
+                adata=adata_subset,
+                markers=my_markers,
+                marker_sheet=marker_sheet,
+                output_dir=save_addr,
+                filename_prefix=f"{filename_prefix}_Geneset({marker_sheet})",
+                groupby_key=groupby_key,
+                use_raw=use_raw,
+                **kwargs
+            )
+
+            if do_DEG_enrich:
+                print(f"[process_adata] Running DEG enrichment for '{groupby_key}'...")
+                easy_DEG(adata_subset,
+                         save_addr=save_addr, filename_prefix=filename_prefix,
+                         obs_key=groupby_key,
+                         save_plot=True, plot_gene_num=5, downsample=downsample, use_raw=use_raw)
+
+
+    # ==== 2.2 其他 obs 中的分组变量 ====
+    elif DEG_enrich_key in adata_subset.obs.columns:
+        print(f"[process_adata] Creating UMAP plot for key '{DEG_enrich_key}'...")
+        umap_plot(
+            save_addr=save_addr,filename=f"{filename_prefix}_{DEG_enrich_key}",
+            adata=adata_subset,
+            color=DEG_enrich_key,
+            legend_loc="right margin",
+            use_raw=use_raw,
+            **kwargs
+        )
+
+        print(f"[process_adata] Drawing gene marker dotplot for key '{DEG_enrich_key}'...")
+        geneset_dotplot(
+            adata=adata_subset,
+            markers=my_markers,
+            marker_sheet=marker_sheet,
+            save_addr=save_addr,
+            filename_prefix=filename_prefix,
+            groupby_key=DEG_enrich_key,
+            use_raw=use_raw,
+            **kwargs
+        )
+
+        if do_DEG_enrich:
+            print(f"[process_adata] Running DEG enrichment for '{DEG_enrich_key}'...")
+            easy_DEG(adata_subset,
+                     save_addr=save_addr, filename_prefix=filename_prefix,
+                     obs_key=DEG_enrich_key,
+                     save_plot=True, plot_gene_num=5, downsample=downsample, use_raw=use_raw)
+            plot_QC_umap(adata_subset, save_addr, filename_prefix=filename_prefix)
+
+    else:
+        raise ValueError("[process_adata] Please recheck the `DEG_enrich_key`.")

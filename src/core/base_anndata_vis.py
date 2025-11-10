@@ -2,17 +2,19 @@ import anndata
 import pandas as pd
 import numpy as np
 import scanpy as sc
-import os
+
+import re,os
+
 import seaborn as sns
 import matplotlib
 import matplotlib.pyplot as plt
 matplotlib.use('Agg')  # 使用无GUI的后端
 
 from src.core.utils.plot_wrapper import ScanpyPlotWrapper
-from src.core.base_anndata_ops import sanitize_filename
-# from src.utils.geneset_editor import Geneset
+from src.core.base_anndata_ops import sanitize_filename, _elbow_detector
+from src.utils.env_utils import ensure_package
 
-def _matplotlib_savefig(fig, abs_file_path):
+def _matplotlib_savefig(fig, abs_file_path,close_after=False):
     os.makedirs(os.path.dirname(abs_file_path), exist_ok=True)
     base, ext = os.path.splitext(abs_file_path)
     if ext.lower() not in [".png", ".pdf"]:
@@ -20,26 +22,45 @@ def _matplotlib_savefig(fig, abs_file_path):
         fig.savefig(base + ".pdf", bbox_inches="tight", dpi=300)
     else:
         fig.savefig(abs_file_path, bbox_inches="tight", dpi=300)
+    if close_after:
+        plt.close(fig)
 
+def _set_plot_style():
+    """
+    设置统一绘图风格，使PCA和Cluster图视觉一致。
+    """
+    sns.set_theme(
+        context="talk",          # 字体较大，适合展示
+        style="whitegrid",       # 背景白色带浅网格
+        palette="tab10",         # 默认色板
+        font="Arial",            # 统一字体
+        rc={
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+            "axes.labelsize": 12,
+            "axes.titlesize": 14,
+            "legend.fontsize": 10,
+            "xtick.labelsize": 10,
+            "ytick.labelsize": 10,
+            "figure.dpi": 300
+        }
+    )
 
 def geneset_dotplot(adata,
                     markers, marker_sheet,
-                    output_dir, filename_prefix, groupby_key, use_raw=True, **kwargs):
+                    save_addr, filename_prefix, groupby_key, use_raw=True, **kwargs):
     """
 
     :param adata:
     :param markers: Markers 类对象
     :param marker_sheet:  Markers 的 sheet 名
-    :param output_dir:
+    :param save_addr:
     :param filename_prefix:
     :param groupby_key:
     :param use_raw:
     :param kwargs:
     :return:
     """
-
-    def _log(msg):
-        print(f"[geneset_dotplot] {msg}")
 
     dotplot = ScanpyPlotWrapper(func=sc.pl.dotplot)
 
@@ -50,7 +71,8 @@ def geneset_dotplot(adata,
 
     for facet_name, gene_list_dict in gene_dicts.items():
         # 构造文件名
-        filename = sanitize_filename(f"{filename_prefix}_{groupby_key}_{marker_sheet}_{facet_name}")
+        prefix = f"{filename_prefix}_" if filename_prefix else ""
+        filename = sanitize_filename(f"{prefix}{groupby_key}[{marker_sheet}-{facet_name}]")
 
         # 获取有效基因名
         if use_raw and adata.raw is not None:
@@ -63,7 +85,7 @@ def geneset_dotplot(adata,
         for subcat, genes in gene_list_dict.items():
             missing_genes = [gene for gene in genes if gene not in valid_genes]
             if missing_genes:
-                print(f"[Warning] Genes missing in '{subcat}' ({facet_name}): {missing_genes}")
+                print(f"[geneset_dotplot] Genes missing in '{subcat}' ({facet_name}): {missing_genes}")
 
             # 保留有效基因
             valid_sublist = [gene for gene in genes if gene in valid_genes]
@@ -71,12 +93,12 @@ def geneset_dotplot(adata,
                 cleaned_gene_list_dict[subcat] = valid_sublist
 
         if not cleaned_gene_list_dict:
-            print(f"[Info] All gene groups for facet '{facet_name}' are empty after filtering. Skipping this plot.")
+            print(f"[geneset_dotplot] All gene groups for facet '{facet_name}' are empty after filtering. Skipping this plot.")
             continue
 
         # 构造 kwargs（传入 dotplot）
         dotplot_kwargs = dict(
-            save_addr=output_dir,
+            save_addr=save_addr,
             filename=filename,
             adata=adata,
             groupby=groupby_key,
@@ -86,21 +108,19 @@ def geneset_dotplot(adata,
         )
 
         if use_raw:
-            print("Now using raw data of anndata object.")
+            print("[geneset_dotplot] Now using raw data of anndata object.")
         if not use_raw:
             if "scvi_normalized" in adata.layers.keys():
-                print("Using layer 'scvi_normalized'.")
+                print("[geneset_dotplot] Using layer 'scvi_normalized'.")
                 dotplot_kwargs["layer"] = "scvi_normalized"
 
         # 删除外部可能传入的 layer
         if "layer" in kwargs and use_raw:
-            print("Warning: Ignoring 'layer' argument because use_raw=True.")
+            print("[geneset_dotplot] Warning: Ignoring 'layer' argument because use_raw=True.")
             kwargs.pop("layer")
 
         dotplot_kwargs.update(kwargs)
-
         dotplot(**dotplot_kwargs)
-        print(f"--> Dotplot saved: {filename}")
 
 
 
@@ -148,13 +168,14 @@ def plot_stacked_bar(cluster_counts,
     if not plot and not save:
         raise ValueError("At least one of `plot` or `save` must be True.")
 
-    # 处理图像名
     if save_addr is None:
-        save_addr=os.getcwd()
-    filename = "Stacked_Barplot" if filename_prefix is None else f"{filename_prefix}_Stacked_Barplot"
+        save_addr = os.getcwd()
+
+    prefix = f"{filename_prefix}_" if filename_prefix else ""
+    filename = f"{prefix}Stacked_Barplot"
     abs_fig_path = os.path.join(save_addr, filename)
 
-    fig, ax = plt.subplots(dpi=300)
+    fig, ax = plt.subplots(figsize=(6, 6),dpi=300)
     fig.patch.set_facecolor("white")
 
     # 绘图部分
@@ -169,7 +190,6 @@ def plot_stacked_bar(cluster_counts,
     # 保存图像部分
     if save:
         _matplotlib_savefig(fig, abs_fig_path)
-
     # 返回或关闭图像
     if plot:
         fig.show()
@@ -205,7 +225,8 @@ def plot_stacked_violin(adata,
         gene_name = k
         gene_list = v
 
-        filename = f"{filename_prefix}_{gene_name}_StViolin{'(split)' if split else ''}.png"
+        prefix = f"{filename_prefix}_" if filename_prefix else ""
+        filename = f"{prefix}{gene_name}_Stacked_Violin{'(split)' if split else ''}.png"
 
         if isinstance(cell_type, list):
             adata_subset = adata[adata.obs[obs_key].isin(cell_type)]
@@ -260,6 +281,7 @@ def plot_cosg_rankplot(adata, groupby, save_addr=None,csv_name=None, filename=No
         The top genes for each group.
 
     """
+    ensure_package(cosg)
     import cosg
 
     dotplot = ScanpyPlotWrapper(func=sc.pl.dotplot)
@@ -311,10 +333,10 @@ def plot_piechart(outer_count, inner_count, colormaplist,
 
     abs_fig_path=os.path.join(save_path,filename)
 
-    # 1️⃣ 创建 Figure 与 Axes 对象
-    fig, ax = plt.subplots(figsize=(6, 6))
+    # 创建 Figure 与 Axes 对象
+    fig, ax = plt.subplots(figsize=(6, 6),dpi=300)
 
-    # 2️⃣ 绘制外环
+    # 绘制外环
     ax.pie(
         x=outer_count,
         colors=colormaplist,
@@ -326,7 +348,7 @@ def plot_piechart(outer_count, inner_count, colormaplist,
         wedgeprops=dict(width=0.3, edgecolor='w')
     )
 
-    # 3️⃣ 绘制内环
+    # 绘制内环
     ax.pie(
         x=inner_count,
         autopct="%3.1f%%",
@@ -338,14 +360,14 @@ def plot_piechart(outer_count, inner_count, colormaplist,
         wedgeprops=dict(width=0.3, edgecolor='w')
     )
 
-    # 4️⃣ 标题和图例
+    # 标题和图例
     ax.set_title(plot_title, fontsize=10)
     ax.legend(
         loc='upper center',
         bbox_to_anchor=(1, 0.5)
     )
 
-    # 5️⃣ 保存或显示
+    # 保存或显示
     if save:
         _matplotlib_savefig(fig,abs_fig_path)
 
@@ -386,7 +408,7 @@ def _format_labels_in_lines(labels, max_line_length=60, max_label=None):
     return "  " + "\n  ".join(lines) + "\n  "
 
 
-def _formate_tidy_label(cluster_to_labels):
+def _format_tidy_label(cluster_to_labels):
     '''
     返回一个重整细胞名的字典，格式为 "[disease] subtype"
     '''
@@ -408,34 +430,246 @@ def _formate_tidy_label(cluster_to_labels):
     return new_dict
 
 
-def plot_pca_with_cluster_legend(result_df, cluster_to_labels, save_dir, figname, only_show=5, figsize=(10, 6)):
-    plt.figure(figsize=figsize)
+def _plot_pca_with_cluster_legend(
+    result_df,
+    cluster_to_labels,
+    only_show=5,
+    figsize=(10, 6),
+    save_addr=None,
+    filename=None,
+    save=True,
+    plot=False,
+):
 
-    # Step 1: 画 PCA 聚类散点图
+    # ---------- 路径与文件 ----------
+    """
+    Plot PCA result with KMeans clustering and add a legend on the right side.
+    绘制带右侧注释的 PCA 聚类散点图。
+
+    Parameters
+    ----------
+    result_df : pandas.DataFrame
+        Result of PCA, with columns 'PC1', 'PC2', and 'cluster'.
+    cluster_to_labels : dict
+        A dictionary mapping cluster index to a list of cell types.
+    only_show : int, default 5
+        Only show the first `only_show` number of cell types in the legend.
+    figsize : tuple, default (10, 6)
+        Figure size.
+    save_addr : str, default None
+        Path to save the figure.
+    filename : str, default None
+        Filename of the figure.
+    save : bool, default True
+        Whether to save the figure.
+    plot : bool, default False
+        Whether to plot the figure.
+
+    Returns
+    -------
+    str
+        Path to the saved figure.
+
+    """
+    _set_plot_style()
+
+    if save_addr is None:
+        save_addr = os.getcwd()
+    os.makedirs(save_addr, exist_ok=True)
+
+    if filename is None:
+        filename = "PCA"
+
+    abs_fig_path = os.path.join(save_addr, filename)
+
+    # ---------- 图像创建 ----------
+    fig, ax = plt.subplots(figsize=figsize, dpi=300)
+
+    # Step 1: 绘制 PCA 散点图
     sns.scatterplot(
         data=result_df,
         x="PC1", y="PC2",
         hue="cluster",
         palette="tab10",
-        s=100,
-        legend='full'
+        s=100, edgecolor="black", linewidth=0.5, ax=ax
     )
 
-    # Step 2: 构造右侧图注文字
+    # Step 2: 构造右侧注释文字
     legend_text = ""
-    cluster_to_labels = _formate_tidy_label(cluster_to_labels)
+    cluster_to_labels = _format_tidy_label(cluster_to_labels)
     for cluster_id, labels in cluster_to_labels.items():
         label_str = _format_labels_in_lines(labels, max_label=only_show)
-        legend_text += f"Cluster {cluster_id}: \n{label_str}\n"
+        legend_text += f"Cluster {cluster_id}:\n{label_str}\n\n"
 
-    # Step 3: 添加注释文字（图右侧）
-    plt.gcf().text(0.8, 0.5, legend_text,
-                   fontsize=10, linespacing=1.8,
-                   va='center', ha='left')
+    # Step 3: 添加文字说明
+    fig.text(
+        0.8, 0.5, legend_text,
+        fontsize=10, linespacing=1.6,
+        va='center', ha='left'
+    )
 
-    # Step 4: 调整图布局
-    plt.title("PCA with KMeans Clustering")
-    plt.xlabel("PC1")
-    plt.ylabel("PC2")
-    plt.tight_layout(rect=[0, 0, 0.75, 1])  # 让右侧有空间
-    plt.savefig(f"{save_dir}/{figname}_PCA_cluster.png", dpi=300, bbox_inches="tight")
+    # Step 4: 调整图像与标题
+    ax.set_title("PCA with KMeans Clustering")
+    ax.set_xlabel("PC1")
+    ax.set_ylabel("PC2")
+    ax.axhline(0, color='gray', lw=0.5, ls='--')
+    ax.axvline(0, color='gray', lw=0.5, ls='--')
+
+    fig.tight_layout(rect=[0, 0, 0.75, 1])
+
+    # Step 5: 保存与显示逻辑
+    if save:
+        _matplotlib_savefig(fig, abs_fig_path)
+
+    if plot:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return abs_fig_path + ".png"
+
+
+def _pca_cluster_process(result_df, save_addr, filename, figsize=(10, 6)):
+    from sklearn.cluster import KMeans
+
+    # 使用 PC1 和 PC2
+    X = result_df[["PC1", "PC2"]]
+    max_k = min(10, X.shape[0])
+    cluster_seq = [i for i in range(2, max_k + 1)]
+    inertia_seq = [KMeans(n_clusters=k, random_state=0).fit(X).inertia_ for k in cluster_seq]
+
+    optimal_cluster = _elbow_detector(cluster_seq, inertia_seq)
+
+    kmeans = KMeans(n_clusters=optimal_cluster, random_state=0)  # 可改成你认为合适的簇数
+    result_df['cluster'] = kmeans.fit_predict(X)
+
+    # 整理出一个 cluster: celltype list 的字典
+    # Step 1: 去重（保留第一个出现的 label）
+    dedup_df = result_df.drop_duplicates(subset='label', keep='first')
+    # Step 2: 设置 label 为索引，只保留 cluster 列
+    label_cluster_map = dedup_df.set_index('cluster')['label']
+    cluster_to_labels = label_cluster_map.groupby(label_cluster_map.index).apply(list).to_dict()
+
+    _plot_pca_with_cluster_legend(result_df, cluster_to_labels,
+                                 save_addr=save_addr, filename=filename, only_show=100, figsize=figsize)
+
+    return cluster_to_labels
+
+
+def _plot_pca(result_df, pca,  color_by,
+              figsize=(12, 10),
+              save_addr=None, filename_prefix=None):
+
+    """
+    Plot PCA result and explained variance.
+    绘制带有 PCA 解释力（Variance）的图。
+
+    Parameters
+    ----------
+    result_df : pandas.DataFrame
+        Result of PCA, with columns 'PC1', 'PC2', and 'group'.
+    pca : sklearn.decomposition.PCA
+        PCA object.
+    color_by : str
+        Column name to color by.
+    figsize : tuple, default (12, 10)
+        Figure size.
+    save_addr : str, default None
+        Path to save the figure.
+    filename_prefix : str, default None
+        Prefix of the filename.
+
+    Returns
+    -------
+    str
+        Path to the saved figure.
+
+    """
+    _set_plot_style()
+
+    if save_addr is None:
+        save_addr = os.getcwd()
+    os.makedirs(save_addr, exist_ok=True)
+
+    prefix = f"{filename_prefix}_" if filename_prefix else ""
+    filename1 = f"{prefix}PCA_Explanation"
+    filename2 = f"{prefix}PCA"
+
+    # 图 1
+    fig, ax = plt.subplots(figsize=(6,6), dpi=300) # 这是固定尺寸的小图
+    explained_var = pca.explained_variance_ratio_
+
+    bars = ax.bar(
+        range(1, len(explained_var) + 1),
+        explained_var * 100,
+        color=sns.color_palette("tab10")[0]
+    )
+    ax.set_xlabel("Principal Component", fontsize=12)
+    ax.set_ylabel("Variance Explained (%)", fontsize=12)
+    ax.set_title("PCA Explained Variance", fontsize=12)
+    fig.tight_layout()
+    _matplotlib_savefig(fig, os.path.join(save_addr, filename1),close_after=True)
+
+    # 图 2
+    fig, ax = plt.subplots(figsize=figsize, dpi=300)
+
+    PC1 = f"{pca.explained_variance_ratio_[0]:.2%}"
+    PC2 = f"{pca.explained_variance_ratio_[1]:.2%}"
+
+    sns.scatterplot(
+        data=result_df,
+        x="PC1", y="PC2",
+        hue=color_by,
+        style="group",
+        s=100, edgecolor="black", linewidth=0.5, ax=ax
+    )
+
+    ax.set_title(f"PCA of Cell-Disease DEG Patterns")
+    ax.set_xlabel(f'PC1({PC1})')
+    ax.set_ylabel(f'PC2({PC2})')
+    ax.axhline(0, color='gray', lw=0.5)
+    ax.axvline(0, color='gray', lw=0.5)
+
+    ncol = (len(result_df[color_by].unique()) + len(result_df["group"].unique())) // 25 + 1
+    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', ncol=ncol)
+    fig.tight_layout()
+    _matplotlib_savefig(fig, os.path.join(save_addr, filename2),close_after=True)
+
+
+def process_resolution_umaps(adata, output_dir, resolutions,use_raw=True,**kwargs):
+    """
+    生成 UMAP 图像，用于不同 Leiden 分辨率对比。
+    """
+    umap_plot = ScanpyPlotWrapper(sc.pl.umap)
+    color_keys = [f"leiden_res{res}" for res in resolutions]
+    umap_plot(
+        save_addr=output_dir,
+        filename="Res_Comparison",
+        adata=adata,
+        color=color_keys,
+        legend_loc="on data",
+        use_raw=use_raw,
+        **kwargs
+    )
+
+def plot_QC_umap(adata, save_addr, filename_prefix):
+    umap_plot = ScanpyPlotWrapper(sc.pl.umap)
+    key_dict = {
+        "organelles": [i for i in adata.obs.columns if re.search(r'mt|mito|rb|ribo', i)],
+        "phase": [i for i in adata.obs.columns if re.search(r'phase', i)],
+        "counts": [i for i in adata.obs.columns if re.search(r'disease|tissue', i)]
+    }
+    key_list = [item for sublist in key_dict.values() for item in sublist if sublist]
+    if len(key_list) == 0:
+        raise ValueError("[plot_QC_umap] No QC obs_key founded, unable to draw QC umap plot.")
+
+    # 对每类调用一次
+    for name, cols in key_dict.items():
+        if not cols:
+            continue
+        umap_plot(
+            save_addr=save_addr,
+            filename=f"{filename_prefix}_UMAP_{name}",
+            adata=adata,
+            color=cols
+        )
