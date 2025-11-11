@@ -10,7 +10,7 @@ matplotlib.use('Agg')  # 使用无GUI的后端
 
 from src.core.utils.plot_wrapper import ScanpyPlotWrapper
 from src.core.base_anndata_ops import _elbow_detector
-from src.core.base_anndata_vis import plot_pca_with_cluster_legend
+from src.core.base_anndata_vis import _plot_pca_with_cluster_legend
 
 def pca_cluster_process(result_df, save_addr, filename, **kwargs):
     """
@@ -57,7 +57,7 @@ def pca_cluster_process(result_df, save_addr, filename, **kwargs):
     label_cluster_map = dedup_df.set_index('cluster')['label']
     cluster_to_labels = label_cluster_map.groupby(label_cluster_map.index).apply(list).to_dict()
 
-    plot_pca_with_cluster_legend(result_df, cluster_to_labels, save_addr=save_addr,
+    _plot_pca_with_cluster_legend(result_df, cluster_to_labels, save_addr=save_addr,
                                  filename=filename, **kwargs)
 
     return cluster_to_labels
