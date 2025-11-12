@@ -14,14 +14,33 @@ from src.core.utils.plot_wrapper import ScanpyPlotWrapper
 from src.core.base_anndata_ops import sanitize_filename, _elbow_detector
 from src.utils.env_utils import ensure_package
 
-def _matplotlib_savefig(fig, abs_file_path,close_after=False):
+def _matplotlib_savefig(fig, abs_file_path, close_after=False):
     os.makedirs(os.path.dirname(abs_file_path), exist_ok=True)
-    base, ext = os.path.splitext(abs_file_path)
-    if ext.lower() not in [".png", ".pdf"]:
+    
+    # 定义 Matplotlib 常见支持的格式
+    valid_exts = {".png", ".pdf", ".svg", ".eps", ".jpg", ".jpeg", ".tif", ".tiff"}
+    
+    # 手动拆分文件名并识别扩展
+    filename = os.path.basename(abs_file_path)
+    dirname = os.path.dirname(abs_file_path)
+    name_parts = filename.rsplit('.', 1)  # 只从右边拆一次
+    
+    if len(name_parts) == 2 and f".{name_parts[1].lower()}" in valid_exts:
+        base = os.path.join(dirname, name_parts[0])
+        ext = f".{name_parts[1].lower()}"
+    else:
+        base = os.path.join(dirname, filename)
+        ext = ""
+    
+    # 根据是否识别到扩展名决定保存方式
+    if ext == "":
+        # 未识别到文件类型 → 默认导出 png 和 pdf
         fig.savefig(base + ".png", bbox_inches="tight", dpi=300)
         fig.savefig(base + ".pdf", bbox_inches="tight", dpi=300)
     else:
-        fig.savefig(abs_file_path, bbox_inches="tight", dpi=300)
+        # 识别到合法扩展名 → 按原路径保存
+        fig.savefig(base + ext, bbox_inches="tight", dpi=300)
+    
     if close_after:
         plt.close(fig)
 
