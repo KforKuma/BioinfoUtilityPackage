@@ -8,7 +8,11 @@ import matplotlib
 import matplotlib.pyplot as plt
 matplotlib.use('Agg')  # 使用无GUI的后端
 
+import logging
+from src.utils.hier_logger import logged
+logger = logging.getLogger(__name__)
 
+@logged
 def split_filename_with_ext(filename, allowed_exts=('.jpg', '.png', '.pdf')):
     """
     智能分离文件名与扩展名，只有当扩展名在允许列表中时才分离。
@@ -34,13 +38,10 @@ class ScanpyPlotWrapper(object):
     def __init__(self, func):
         wraps(func)(self)
         self.func = func
-
-    @staticmethod
-    def _log(msg):
-        print(f"[ScanpyPlotWrapper Message] {msg}")
-
+        self.logger = logging.getLogger(self.__class__.__name__)
+    
     def __call__(self, save_addr, filename, *args, **kwargs):
-        self._log("Calling {function}()".format(function=self.func.__name__))
+        self.logger.info("Calling {function}()".format(function=self.func.__name__))
         # 确保路径以目录形式存在
         os.makedirs(save_addr, exist_ok=True)
 
@@ -61,7 +62,7 @@ class ScanpyPlotWrapper(object):
             for e in exts:
                 out_path = os.path.join(save_addr, root + e)
                 plt.savefig(out_path, bbox_inches='tight')
-                print(f"Saved: {out_path}")
+                self.logger.info(f"Saved: {out_path}")
 
         # 清理当前 figure，防止后续绘图叠加
         plt.close()

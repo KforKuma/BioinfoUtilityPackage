@@ -1,5 +1,8 @@
 import pandas as pd
 
+import logging
+from src.utils.hier_logger import logged
+logger = logging.getLogger(__name__)
 
 class Geneset():
     """
@@ -13,38 +16,23 @@ class Geneset():
         my_markers = Geneset(save_addr + "Markers-updated.xlsx")
 
         需要加个版本识别：
-        v0: cell_type
-        gene_set
-        v1: cell_type
-        gene_set
-        disabled
-        facet
-        remark(sheet_name)
-        v2: signature_id
-        genes
-        status
-        facet
-        description
-        source
-        species(sheet_name)
+        v0: cell_type        gene_set
+        v1: cell_type        gene_set        disabled        facet        remark(sheet_name)
+        v2: signature_id        genes        status        facet        description        source        species(sheet_name)
         '''
         self.file_path = file_path
         self.data = self._load_file(file_path)
+        self.logger = logging.getLogger(self.__class__.__name__)
         if version is not None:
             self.version = version
         else:
             self._detect_version()
-            self._log(f"Detected file version: {version}")
+            self.logger.info(f"Detected file version: {version}")
         if self.version != "unknown":
             self._migrate_to_current()
         self.data = self._clear_format()
-
-
-
-    @staticmethod
-    def _log(msg):
-        print(f"[Geneset Message] {msg}")
-
+    
+    @logged
     def _load_file(self, path):
         if path.endswith(".xlsx") or path.endswith(".xls"):
             sheets = pd.read_excel(path, sheet_name=None) # sheet_name=None for all worksheets.
@@ -67,10 +55,11 @@ class Geneset():
         elif {"signature_id", "genes", "status"}.issubset(cols):
             return "v2"
         return "unknown" # unknown is acceptable, for user who only use this wrapper only as a file manager
-
+    
+    @logged
     def _migrate_to_current(self):
         if self.version != "v2":
-            self._log("Detected v0 or v1 format, migrating to v2...")
+            self.logger.info("Detected v0 or v1 format, migrating to v2...")
             df = self.data.copy()
 
             # 更新列名
@@ -101,8 +90,9 @@ class Geneset():
 
             self.data = df
             self.version = "v2"
-            self._log("Migration complete. Upgraded to v2 format.")
-
+            self.logger.info("Migration complete. Upgraded to v2 format.")
+    
+    @logged
     def _clear_format(self):
         df = self.data.copy()
         df["species"] = df['species'].replace({'human': "Human",
@@ -116,7 +106,7 @@ class Geneset():
                 .apply(lambda lst: [x.strip().strip("'").strip('"') for x in lst])
             )
         except Exception as e:
-            self._log(f"Error while parsing gene_set: {e}")
+            self.logger.info(f"Error while parsing gene_set: {e}")
             raise e
 
         # 基因格式标准化
@@ -156,13 +146,14 @@ class Geneset():
                         row["signature_id"] = unique_id
                         df_sheet_clean = pd.concat([df_sheet_clean, row], ignore_index=True)
 
-            self._log(f"Sheet [{sheet}] cleaned: {len(df_s)} → {len(df_sheet_clean)} rows.")
+            self.logger.info(f"Sheet [{sheet}] cleaned: {len(df_s)} → {len(df_sheet_clean)} rows.")
             df_sheet_clean = df_sheet_clean.drop("uniqueness", axis=1)
             df_uni = pd.concat([df_uni, df_sheet_clean], ignore_index=True)
 
         df_uni.sort_values(by=["sheet_name", "facet", "signature_id"], ascending=True, inplace=True)
         return df_uni
-
+    
+    @logged
     def save(self,file_name=None):
         '''
 
@@ -180,7 +171,7 @@ class Geneset():
 
         if file_path.endswith((".xlsx", ".xls")):
             if "sheet_name" not in self.data.columns:
-                self._log("No 'sheet_name' column found, saving all data to single sheet 'default'.")
+                self.logger.info("No 'sheet_name' column found, saving all data to single sheet 'default'.")
                 with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
                     self.data.to_excel(writer, sheet_name="default", index=False)
             else:
@@ -194,8 +185,9 @@ class Geneset():
         else:
             raise ValueError(f"Unsupported file format {file_path}, must be .xlsx, .xls or .csv")
 
-        self._log(f"Saved file to {file_path}")
-
+        self.logger.info(f"Saved file to {file_path}")
+    
+    @logged
     def set_value(self, by_dict, value, target_col="status"):
         """
         按条件批量修改 self.data 中的指定列（默认是 'status'）
@@ -238,8 +230,9 @@ class Geneset():
 
         count = mask.sum()
         df.loc[mask, target_col] = value
-        self._log(f"Set {count} rows where {by_dict} → {target_col} = '{value}'")
-
+        self.logger.info(f"Set {count} rows where {by_dict} → {target_col} = '{value}'")
+    
+    @logged
     def get(self, signature=None, sheet_name=None, active_only=True, facet_split=False):
         '''
         本函数的功能比较复杂，在示例中进行详细介绍。
@@ -294,7 +287,7 @@ class Geneset():
         if isinstance(signature, str):
             # 必须考虑 signature_id 允许重名的情况
             df = df[df["signature_id"] == signature]
-            self._log("Retrieved genes in signature id '%s'" % signature)
+            self.logger.info("Retrieved genes in signature id '%s'" % signature)
             return df.tolist()
 
         elif isinstance(signature, list):
@@ -302,25 +295,26 @@ class Geneset():
             if facet_split:
                 # 按 'facet' 列进行分组，并对每组应用 build_gene_dict
                 gene_dicts = {facet: build_gene_dict(sub_df) for facet, sub_df in df.groupby('facet')}
-                self._log("Retrieved genes in signature id '%s'" % signature)
+                self.logger.info("Retrieved genes in signature id '%s'" % signature)
                 return gene_dicts
             else:
                 # 不分组，直接构建 gene_dict
-                self._log("Retrieved genes in signature id '%s'" % signature)
+                self.logger.info("Retrieved genes in signature id '%s'" % signature)
                 return build_gene_dict(df)
         elif signature is None: # 如果什么都不填，那你肯定是想要整个表格；当然，也有可能已经填了 sheet_name 了，总之 return 一个字典给你
-            self._log("No signature ids given.")
+            self.logger.info("No signature ids given.")
             if facet_split:
                 # 按 'facet' 列进行分组，并对每组应用 build_gene_dict
                 gene_dicts = {facet: build_gene_dict(sub_df) for facet, sub_df in df.groupby('facet')}
-                self._log("Retrieved genes, without signature assigned.")
+                self.logger.info("Retrieved genes, without signature assigned.")
                 return gene_dicts
             else:
-                self._log("Retrieved genes, without signature assigned.")
+                self.logger.info("Retrieved genes, without signature assigned.")
                 return build_gene_dict(df)
         else:
             raise ValueError("signature must be str or list, or None when sheet_name is provided.")
-
+    
+    @logged
     def update(self, gene_dict, inplace=False,
                sheet_name=None, species=None, status=None, facet=None):
         """
@@ -378,7 +372,7 @@ class Geneset():
             )
             df = pd.concat([df, new_row], ignore_index=True)
 
-        self._log(f"Geneset updated: {len(self.data)} → {len(df)} rows "
+        self.logger.info(f"Geneset updated: {len(self.data)} → {len(df)} rows "
                   f"({len(gene_dict)} signatures added, inplace={inplace})")
 
         self.data = df

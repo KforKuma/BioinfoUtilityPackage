@@ -14,7 +14,11 @@ from scipy.stats import f_oneway
 
 from src.core.base_anndata_vis import _matplotlib_savefig
 
+import logging
+from src.utils.hier_logger import logged
+logger = logging.getLogger(__name__)
 
+@logged
 def plot_residual_boxplot(df, subset,group_key, sample_key,save_addr):
     fig, ax = plt.subplots(figsize=(6, 4))
     
@@ -30,7 +34,7 @@ def plot_residual_boxplot(df, subset,group_key, sample_key,save_addr):
     abs_fig_path = os.path.join(save_addr, f"{subset}_Residual_Boxplot(by_{sample_key})")
     _matplotlib_savefig(fig, abs_fig_path)
 
-
+@logged
 def plot_confidence_interval(posthoc_df, subset, save_addr, method):
     # 按 meandiff 由大到小排序
     tukey_df = posthoc_df.sort_values("meandiff", ascending=False).reset_index(drop=True)
@@ -94,7 +98,7 @@ def plot_confidence_interval(posthoc_df, subset, save_addr, method):
     abs_fig_path = os.path.join(save_addr, f"{subset}_{method}_ConfidenceInterval")
     _matplotlib_savefig(fig, abs_fig_path)
 
-
+@logged
 def plot_better_residual(df, tukey_df, group_key, subset, save_addr):
     # 计算每组的平均残差
     grouped = df.groupby(group_key)["residual"].mean().reset_index()
@@ -158,7 +162,7 @@ def plot_better_residual(df, tukey_df, group_key, subset, save_addr):
     abs_fig_path = os.path.join(save_addr, f"{subset}_Residual_Barplot")
     _matplotlib_savefig(fig, abs_fig_path)
 
-
+@logged
 def plot_de_novo_ANOVA(df, subset, save_addr):
     # 计算 mean 和 sem
     summary = df.groupby("disease_group")["percent"].agg(['mean', 'sem']).reset_index()
@@ -220,13 +224,13 @@ def plot_de_novo_ANOVA(df, subset, save_addr):
     abs_fig_path = os.path.join(save_addr, f"{subset}_Average_Percentage_Barplot")
     _matplotlib_savefig(fig, abs_fig_path)
 
-
-def perform_pca_clustering_on_residuals(df, output_path, auto_choose_k_func):
+@logged
+def perform_pca_clustering_on_residuals(df, save_addr, auto_choose_k_func):
     """
-    对 residual 进行标准化、PCA、聚类、绘图。
+    对 residual 进行标准化、PCA、聚类、绘图（fig, ax 风格）。
     参数:
         df: 包含 'Subset_Identity', 'disease_group', 'residual' 列的 DataFrame
-        output_path: 保存图像的基础路径
+        save_addr: 保存图像的基础路径
         auto_choose_k_func: 接收 DataFrame 并返回最佳 k 的函数
     返回:
         pca_df: 包含 PC1, PC2, cluster 的 DataFrame，索引为 Subset_Identity
@@ -264,32 +268,36 @@ def perform_pca_clustering_on_residuals(df, output_path, auto_choose_k_func):
     # 建立映射
     subset_to_cluster = pca_df["cluster"].to_dict()
     
-    # 绘图
-    plt.figure(figsize=(6, 5))
+    # 绘图 (fig, ax)
+    fig, ax = plt.subplots(figsize=(6, 5))
     for cluster in pca_df["cluster"].unique():
         cluster_data = pca_df[pca_df["cluster"] == cluster]
-        plt.scatter(cluster_data["PC1"], cluster_data["PC2"], label=f"Cluster {cluster}", s=40)
+        ax.scatter(cluster_data["PC1"], cluster_data["PC2"], label=f"Cluster {cluster}", s=40)
         
         if len(cluster_data) >= 3:
             points = cluster_data[["PC1", "PC2"]].values
             hull = ConvexHull(points)
             for simplex in hull.simplices:
-                plt.plot(points[simplex, 0], points[simplex, 1], 'k--', linewidth=1)
+                ax.plot(points[simplex, 0], points[simplex, 1], 'k--', linewidth=1)
         
         for subset in cluster_data.index:
-            plt.text(pca_df.loc[subset, "PC1"], pca_df.loc[subset, "PC2"], subset, fontsize=8)
+            ax.text(pca_df.loc[subset, "PC1"], pca_df.loc[subset, "PC2"], subset, fontsize=8)
     
-    plt.xlabel(f"PC1 ({explained_var[0]:.1f}%)")
-    plt.ylabel(f"PC2 ({explained_var[1]:.1f}%)")
-    plt.title("PCA + Clustering on Residuals")
-    plt.legend()
-    plt.tight_layout()
-    plt.grid(False)
-    plt.savefig(f"{output_path}/All_subset_pca_clusters.png")
+    ax.set_xlabel(f"PC1 ({explained_var[0]:.1f}%)")
+    ax.set_ylabel(f"PC2 ({explained_var[1]:.1f}%)")
+    ax.set_title("PCA + Clustering on Residuals")
+    ax.legend()
+    ax.grid(False)
+    
+    # 保存并关闭图
+    fig.tight_layout()
+    abs_fig_path = os.path.join(save_addr, "All_Subset_Residual_Heatmap")
+    _matplotlib_savefig(fig, abs_fig_path)
     
     return pca_df, resid_scaled_row, subset_to_cluster, explained_var
 
 
+@logged
 def plot_residual_heatmap(resid_scaled_row, subset_to_cluster, save_addr):
     """
     根据 residual 矩阵和 cluster 信息绘制热图。
@@ -336,11 +344,7 @@ def plot_residual_heatmap(resid_scaled_row, subset_to_cluster, save_addr):
     # 去掉网格
     ax.grid(False)
     
-    # 保存图像
-    fig.tight_layout()
-    fig.savefig(f"{save_addr}/All_subset_residual_heatmap.png", bbox_inches='tight')
-    plt.close(fig)
-    
     # 保存并关闭图
+    fig.tight_layout()
     abs_fig_path = os.path.join(save_addr, "All_Subset_Residual_Heatmap")
     _matplotlib_savefig(fig, abs_fig_path)

@@ -15,13 +15,16 @@ from statsmodels.stats.multicomp import pairwise_tukeyhsd
 
 from src.core.kdk_vis import *
 
+import logging
+from src.utils.hier_logger import logged
+logger = logging.getLogger(__name__)
 
 def _kdk_data_prepare(adata, meta, batch_key="orig.ident", type_key="Subset_Identity"):
     '''
 
     :param adata:
     :param meta: 至少包含 unit_key 列的 pd.DataFrame，储存了分组和采样的详细信息
-    :param unit_key:
+    :param batch_key:
     :param type_key:
     :return: count_group_df，一个包含至少 unit_key, type_key, count 的 pd.DataFrame，其他列来自 meta 表格的合并
     '''
@@ -40,7 +43,6 @@ def _kdk_data_prepare(adata, meta, batch_key="orig.ident", type_key="Subset_Iden
     count_group_df["total_count"] = count_group_df.groupby(batch_key)["count"].transform("sum")
     
     return count_group_df
-
 
 def _kdk_make_meta(adata, group_key="orig.ident"):
     '''
@@ -72,7 +74,7 @@ def _kdk_make_meta(adata, group_key="orig.ident"):
     
     return df_grouped
 
-
+@logged
 def kdk_analyze(df, subset, group_key, batch_key, sample_key=None, save_addr=None, method="Combined",do_return=False):
     '''
     分析某个细胞亚群在不同采样组和疾病组间的差异。
@@ -90,7 +92,7 @@ def kdk_analyze(df, subset, group_key, batch_key, sample_key=None, save_addr=Non
 
     :param df: 包含列 [unit_key, group_key, 'count', 'percent', 'logit_percent','total_count']，以及其他需要控制的参数
     :param subset: 当前分析的细胞亚群名
-    :param output_dir: 输出图像的文件夹路径
+    :param save_addr: 输出图像的文件夹路径
     :return:
     '''
     
@@ -101,11 +103,11 @@ def kdk_analyze(df, subset, group_key, batch_key, sample_key=None, save_addr=Non
     if sample_key is not None:
         groups = [g["percent"].values for _, g in df.groupby(sample_key)]
         stat, p = stats.kruskal(*groups)
-        print(f"[kdk_analyze] {subset} Kruskal-Wallis test across sample_key: H={stat:.3f}, p={p:.3g}")
+        logger.info(f"{subset} Kruskal-Wallis test across sample_key: H={stat:.3f}, p={p:.3g}")
     else:
         groups = [g["percent"].values for _, g in df.groupby(batch_key)]
         stat, p = stats.kruskal(*groups)
-        print(f"[kdk_analyze] {subset} Kruskal-Wallis test across batch_key: H={stat:.3f}, p={p:.3g}")
+        logger.info(f"{subset} Kruskal-Wallis test across batch_key: H={stat:.3f}, p={p:.3g}")
     
     # Step 2: 采样效应建模并提取残差
     # 因为每个 batch 内只有一个 sample_key，所以这里建模只能用 batch
@@ -115,20 +117,20 @@ def kdk_analyze(df, subset, group_key, batch_key, sample_key=None, save_addr=Non
         df["residual"] = result.resid
         plot_residual_boxplot(df, subset, group_key, sample_key, save_addr)
     else:
-        print(f"[kdk_analyze] {subset} Skip residual analysis: no significant sampling effect (p={p:.3g})")
+        logger.info(f"{subset} Skip residual analysis: no significant sampling effect (p={p:.3g})")
         return  # 不进入后续分析
     
     # Step 3: 检查疾病组之间残差是否有显著差异
     groups = [g["residual"].values for _, g in df.groupby(group_key)]
     stat, p = stats.kruskal(*groups)
-    print(f"[kdk_analyze] {subset}] Residual-based Kruskal-Wallis across groups: H={stat:.3f}, p={p:.3g}")
+    logger.info(f"{subset}] Residual-based Kruskal-Wallis across groups: H={stat:.3f}, p={p:.3g}")
     
     # Step 4: Tukey HSD 多组比较
     if p < 0.05:
         if method == "Tukey" or method == "Combined":
             tukey = pairwise_tukeyhsd(df["residual"], df[group_key])
-            print(f"[kdk_analyze] Tukey’s HSD\n")
-            print(tukey.summary())
+            logger.info(f"Tukey’s HSD\n")
+            logger.info(tukey.summary())
             
             tukey_df = pd.DataFrame(data=tukey.summary().data[1:], columns=tukey.summary().data[0])
             # 修正 Tukey 输出方向：确保 meandiff > 0 表示 group1 > group2
@@ -148,7 +150,7 @@ def kdk_analyze(df, subset, group_key, batch_key, sample_key=None, save_addr=Non
         if method == "Dunn" or method == "Combined":
             # Dunn’s posthoc test with Holm correction
             dunn_res = posthoc_dunn(df, val_col="residual", group_col=group_key, p_adjust="holm")
-            print(f"[kdk_analyze] Dunn’s posthoc (Holm correction):\n{dunn_res}\n")
+            logger.info(f"Dunn’s posthoc (Holm correction):\n{dunn_res}\n")
             
             # 先计算残差的秩
             df_ranks = df.copy()
@@ -199,31 +201,31 @@ def kdk_analyze(df, subset, group_key, batch_key, sample_key=None, save_addr=Non
                     return df, tukey_df
         
     else:
-        print(
-            f"[kdk_analyze] {subset} Skip posthoc analysis: no significant Kruskal-Wallis across groups (p={p:.3g})")
+        logger.info(
+            f"{subset} Skip posthoc analysis: no significant Kruskal-Wallis across groups (p={p:.3g})")
         if do_return:
             return df, pd.DataFrame()
 
-
+@logged
 def make_a_meta(adata, meta_file, batch_key="orig.ident"):
     '''
     生成一个可读的 meta 文件，也可以手动在上面修改
 
     :param adata:
     :param meta_file:
-    :param group_key:
+    :param batch_key:
     :return:
     '''
     meta = _kdk_make_meta(adata, batch_key)
     meta.to_csv(meta_file)
 
-
+@logged
 def kdk_prepare(adata, meta_file=None, batch_key="orig.ident", type_key="Subset_Identity"):
     '''
 
     :param adata:
     :param meta_file: 包含样本制作信息的表格，兼容 csv 和 xlsx，默认 header=True index=False
-    :param group_key:
+    :param batch_key:
     :param type_key:
     :return:
     '''
@@ -244,7 +246,7 @@ def kdk_prepare(adata, meta_file=None, batch_key="orig.ident", type_key="Subset_
     
     return count_df
 
-
+@logged
 def run_kdk(count_df, type_key, group_key, save_addr, batch_key, sample_key=None, method="Dunn"):
     subset_list = count_df[type_key].unique().tolist()
     
@@ -254,7 +256,7 @@ def run_kdk(count_df, type_key, group_key, save_addr, batch_key, sample_key=None
         subset_df = count_df[count_df[type_key] == subset]
         all_zeros = (subset_df['count'] == 0).all()
         if all_zeros:
-            print(f"[run_kdk] {subset} contains all zero count.")
+            logger.info(f"{subset} contains all zero count.")
             continue
         df, posthoc_df = kdk_analyze(subset_df,
                                      subset=subset,group_key=group_key,
@@ -269,7 +271,7 @@ def run_kdk(count_df, type_key, group_key, save_addr, batch_key, sample_key=None
     return summary_stats
     
 
-
+@logged
 def auto_choose_k(X, k_min=2, k_max=10):
     """
     自动选择最优 k 值，宁多毋少，返回 silhouette score 最优的向上取整的 k。

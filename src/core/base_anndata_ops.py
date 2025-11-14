@@ -7,16 +7,20 @@ import scanpy as sc
 import numpy as np
 import scipy as sp
 
-import gc, os
+import os
 import re
-import time
 import sys
 sys.stdout.reconfigure(encoding='utf-8')
 matplotlib.use('Agg')  # 使用无GUI的后端
 
 from src.utils.env_utils import ensure_package
-from src.core.base_anndata_vis import _plot_pca
 
+
+import logging
+from src.utils.hier_logger import logged
+logger = logging.getLogger(__name__)
+
+@logged
 def subcluster(adata, n_neighbors=20, n_pcs=50, skip_DR=False, resolutions=None, use_rep="X_scVI"):
     """
     执行Scanpy的降维与Leiden聚类流程，可选多分辨率。
@@ -41,48 +45,46 @@ def subcluster(adata, n_neighbors=20, n_pcs=50, skip_DR=False, resolutions=None,
     AnnData
         聚类降维后的 anndata 对象
     """
-
-    def _log(msg):
-        print(f"[subcluster] {msg}")
-
     # 处理 use_rep 参数
     if use_rep != "X" and use_rep not in adata.obsm:
-        _log(f"[Warning] '{use_rep}' not found in adata.obsm.")
+        logger.info(f"Warning:'{use_rep}' not found in adata.obsm.")
         available_keys = list(adata.obsm.keys())
         if available_keys:
-            _log(f"Available options in adata.obsm: {available_keys}")
+            logger.info(f"Available options in adata.obsm: {available_keys}")
         else:
-            _log("adata.obsm is empty.")
+            logger.info("Notice adata.obsm is empty.")
         raise KeyError(f"use_rep='{use_rep}' not found in adata.obsm.")
 
     # 处理 resolutions
     if resolutions is None:
         resolutions = [1.0, 1.5]
-        _log(f"No resolutions provided. Using default: {resolutions}")
+        logger.info(f"No resolutions provided. Using default: {resolutions}")
     elif isinstance(resolutions, (int, float)):
         resolutions = [resolutions]
     elif not isinstance(resolutions, (list, tuple, np.ndarray)):
-        raise ValueError("resolutions must be a float, int, or list of floats.")
+        raise ValueError("Resolutions must be a float, int, or list of floats.")
 
     # 降维
     if not skip_DR:
-        _log(f"Computing neighbors (n_neighbors={n_neighbors}, n_pcs={n_pcs}, use_rep='{use_rep}')...")
+        logger.info(f"Computing neighbors (n_neighbors={n_neighbors}, n_pcs={n_pcs}, use_rep='{use_rep}')...")
         sc.pp.neighbors(adata, n_neighbors=n_neighbors, n_pcs=n_pcs, use_rep=use_rep)
         sc.tl.umap(adata)
-        _log("UMAP completed.")
+        logger.info("UMAP completed.")
     else:
-        _log("Skipping dimensional reduction.")
+        logger.info("Skipping dimensional reduction.")
 
     # 聚类
     for res in resolutions:
         key = f"leiden_res{res}"
-        _log(f"Running Leiden clustering (resolution={res}) -> '{key}'")
+        logger.info(f"Running Leiden clustering (resolution={res}) -> '{key}'")
         sc.tl.leiden(adata, key_added=key, resolution=res)
 
-    _log("Subclustering process finished.")
+    logger.info("Subclustering down.")
     return adata
 
 
+
+@logged
 def obs_keywise_downsample(adata, obs_key, downsample=1000):
     """
     下采样 adata，保证obs_key所限定的列中每一个值（身份）都至少有N个样本（N>1）；
@@ -98,11 +100,8 @@ def obs_keywise_downsample(adata, obs_key, downsample=1000):
     counts = adata.obs[obs_key].value_counts()
     indices = []  # 用列表存储选取的样本索引
 
-    def _log(msg):
-        print(f"[obs_keywise_downsample] {msg}")
-
     if downsample > 1 and downsample % 1 == 0:  # 截断模式
-        _log(f"mode: cutoff; threshold: {downsample}")
+        logger.info(f"mode: cutoff; threshold: {downsample}")
         for group, count in counts.items():
             use_size = min(count, downsample)  # 限制样本数不超过
             selected_indices = np.random.choice(
@@ -111,9 +110,9 @@ def obs_keywise_downsample(adata, obs_key, downsample=1000):
                 replace=False
             )
             indices.extend(selected_indices)  # 使用extend避免嵌套列表
-            _log(f"{group}: {use_size}/{count} selected (total={len(indices)})")
+            logger.info(f"{group}: {use_size}/{count} selected (total={len(indices)})")
     elif 0 < downsample < 1:  # 缩放模式
-        _log(f"mode: zoom; ratio: {downsample:.2%}.")
+        logger.info(f"mode: zoom; ratio: {downsample:.2%}.")
         for group, count in counts.items():
             use_size = max(1, round(count * downsample))  # 确保至少选择1个样本
             selected_indices = np.random.choice(
@@ -122,14 +121,14 @@ def obs_keywise_downsample(adata, obs_key, downsample=1000):
                 replace=False
             )
             indices.extend(selected_indices)
-            _log(f"{group}: {use_size}/{count} selected (total={len(indices)})")
+            logger.info(f"{group}: {use_size}/{count} selected (total={len(indices)})")
     else:
         raise ValueError("Please recheck parameter `downsample`. It must be >1 (integer) or 0<N<1 (float).")
 
-    _log(f"Final sample size: {len(indices)} (from {len(adata)} cells).")
+    logger.info(f"Final sample size: {len(indices)} (from {len(adata)} cells).")
     return adata[indices].copy()
 
-
+@logged
 def easy_DEG(adata, save_addr, filename_prefix,
              obs_key="Subset_Identity",
              save_plot=True, plot_gene_num=5, downsample=False,
@@ -137,65 +136,63 @@ def easy_DEG(adata, save_addr, filename_prefix,
     """
     快速进行差异基因富集（DEG）
     """
-
-    def _log(msg):
-        print(f"[easy_DEG] {msg}")
-
     if use_raw and adata.raw is None:
-        _log("Warning: use_raw=True, but .raw not found in AnnData. Will fallback to .X.")
-
+        logger.info("Warning: use_raw=True, but .raw not found in AnnData. Will fallback to .X.")
+    
     deg_key = "deg_" + obs_key
     save_addr = save_addr if save_addr.endswith("/") else save_addr + "/"
     os.makedirs(save_addr, exist_ok=True)
-
+    
     if isinstance(downsample, (float, int)) and downsample > 0:
-        _log(f"Downsampling enabled: {downsample}")
+        logger.info(f"Downsampling enabled: {downsample}")
         adata = obs_keywise_downsample(adata, obs_key, downsample)
     else:
-        _log("No downsampling performed.")
-
-    _log(f"Starting DEG ranking for '{obs_key}'...")
+        logger.info("No downsampling performed.")
+    
+    logger.info(f"Starting DEG ranking for '{obs_key}'...")
     sc.tl.rank_genes_groups(adata, groupby=obs_key, use_raw=use_raw,
                             method=method, key_added=deg_key)
-
+    
+    filename_prefix = f"{filename_prefix}_" if filename_prefix is not None else filename_prefix
+    
     if save_plot:
         try:
             from src.core.utils.plot_wrapper import ScanpyPlotWrapper
             rank_genes_groups_dotplot = ScanpyPlotWrapper(sc.pl.rank_genes_groups_dotplot)
-            rank_genes_groups_dotplot(save_addr=save_addr,filename=f"{filename_prefix}_HVG_dotplot",
+            rank_genes_groups_dotplot(save_addr=save_addr, filename=f"{filename_prefix}{obs_key}_HVG_Dotplot",
                                       adata=adata, groupby=obs_key, key=deg_key, standard_scale="var",
                                       n_genes=plot_gene_num, dendrogram=False, use_raw=use_raw, show=False)
-            _log("Dotplot saved successfully.")
+            logger.info("Dotplot saved successfully.")
         except Exception as e:
-            _log(f"Plot generation failed: {e}")
-
+            logger.info(f"Plot generation failed: {e}")
+    
     groups = adata.uns[deg_key]['names'].dtype.names
     # 合并所有 group 的结果
     df_all = pd.concat([
         sc.get.rank_genes_groups_df(adata, group=grp, key=deg_key).assign(cluster=grp)
         for grp in groups
     ])
-
+    
     # 第一种排序方式：按 logfoldchanges 降序，再按 names 升序
     df_sorted_logfc = df_all.sort_values(by=['names', 'logfoldchanges'], ascending=[True, False])
-
+    
     # 第二种排序方式：按 pvals_adj 升序，再按 cluster 升序
     df_sorted_pval = df_all.sort_values(by=['cluster', 'pvals_adj'], ascending=[True, True])
-
+    
     # 保存到 Excel 两个 sheet 中
-    abs_csv_path = os.path.join(save_addr,f"{filename_prefix}_HVG.xlsx")
+    abs_csv_path = os.path.join(save_addr, f"{filename_prefix}_HVG.xlsx")
     try:
         with pd.ExcelWriter(abs_csv_path, engine='xlsxwriter') as writer:
             df_sorted_logfc.to_excel(writer, sheet_name='Sorted_by_logFC', index=False)
             df_sorted_pval.to_excel(writer, sheet_name='Sorted_by_pval', index=False)
-            _log("Excel file saved successfully.")
+            logger.info("Excel file saved successfully.")
     except Exception as e:
-        _log(f"Error saving Excel file: {e}")
-
-    _log("Successfully saved.")
+        logger.info(f"Error saving Excel file: {e}")
+    
+    logger.info("Successfully saved.")
     return adata
 
-
+@logged
 def score_gene_analysis(marker_dict, adata_subset,
                         downsample=False, plot=False, obs_key=None, save_addr=None):
     """
@@ -222,20 +219,17 @@ def score_gene_analysis(marker_dict, adata_subset,
     AnnData
         新 AnnData，仅包含打分结果和必要元数据
     """
-    def _log(msg):
-        print(f"[score_gene_analysis] {msg}")
-
     # 参数检查
     if (plot or downsample) and (obs_key is None):
         raise ValueError("obs_key must be provided when using downsample or plot=True")
 
     # 下采样
     if isinstance(downsample, (float, int)) and downsample > 0:
-        _log(f"Downsampling with parameter={downsample}")
+        logger.info(f"Downsampling with parameter={downsample}")
         adata_subset = obs_keywise_downsample(adata_subset, obs_key, downsample)
 
     # Step 1: 计算每个基因集分数
-    _log("Scoring gene sets...")
+    logger.info("Scoring gene sets...")
     score_cols = []
     for key, genes in marker_dict.items():
         score_name = f"score_{key}"
@@ -254,7 +248,7 @@ def score_gene_analysis(marker_dict, adata_subset,
     if obs_key is not None and obs_key not in col_list:
         col_list.append(obs_key)
 
-    _log(f"Keeping {len(col_list)} columns in obs.")
+    logger.info(f"Keeping {len(col_list)} columns in obs.")
 
     # Step 3: 构建新的 AnnData
     var_df = pd.DataFrame(
@@ -273,7 +267,7 @@ def score_gene_analysis(marker_dict, adata_subset,
             save_addr = "./fig/"
         os.makedirs(save_addr, exist_ok=True)
 
-        _log("Plotting dotplot...")
+        logger.info("Plotting dotplot...")
         try:
             with plt.rc_context():
                 sc.pl.dotplot(adata_subset, groupby=obs_key, var_names=score_cols,
@@ -281,16 +275,14 @@ def score_gene_analysis(marker_dict, adata_subset,
                 fname_base = os.path.join(save_addr, f"GeneScore_by_{obs_key}")
                 plt.savefig(f"{fname_base}.pdf", bbox_inches="tight", dpi=300)
                 plt.savefig(f"{fname_base}.png", bbox_inches="tight", dpi=300)
-                _log(f"Saved dotplot to {fname_base}.pdf/png")
+                logger.info(f"Saved dotplot to {fname_base}.pdf/png")
         except Exception as e:
-            _log(f"Plot failed: {e}")
+            logger.info(f"Plot failed: {e}")
 
-    _log("Finished scoring.")
+    logger.info("Finished scoring.")
     return adata_score
 
 
-def sanitize_filename(filename):
-    return re.sub(r'[<>:"/\\|?*]', '_', filename)
 
 def get_cluster_counts(adata, obs_key="Subset_Identity", group_by="orig.project",
                        drop_values=None, drop_axis="index"):
@@ -342,7 +334,7 @@ def get_cluster_proportions(adata, obs_key="Subset_Identity", group_by="orig.pro
     props.attrs["group_by"] = group_by
     return props
 
-
+@logged
 def check_counts_layer(adata, layer="counts"):
     """
     检查 adata.layers 中的 'counts' 层是否满足以下条件：
@@ -363,19 +355,19 @@ def check_counts_layer(adata, layer="counts"):
     elif sp.isspmatrix(counts):
         dtype = counts.dtype
     else:
-        raise TypeError(f"{layer} 既不是 ndarray 也不是稀疏矩阵")
-    print(f"{layer}.dtype = {dtype}")
+        raise TypeError(f"{layer} is neither ndarray nor sparse matrix.")
+    logger.info(f"{layer}.dtype = {dtype}")
     if not np.issubdtype(dtype, np.integer):
-        raise TypeError(f"{layer} 不是整数类型！")
+        raise TypeError(f"{layer} is not Int.")
 
     # 非负性检查
     if isinstance(counts, np.ndarray):
         min_val = counts.min()
     else:
         min_val = counts.data.min()
-    print(f"{layer} 最小值 = {min_val}")
+    logger.info(f"{layer} minimum = {min_val}")
     if min_val < 0:
-        raise ValueError(f"{layer} 存在负值 {min_val}！")
+        raise ValueError(f"{layer} has negative value {min_val}！")
 
     # NaN 与 Inf 检查
     if isinstance(counts, np.ndarray):
@@ -384,13 +376,13 @@ def check_counts_layer(adata, layer="counts"):
     else:
         has_nan = np.isnan(counts.data).any()
         has_inf = np.isinf(counts.data).any()
-    print(f"{layer} 含 NaN？{has_nan}, 含 Inf？{has_inf}")
+    logger.info(f"{layer} has NaN? {has_nan}, \nhas Inf?{has_inf}")
     if has_nan:
-        raise ValueError(f"{layer} 中存在 NaN！")
+        raise ValueError(f"{layer} has NaN.")
     if has_inf:
-        raise ValueError(f"{layer} 中存在 Inf！")
+        raise ValueError(f"{layer} has Inf.")
 
-    print(f"{layer} 检查通过：未归一化、整数、无 NaN/Inf。")
+    logger.info(f"{layer} checedk: unscaled, int-type, has no NaN/Inf.")
 
 
 def remap_obs_clusters(adata, mapping, obs_key="tmp", new_key="cluster"):
@@ -429,7 +421,7 @@ def remap_obs_clusters(adata, mapping, obs_key="tmp", new_key="cluster"):
 
     return adata
 
-
+@logged
 def _elbow_detector(ts, cluster_counts, method="kneed", default_cluster=2):
     """
     :param ts: x轴，簇数列表
@@ -458,11 +450,12 @@ def _elbow_detector(ts, cluster_counts, method="kneed", default_cluster=2):
 
     # 检查有效性
     if optimal_t is None:
-        print(f"[_elbow_detector] Failed to fetch the elbow, using default elbow number: {default_cluster}")
+        logger.info(f"Failed to fetch the elbow, using default elbow number: {default_cluster}")
         optimal_t = default_cluster
+    else:
+        logger.info(f"Optimal cluster {optimal_t} found with elbow method.")
 
     return optimal_t
-
 
 def _run_pca(logfc_matrix, n_components=2):
     from sklearn.decomposition import PCA

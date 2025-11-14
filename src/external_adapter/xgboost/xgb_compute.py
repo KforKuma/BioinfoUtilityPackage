@@ -20,12 +20,16 @@ import matplotlib
 matplotlib.use("Agg")  # 必须在导入 pyplot 之前设置后端
 import matplotlib.pyplot as plt
 
+import logging
+from src.utils.hier_logger import logged
+logger = logging.getLogger(__name__)
+
 
 class SkipThis(Exception):
     """Raised when the dataset cannot be split properly and should be skipped."""
     pass
 
-
+@logged
 def _xgb_oversample_data(
         X,
         y,
@@ -108,7 +112,7 @@ def _xgb_oversample_data(
     else:
         raise ValueError("mode must be 'random' or 'smote'")
 
-
+@logged
 def _prepare_subset(adata, obs_select, obs_key, group_key,
                     categorical_key="disease_type", min_samples_per_class=10, verbose=True):
     """
@@ -127,8 +131,8 @@ def _prepare_subset(adata, obs_select, obs_key, group_key,
         adata_sub = adata[adata.obs[obs_key] == obs_select].copy()
 
     if verbose:
-        print("--> Subset selected:")
-        print(adata_sub.obs[obs_key].value_counts())
+        logger.info("Subset selected:")
+        logger.info(adata_sub.obs[obs_key].value_counts())
 
     # （1）单亚群情况
     if isinstance(obs_select, str) or (isinstance(obs_select, (list, np.ndarray)) and len(obs_select) == 1):
@@ -139,8 +143,8 @@ def _prepare_subset(adata, obs_select, obs_key, group_key,
         removed = counts_per_disease.index.difference(valid_diseases)
         adata_sub = adata_sub[adata_sub.obs[categorical_key].isin(valid_diseases)].copy()
         if verbose and len(removed) > 0:
-            print(
-                f"--> Removed disease groups (not enough patients or samples <{min_samples_per_class}): {list(removed)}")
+            logger.info(
+                f"Removed disease groups (not enough patients or samples <{min_samples_per_class}): {list(removed)}")
 
     # （2）多亚群情况
     elif isinstance(obs_select, (list, np.ndarray)):
@@ -152,14 +156,14 @@ def _prepare_subset(adata, obs_select, obs_key, group_key,
             if (counts_per_disease >= 2).all() and total_counts >= min_samples_per_class:
                 valid_celltypes.append(ct)
             elif verbose:
-                print(f"--> Removed cell type {ct} (not enough patients per disease or total <{min_samples_per_class})")
+                logger.info(f"Removed cell type {ct} (not enough patients per disease or total <{min_samples_per_class})")
         if len(valid_celltypes) == 0:
             raise SkipThis("No cell types satisfy the patient/sample count requirements.")
         adata_sub = adata_sub[adata_sub.obs[obs_key].isin(valid_celltypes)].copy()
 
     return adata_sub
 
-
+@logged
 def _check_and_filter_diseases(adata_sub, group_key, categorical_key="disease_type", min_samples_per_class=10, verbose=True):
     """
     检查并过滤疾病分组：
@@ -177,15 +181,15 @@ def _check_and_filter_diseases(adata_sub, group_key, categorical_key="disease_ty
 
     if verbose:
         if len(removed) > 0:
-            print(f"--> Removed categories: {list(removed)}")
-        print("--> Remaining categories:", list(adata_sub.obs[categorical_key].unique()))
+            logger.info(f"Removed categories: {list(removed)}")
+        logger.info("Remaining categories:", list(adata_sub.obs[categorical_key].unique()))
 
     if adata_sub.obs[categorical_key].nunique() <= 1:
         raise SkipThis("Not enough disease groups left for classification after filtering.")
 
     return adata_sub
 
-
+@logged
 def _encode_labels(adata_sub, categorical_key="disease_type", verbose=True):
     """
     将标签编码为整数 codes，同时返回映射字典
@@ -197,12 +201,12 @@ def _encode_labels(adata_sub, categorical_key="disease_type", verbose=True):
     mapping = dict(enumerate(y.cat.categories))
 
     if verbose:
-        print("--> Label mapping:", mapping)
-        print(y.value_counts())
+        logger.info(f"Label mapping: {mapping}")
+        logger.info(y.value_counts())
 
     return y_codes, mapping, y
 
-
+@logged
 def _extract_features(adata_sub, method, train_idx, test_idx, n_components=50, random_state=42, verbose=True):
     """
     提取特征矩阵 X
@@ -243,12 +247,12 @@ def _extract_features(adata_sub, method, train_idx, test_idx, n_components=50, r
         except ValueError as e:
             # 自动调小 n_components
             n_components_new = min(X_train_raw.shape[0], X_test_raw.shape[0])
-            print(f"[Warning] PCA ValueError: {e}. Reset n_components={n_components_new}")
+            logger.info(f"Warning, PCA ValueError: {e}. Reset n_components={n_components_new}")
             pca = PCA(n_components=n_components_new, random_state=random_state)
             X_train_pca = pca.fit_transform(X_train_scaled)
             X_test_pca = pca.transform(X_test_scaled)
         if verbose:
-            print(f"--> PCA explained variance (first 5): {pca.explained_variance_ratio_[:5]}")
+            logger.info(f"PCA explained variance (first 5): {pca.explained_variance_ratio_[:5]}")
 
     # --- 根据方法返回结果 ---
     if method.lower() == "scvi":
@@ -263,7 +267,7 @@ def _extract_features(adata_sub, method, train_idx, test_idx, n_components=50, r
     else:
         raise SkipThis("method must be 'scvi', 'pca' or 'combined'")
 
-
+@logged
 def _stratified_group_split(y_codes, groups, n_splits=5, random_state=42, verbose=True, min_samples_per_class=2):
     """
     使用 StratifiedGroupKFold 拆分训练/测试集，确保每个类别都在训练和测试中出现。
@@ -279,11 +283,11 @@ def _stratified_group_split(y_codes, groups, n_splits=5, random_state=42, verbos
         y_train, y_test = y_codes[train_idx], y_codes[test_idx]
         if set(y_train) == set(y_test):
             if verbose:
-                print(f"--> Successful split on attempt {attempt}: all {len(set(y_train))} classes present.")
+                logger.info(f"Successful split on attempt {attempt}: all {len(set(y_train))} classes present.")
             return train_idx, test_idx, y_codes, {c: c for c in np.unique(y_codes)}
 
     if verbose:
-        print("--> Warning! Could not find a split with all classes in both train/test.")
+        logger.info("Warning! Could not find a split with all classes in both train/test.")
 
     # 兜底：剔除只在 train 或 test 中的类别
     train_idx, test_idx = next(sgkf.split(X_dummy, y_codes, groups))
@@ -291,7 +295,7 @@ def _stratified_group_split(y_codes, groups, n_splits=5, random_state=42, verbos
     keep_classes = set(y_train) & set(y_test)
     dropped = set(y_codes) - keep_classes
     if verbose and dropped:
-        print(f"--> Dropping problematic classes (not in both train/test): {dropped}")
+        logger.info(f"Dropping problematic classes (not in both train/test): {dropped}")
 
     mask_keep = np.isin(y_codes, list(keep_classes))
     y_codes_filtered = y_codes[mask_keep]
@@ -314,13 +318,13 @@ def _stratified_group_split(y_codes, groups, n_splits=5, random_state=42, verbos
         y_train, y_test = y_codes_remap[train_idx], y_codes_remap[test_idx]
         if set(y_train) == set(y_test):
             if verbose:
-                print(f"--> Successful split after filtering on attempt {attempt}")
+                logger.info(f"Successful split after filtering on attempt {attempt}")
             return train_idx, test_idx, y_codes_remap, class_mapping
 
     # 如果仍失败，则抛出 SkipThis
     raise SkipThis("Unable to find train/test split with all classes present after filtering.")
 
-
+@logged
 def _compute_sample_weights(y_train):
     """
     根据类别频率计算 sample weights
@@ -333,7 +337,6 @@ def _compute_sample_weights(y_train):
     sample_weights = np.array([total / counter[label] for label in y_train])
 
     return sample_weights
-
 
 def _save_dataset(save_path, X_train, X_test, y_train, y_test,
                   train_obs_index, test_obs_index, sample_weights, mapping,
@@ -362,9 +365,9 @@ def _save_dataset(save_path, X_train, X_test, y_train, y_test,
     )
 
     if verbose:
-        print(f"--> Successfully saved dataset to {file_path}")
+        logger.info(f"Successfully saved dataset to {file_path}")
 
-
+@logged
 def xgb_data_prepare(
         adata,
         obs_select=None,
@@ -382,9 +385,9 @@ def xgb_data_prepare(
 ):
     os.makedirs(save_path, exist_ok=True)
 
-    print("[xgb_data_prepare] Start preparting XGB training data.")
+    logger.info("Start preparting XGB training data.")
     # 1. 子集 & 初步过滤
-    print("[xgb_data_prepare] Start filtering.")
+    logger.info("Start filtering.")
     # 最小实验单元是 patient
     adata_sub = _prepare_subset(adata,
                                 obs_select=obs_select,
@@ -400,13 +403,13 @@ def xgb_data_prepare(
                                            verbose=verbose)
 
     # 2. 标签编码
-    print("[xgb_data_prepare] Start labeling tags.")
+    logger.info("Start labeling tags.")
     y_codes, mapping, y = _encode_labels(adata_sub,
                                          categorical_key=categorical_key,
                                          verbose=verbose)
 
     # 3. 分层分组划分
-    print("[xgb_data_prepare] Start stratifying.")
+    logger.info("Start stratifying.")
     groups = adata_sub.obs[group_key].values
     min_patients_per_disease = adata_sub.obs.groupby(categorical_key)[group_key].nunique().min()
     n_splits = min(int(1 / test_size), min_patients_per_disease)
@@ -419,17 +422,17 @@ def xgb_data_prepare(
     )
 
     # 3.x） 修剪 mapping，避免幽灵类别
-    print("[xgb_data_prepare] Trimming missing categories.")
+    logger.info("Trimming missing categories.")
     used_classes = sorted(set(y_codes[train_idx]) | set(y_codes[test_idx]))
     mapping = {cls: name for cls, name in mapping.items() if cls in used_classes}
 
     # 4. 特征提取（PCA 必须在 train 上 fit）
-    print("[xgb_data_prepare] Start extracting eigenvalues.")
+    logger.info("Start extracting eigenvalues.")
     X_train, X_test = _extract_features(adata_sub, method, train_idx, test_idx)
 
     # 5. Oversample
     if oversample:
-        print("[xgb_data_prepare] Start oversampling.")
+        logger.info("Start oversampling.")
         if len(set(y_codes)) > 1:
             try:
                 X_train, y_train, train_obs_index = _xgb_oversample_data(
@@ -437,7 +440,7 @@ def xgb_data_prepare(
                 )
             except ValueError as e:
                 if "Expected n_neighbors" in str(e):
-                    print("[xgb_data_prepare] SMOTE failed due to too few samples, falling back to random oversampling")
+                    logger.info("SMOTE failed due to too few samples, falling back to random oversampling")
                     X_train, y_train, train_obs_index = _xgb_oversample_data(
                         X_train, y_codes[train_idx], adata_sub.obs.index[train_idx], mode="random"
                     )
@@ -446,11 +449,11 @@ def xgb_data_prepare(
         else:
             raise SkipThis("--> Only one class present in training data, skipping.")
     else:
-        print("[xgb_data_prepare] Skip oversampling.")
+        logger.info("Skip oversampling.")
         y_train, train_obs_index = y_codes[train_idx], adata_sub.obs.index[train_idx]
 
     # 6. Sample weights
-    print("[xgb_data_prepare] Start computing sample weights.")
+    logger.info("Start computing sample weights.")
     sample_weights = _compute_sample_weights(y_train) if weightsample else None
 
     # 7. 保存
@@ -458,11 +461,11 @@ def xgb_data_prepare(
     _save_dataset(save_path, method, X_train, X_test, y_train, y_codes[test_idx],
                   train_obs_index, adata_sub.obs.index[test_idx],
                   sample_weights, mapping)
-    print("[xgb_data_prepare] Finished and successfully saved.")
+    logger.info("Finished and successfully saved.")
 
     return
 
-
+@logged
 def xgb_data_prepare_lodo(
         adata,save_path,
         obs_select=None,
@@ -514,11 +517,11 @@ def xgb_data_prepare_lodo(
     None
     """
     os.makedirs(save_path, exist_ok=True)
-    print("[xgb_data_prepare_lodo] Start preparting XGB-lodo data.")
+    logger.info("Start preparting XGB-lodo data.")
 
     # 1. 子集 & 初步过滤
     # 这一步规则完全相同：确保每个样本有 >= 2个patient，这样才能lodo；>= 2个疾病分类，这样才能学习
-    print("[xgb_data_prepare_lodo] Start filtering.")
+    logger.info("Start filtering.")
     adata_sub = _prepare_subset(adata,
                                 obs_select=obs_select,
                                 obs_key=obs_key,
@@ -534,7 +537,7 @@ def xgb_data_prepare_lodo(
 
     # 2. 标签编码
     # 这一步完全相同
-    print("[xgb_data_prepare_lodo] Start labeling tags.")
+    logger.info("Start labeling tags.")
     y_codes, mapping, y = _encode_labels(adata_sub, categorical_key=categorical_key, verbose=verbose)
 
     # 3. 更新：循环分组生成子数据集，并顺带检查是否有幽灵类别不能满足
@@ -546,11 +549,11 @@ def xgb_data_prepare_lodo(
     total = len(uniques)
 
     for i, donor in enumerate(uniques, 1):
-        print(f"[xgb_data_prepare_lodo] {i}/{total} • working on {donor}")
+        logger.info(f"{i}/{total} • working on {donor}")
 
         # ...你的处理逻辑...
         cell_num = (adata_sub.obs["Patient"].eq(donor)).sum()
-        print(f"[xgb_data_prepare_lodo] Donor: {donor},total cells: {cell_num}")
+        logger.info(f"Donor: {donor},total cells: {cell_num}")
 
         # 定义训练/测试集
         train_idx = adata_sub.obs["Patient"] != donor
@@ -558,7 +561,7 @@ def xgb_data_prepare_lodo(
 
         if train_idx.sum() == 0 or test_idx.sum() == 0:
             # 不应该发生这种情况
-            print(f"--> Triggers length boundary condition, check data preprocessing.")
+            logger.info(f"Triggers length boundary condition, check data preprocessing.")
             continue
 
         # 4. 特征提取（PCA 必须在 train 上 fit）
@@ -580,12 +583,12 @@ def xgb_data_prepare_lodo(
         _save_dataset(save_path, X_train, X_test, y_train, y_test,
                       train_obs_index, test_obs_index,
                       sample_weights, mapping, file_name)
-        print(f"[xgb_data_prepare_lodo] Sample successfully finished and saved.")
+        logger.info(f"Sample successfully finished and saved.")
 
     return
 
 
-
+@logged
 def polarised_f1(y_true, y_pred):
     '''
     TODO：有待测试是否能够作为 XGBClassifier 对象的 eval_metric 参数传入
@@ -597,7 +600,7 @@ def polarised_f1(y_true, y_pred):
     mask = np.isin(y_true, [a_class, b_class])
     return 'polarised_f1', f1_score(y_true[mask], y_pred[mask], average='macro')
 
-
+@logged
 def xgboost_process(save_path, filename_prefix=None, eval_metric="mlogloss",
                     npz_file=None, do_return=False, verbose=True, **kwargs):
     """
@@ -679,8 +682,8 @@ def xgboost_process(save_path, filename_prefix=None, eval_metric="mlogloss",
     y_pred = clf.predict(X_test)
 
     if verbose:
-        print(f"[xgboost_process] Accuracy: {accuracy_score(y_test, y_pred):.4f}")
-        print(classification_report(y_test, y_pred))
+        logger.info(f"Accuracy: {accuracy_score(y_test, y_pred):.4f}")
+        logger.info(classification_report(y_test, y_pred))
 
     # 保存模型
     # 默认保存在（无filename）model.json
@@ -689,12 +692,12 @@ def xgboost_process(save_path, filename_prefix=None, eval_metric="mlogloss",
     clf.save_model(abs_path)
 
     if verbose:
-        print(f"[xgboost_process] Model saved at {abs_path}")
+        logger.info(f"Model saved at {abs_path}")
 
     if do_return:
         return clf
 
-
+@logged
 def xgboost_process_lodo(save_path, filename_prefix=None, eval_metric="mlogloss",
                          verbose=False, **kwargs):
     """
@@ -707,7 +710,7 @@ def xgboost_process_lodo(save_path, filename_prefix=None, eval_metric="mlogloss"
 
     for i, file in enumerate(files, start=1):
         donor = file.split("_")[1]
-        print(f"[xgboost_process_lodo] ({i}/{total}) Processing donor: {donor}")
+        logger.info(f"({i}/{total}) Processing donor: {donor}")
         npz_path = os.path.join(save_path, file)
 
         xgboost_process(
@@ -719,4 +722,4 @@ def xgboost_process_lodo(save_path, filename_prefix=None, eval_metric="mlogloss"
             **kwargs
         )
 
-    print("[xgboost_process_lodo] All donors processed.")
+    logger.info("All donors processed.")

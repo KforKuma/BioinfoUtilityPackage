@@ -11,6 +11,11 @@ from settings import DEFAULT_CPDB_SEP
 
 import ktplotspy as kpy
 
+import logging
+from src.utils.hier_logger import logged
+logger = logging.getLogger(__name__)
+
+@logged
 def cpdb_heatmap(CIObject,
                  output_dir,
                  filename_prefix,
@@ -80,7 +85,7 @@ def cpdb_heatmap(CIObject,
     if save_png:
         fig.savefig(f"{base_path}.png", dpi=300, bbox_inches="tight")
 
-    print(f"[cpdb_heatmap] Saved: {filename} (.pdf/.png)")
+    logger.info(f"Saved: {filename} (.pdf/.png)")
     if show:
         plt.show()
     else:
@@ -88,7 +93,7 @@ def cpdb_heatmap(CIObject,
 
     return fig
 
-
+@logged
 def cpdb_dotplot(CIObject,AnndataObject,
                  cell_type1,cell_type2,celltype_key,
                  output_dir,
@@ -159,16 +164,14 @@ def cpdb_dotplot(CIObject,AnndataObject,
     if save_png:
         g.save(f"{base_path}.png", dpi=300, bbox_inches="tight")
 
-    print(f"[cpdb_dotmap] Saved: {filename} (.pdf/.png)")
+    logger.info(f"Saved: {filename} (.pdf/.png)")
     if show:
         print(g)
 
     return g
 
 
-
-
-
+@logged
 def cpdb_chordplot(CIObject,AnndataObject,
                    cell_type1,cell_type2,celltype_key,interaction,
                    output_dir, filename_prefix,
@@ -222,7 +225,7 @@ def cpdb_chordplot(CIObject,AnndataObject,
     if save_png:
         g.save(f"{base_path}.png", dpi=300, bbox_inches="tight")
 
-    print(f"[cpdb_chordplot] Saved: {filename} (.pdf/.png)")
+    logger.info(f"Saved: {filename} (.pdf/.png)")
     if show:
         print(g)
 

@@ -11,8 +11,12 @@ import matplotlib.pyplot as plt
 matplotlib.use('Agg')  # 使用无GUI的后端
 
 from src.core.utils.plot_wrapper import ScanpyPlotWrapper
-from src.core.base_anndata_ops import sanitize_filename, _elbow_detector
-from src.utils.env_utils import ensure_package
+from src.core.base_anndata_ops import _elbow_detector
+from src.utils.env_utils import ensure_package, sanitize_filename
+
+import logging
+from src.utils.hier_logger import logged
+logger = logging.getLogger(__name__)
 
 def _matplotlib_savefig(fig, abs_file_path, close_after=False):
     os.makedirs(os.path.dirname(abs_file_path), exist_ok=True)
@@ -65,6 +69,7 @@ def _set_plot_style():
         }
     )
 
+@logged
 def geneset_dotplot(adata,
                     markers, marker_sheet,
                     save_addr, filename_prefix, groupby_key, use_raw=True, **kwargs):
@@ -104,7 +109,7 @@ def geneset_dotplot(adata,
         for subcat, genes in gene_list_dict.items():
             missing_genes = [gene for gene in genes if gene not in valid_genes]
             if missing_genes:
-                print(f"[geneset_dotplot] Genes missing in '{subcat}' ({facet_name}): {missing_genes}")
+                logger.info(f"Genes missing in '{subcat}' ({facet_name}): {missing_genes}")
 
             # 保留有效基因
             valid_sublist = [gene for gene in genes if gene in valid_genes]
@@ -112,7 +117,7 @@ def geneset_dotplot(adata,
                 cleaned_gene_list_dict[subcat] = valid_sublist
 
         if not cleaned_gene_list_dict:
-            print(f"[geneset_dotplot] All gene groups for facet '{facet_name}' are empty after filtering. Skipping this plot.")
+            logger.info(f"All gene groups for facet '{facet_name}' are empty after filtering. Skipping this plot.")
             continue
 
         # 构造 kwargs（传入 dotplot）
@@ -127,22 +132,22 @@ def geneset_dotplot(adata,
         )
 
         if use_raw:
-            print("[geneset_dotplot] Now using raw data of anndata object.")
+            logger.info("Now using raw data of anndata object.")
         if not use_raw:
             if "scvi_normalized" in adata.layers.keys():
-                print("[geneset_dotplot] Using layer 'scvi_normalized'.")
+                logger.info("Using layer 'scvi_normalized'.")
                 dotplot_kwargs["layer"] = "scvi_normalized"
 
         # 删除外部可能传入的 layer
         if "layer" in kwargs and use_raw:
-            print("[geneset_dotplot] Warning: Ignoring 'layer' argument because use_raw=True.")
+            logger.info("Warning: Ignoring 'layer' argument because use_raw=True.")
             kwargs.pop("layer")
 
         dotplot_kwargs.update(kwargs)
         dotplot(**dotplot_kwargs)
 
 
-
+@logged
 def plot_stacked_bar(cluster_counts,
                      cluster_palette=None,
                      xlabel_rotation=0,
@@ -174,7 +179,7 @@ def plot_stacked_bar(cluster_counts,
         X轴标签旋转角度。
     plot : bool, default True
         是否直接显示图像（Jupyter中）。
-    filename : str, optional
+    filename_prefix : str, optional
         保存文件的路径（不带后缀时会自动生成 .png/.pdf）。
     save : bool, default True
         是否保存图像。
@@ -215,12 +220,12 @@ def plot_stacked_bar(cluster_counts,
     else:
         plt.close(fig)
 
-
+@logged
 def plot_stacked_violin(adata,
                       output_dir,filename_prefix,save_addr,
                       gene_dict,
                       cell_type,obs_key="Subset_Identity",
-                      group_by="disease",**kwargs):
+                      group_by="disease",split=False,**kwargs):
     '''
 
     :param adata:
@@ -252,7 +257,7 @@ def plot_stacked_violin(adata,
         elif isinstance(cell_type, str):
             adata_subset = adata[adata.obs[obs_key] == cell_type]
         else:
-            raise ValueError("[easy_stack_violin] cell type must be a list or string.")
+            raise ValueError("Cell type must be a list or string.")
 
         default_params = {"swap_axes":False,
                           "cmap":"viridis_r",
@@ -262,7 +267,7 @@ def plot_stacked_violin(adata,
         }
         default_params.update(kwargs)
         if kwargs:
-            print(f"[easy_stack_violin] Overriding defaults with: {kwargs}")
+            logger.info(f"Overriding defaults with: {kwargs}")
 
         stacked_violin(
             filename=filename,save_addr=output_dir,
@@ -270,7 +275,7 @@ def plot_stacked_violin(adata,
             **default_params
             )
 
-
+@logged
 def plot_cosg_rankplot(adata, groupby, save_addr=None,csv_name=None, filename=None, top_n=5, do_return=False):
     """
     Plot the rank plot for COSG marker genes.
@@ -335,7 +340,7 @@ def plot_cosg_rankplot(adata, groupby, save_addr=None,csv_name=None, filename=No
     if do_return:
         return adata, markers
 
-
+@logged
 def plot_piechart(outer_count, inner_count, colormaplist,
                   plot_title=None, plot=False, save=True, save_path=None,filename=None):
     """
@@ -395,7 +400,7 @@ def plot_piechart(outer_count, inner_count, colormaplist,
     else:
         plt.close(fig)
 
-
+@logged
 def _format_labels_in_lines(labels, max_line_length=60, max_label=None):
     '''
     为图注自动换行：限制每行最大字符数
@@ -426,7 +431,7 @@ def _format_labels_in_lines(labels, max_line_length=60, max_label=None):
 
     return "  " + "\n  ".join(lines) + "\n  "
 
-
+@logged
 def _format_tidy_label(cluster_to_labels):
     '''
     返回一个重整细胞名的字典，格式为 "[disease] subtype"
@@ -448,7 +453,7 @@ def _format_tidy_label(cluster_to_labels):
         new_dict[cluster_id] = new_labels
     return new_dict
 
-
+@logged
 def _plot_pca_with_cluster_legend(
     result_df,
     cluster_to_labels,
@@ -547,7 +552,7 @@ def _plot_pca_with_cluster_legend(
 
     return abs_fig_path + ".png"
 
-
+@logged
 def _pca_cluster_process(result_df, save_addr, filename, figsize=(10, 6)):
     from sklearn.cluster import KMeans
 
@@ -574,7 +579,7 @@ def _pca_cluster_process(result_df, save_addr, filename, figsize=(10, 6)):
 
     return cluster_to_labels
 
-
+@logged
 def _plot_pca(result_df, pca,  color_by,
               figsize=(12, 10),
               save_addr=None, filename_prefix=None):
@@ -654,7 +659,7 @@ def _plot_pca(result_df, pca,  color_by,
     fig.tight_layout()
     _matplotlib_savefig(fig, os.path.join(save_addr, filename2),close_after=True)
 
-
+@logged
 def process_resolution_umaps(adata, output_dir, resolutions,use_raw=True,**kwargs):
     """
     生成 UMAP 图像，用于不同 Leiden 分辨率对比。
@@ -671,6 +676,7 @@ def process_resolution_umaps(adata, output_dir, resolutions,use_raw=True,**kwarg
         **kwargs
     )
 
+@logged
 def plot_QC_umap(adata, save_addr, filename_prefix):
     umap_plot = ScanpyPlotWrapper(sc.pl.umap)
     key_dict = {

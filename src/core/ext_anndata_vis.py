@@ -12,6 +12,11 @@ from src.core.utils.plot_wrapper import ScanpyPlotWrapper
 from src.core.base_anndata_ops import _elbow_detector
 from src.core.base_anndata_vis import _plot_pca_with_cluster_legend
 
+import logging
+from src.utils.hier_logger import logged
+logger = logging.getLogger(__name__)
+
+@logged
 def pca_cluster_process(result_df, save_addr, filename, **kwargs):
     """
     Compute optimal cluster number using Elbow method and perform K-means clustering.

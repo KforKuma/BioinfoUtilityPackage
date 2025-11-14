@@ -6,6 +6,10 @@ import os,gc,re
 
 from src.utils.env_utils import ensure_package
 
+import logging
+from src.utils.hier_logger import logged
+logger = logging.getLogger(__name__)
+
 '''
 主要函数功能来自先前的src.EasyInterface.Anndata_Annotator.py
 并整合了src.ScanpyTools.AnnotationMaker.py
@@ -18,10 +22,7 @@ class ObsEditor:
 
     def __init__(self, adata: AnnData):
         self._adata = adata
-
-    @staticmethod
-    def _log(msg):
-        print(f"[ObsEditor Message] {msg}")
+        self.logger = logging.getLogger(self.__class__.__name__)
         
     # ------- 代理未知属性 -------
     def __getattr__(self, attr):
@@ -43,20 +44,20 @@ class ObsEditor:
     def add_column(self, col, default):
         """添加一个新的 obs 列"""
         self._adata.obs[col] = default
-        self._log("New category '{}' added".format(col))
+        self.logger("New category '{}' added".format(col))
         return self
 
     def rename_column(self, old, new):
         """重命名 obs 列"""
         self._adata.obs.rename(columns={old: new}, inplace=True)
-        self._log("Rename column '{}' to '{}'".format(old, new))
+        self.logger("Rename column '{}' to '{}'".format(old, new))
         return self
 
     def drop_missing(self, col):
         """去掉指定列中缺失值的细胞"""
         mask = self._adata.obs[col].isna() | (self._adata.obs[col] == None)
         self._adata = self._adata[~mask]
-        self._log("Drop missing column '{}'".format(col))
+        self.logger("Drop missing column '{}'".format(col))
         return self._adata
 
     def slice_with_key(self, obs_key, value, inplace=False):
@@ -78,7 +79,7 @@ class ObsEditor:
             raise ValueError("Argument value must be list, str or int.")
         if inplace:
             self._adata = adata_tmp
-        self._log("Filter by value successfully: '{}'".format(value))
+        self.logger("Filter by value successfully: '{}'".format(value))
         return self._adata
 
     def assign_cluster_identities(self, annotator, anno_obs_key, target_obs_key):
@@ -112,18 +113,18 @@ class ObsEditor:
                 f"The number in new identities: ({len(annotator)}) does not match the number of the reference cluster:  ({len(cluster_ids)})."
             )
         if isinstance(annotator, dict):
-            self._log("Received annotator as a dict.")
+            self.logger.info("Received annotator as a dict.")
             cl_annotation = annotator
         elif isinstance(annotator, list):
-            self._log("Received annotator as a list.")
+            self.logger.info("Received annotator as a list.")
             cl_annotation = dict(zip(cluster_ids, annotator))
-            self._log(f"Generate the dict for you, as following: \n{cl_annotation}")
+            self.logger.info(f"Generate the dict for you, as following: \n{cl_annotation}")
         else:
             raise ValueError("Argument annotator must be a list or dict.")
 
         self._adata.obs[target_obs_key] = self._adata.obs[anno_obs_key].map(cl_annotation)
-
-        print("Identity assignment done.")
+        
+        self.logger.info("Identity assignment done.")
 
     def copy_all_ident(self, adata_from,from_obs_key, to_obs_key):
         """
@@ -158,7 +159,7 @@ class ObsEditor:
             index = obs_data[obs_data == new_ident].index
             self._adata.obs.loc[index, to_obs_key] = new_ident
             cell_counts = len(self._adata.obs[self._adata.obs[to_obs_key] == new_ident])
-            self._log(f"New cell identity '{new_ident}' updated, total count: {cell_counts}")
+            self.logger.info(f"New cell identity '{new_ident}' updated, total count: {cell_counts}")
 
     def change_one_ident_fast(self, obs_key, old, new):
         """
@@ -171,12 +172,13 @@ class ObsEditor:
             # 布尔索引一次完成
             mask = self._adata.obs[obs_key] == old
             self._adata.obs.loc[mask, obs_key] = new
-            self._log(f"Replaced {mask.sum()} cells from '{old}' to '{new}'.")
+            self.logger.info(f"Replaced {mask.sum()} cells from '{old}' to '{new}'.")
         else:
             mask = self._adata.obs[obs_key] == old
             self._adata.obs.loc[mask, obs_key] = new
-            self._log(f"Replaced {mask.sum()} cells from '{old}' to '{new}'.")
+            self.logger.info(f"Replaced {mask.sum()} cells from '{old}' to '{new}'.")
     
+    @logged
     def update_assignment(self,
                           assignment: str or pd.DataFrame,
                           h5ad_dir: str,
@@ -210,7 +212,7 @@ class ObsEditor:
             raise ValueError("Assignment must either be string or a dataframe.")
         
         for subset_filename in set(assignment_sheet[subset_file_col]):
-            self._log(f"Now reading {subset_filename} subset.")
+            self.logger.info(f"Now reading {subset_filename} subset.")
             input_path = f"{h5ad_dir}/{subset_filename}"
             adata_subset = anndata.read(input_path)
             
@@ -219,13 +221,13 @@ class ObsEditor:
                 assignment_sheet[subset_file_col] == subset_filename, obs_key_col
             ].dropna().drop_duplicates()
             obs_key = obs_key_series.iat[0] if not obs_key_series.empty else None
-            self._log(f"Obs key for {subset_filename}: {obs_key}")
+            self.logger.info(f"Obs key for {subset_filename}: {obs_key}")
             
             # identity 映射字典
             subset_data = assignment_sheet[assignment_sheet[subset_file_col] == subset_filename]
             result_dict = subset_data.set_index(subset_no_col)[identity_col].to_dict()
             updated_dict = {str(k): v for k, v in result_dict.items()}
-            self._log(f"Created identity dictionary for {subset_filename} with {len(updated_dict)} entries")
+            self.logger.info(f"Created identity dictionary for {subset_filename} with {len(updated_dict)} entries")
             adata_subset.obs[obs_key] = adata_subset.obs[obs_key].astype(str) # 确保全都是字符串
             adata_subset.obs["tmp"] = adata_subset.obs[obs_key].map(updated_dict)
             unique_identities = adata_subset.obs["tmp"].dropna().unique()
@@ -242,11 +244,11 @@ class ObsEditor:
                     self._adata.obs[output_key] = self._adata.obs[output_key].cat.add_categories(list(new_categories))
             
             for cell_identity in unique_identities:
-                self._log(f"Processing identity: {cell_identity}")
+                self.logger.info(f"Processing identity: {cell_identity}")
                 index = adata_subset.obs_names[adata_subset.obs["tmp"] == cell_identity]
                 self._adata.obs.loc[index, output_key] = cell_identity
                 updated_cells = (self._adata.obs[output_key] == cell_identity).sum()
-                self._log(f"Updated {updated_cells} cells with identity '{cell_identity}'")
+                self.logger.info(f"Updated {updated_cells} cells with identity '{cell_identity}'")
             
             del adata_subset
         
@@ -254,11 +256,11 @@ class ObsEditor:
         if fillna_from_col and fillna_from_col in self._adata.obs.columns:
             n_missing = self._adata.obs[output_key].isna().sum()
             self._adata.obs[output_key] = self._adata.obs[output_key].fillna(self._adata.obs[fillna_from_col])
-            self._log(f"Filled {n_missing} missing '{output_key}' values using '{fillna_from_col}'")
+            self.logger.info(f"Filled {n_missing} missing '{output_key}' values using '{fillna_from_col}'")
         
-        self._log("All assignments applied.")
+        self.logger.info("All assignments applied.")
 
-
+@logged
 def gene_annotator(adata: AnnData, chr_annot_path=None, cyc_annot_path=None):
     """
     Annotate genes with chromosomal, cell cycle and mito/ribo/hb information.
@@ -294,13 +296,13 @@ def gene_annotator(adata: AnnData, chr_annot_path=None, cyc_annot_path=None):
     ]:
         try:
             func(adata, path)
-            print(f"[gene_annotator] {name} info successfully annotated.")
+            logger.info(f"[gene_annotator] {name} info successfully annotated.")
         except Exception as e:
-            print(f"[gene_annotator] Failed {name} info annotation due to {e}")
+            logger.info(f"[gene_annotator] Failed {name} info annotation due to {e}")
 
     return adata
 
-
+@logged
 def _chr_annotator(adata: AnnData, chr_annot_path: str = None):
     """
     Annotates chromosomal information to adata.
@@ -321,7 +323,7 @@ def _chr_annotator(adata: AnnData, chr_annot_path: str = None):
     The chromosomal information will be annotated to adata.var. The key "X" will be set to True for genes on the X chromosome, and the key "Y" will be set to True for genes on the Y chromosome.
     """
     if chr_annot_path is None or not os.path.exists(chr_annot_path):
-        print("[gene_annotator] Try retrieving chromosomal info from Ensembl Biomart.")
+        logger.info("Try retrieving chromosomal info from Ensembl Biomart.")
         try:
             annot = sc.queries.biomart_annotations(
                 "hsapiens",
@@ -330,7 +332,7 @@ def _chr_annotator(adata: AnnData, chr_annot_path: str = None):
             chr_annot_path = os.path.join(os.getcwd(),"HSA_Genome_Annotation.csv") if chr_annot_path is None else chr_annot_path
             annot.to_csv(chr_annot_path)
         except Exception as e:
-            print(f"[gene_annotator] Failed to retrieve database because of {e}, \n "
+            logger.info(f"Failed to retrieve database because of {e}, \n "
                   f"try downloading manually, from https://www.ensembl.org/biomart/martview")
             return
     else:
@@ -340,6 +342,7 @@ def _chr_annotator(adata: AnnData, chr_annot_path: str = None):
     adata.var["X"] = adata.var_names.isin(annot.index[annot.chromosome_name == "X"])
     adata.var["Y"] = adata.var_names.isin(annot.index[annot.chromosome_name == "Y"])
 
+@logged
 def _cyc_annotator(adata: AnnData, cyc_annot_path: str = None):
     '''
 
@@ -350,7 +353,7 @@ def _cyc_annotator(adata: AnnData, cyc_annot_path: str = None):
     if cyc_annot_path is None or not os.path.exists(cyc_annot_path):
         ensure_package("zipfile")
         import zipfile
-        print("[gene_annotator] Try retrieving chromosomal info from Ensembl Biomart.")
+        logger.info("Try retrieving chromosomal info from Ensembl Biomart.")
         try:
             ensure_package("pooch")
             import pooch
@@ -361,7 +364,7 @@ def _cyc_annotator(adata: AnnData, cyc_annot_path: str = None):
                 path=path,fname=filename
             )
         except Exception as e:
-            print(f"[gene_annotator] Failed to retrieve database because of {e}, \n "
+            logger.info(f"Failed to retrieve database because of {e}, \n "
                   f"try downloading manually, from https://www.ensembl.org/biomart/martview")
             return
     else:
@@ -376,6 +379,7 @@ def _cyc_annotator(adata: AnnData, cyc_annot_path: str = None):
     adata.uns["g2m_genes"] = g2m_genes
     sc.tl.score_genes_cell_cycle(adata, s_genes=s_genes, g2m_genes=g2m_genes)
 
+@logged
 def _mrh_annotator(adata):
     # 基本基因注释
     # mitochondrial genes

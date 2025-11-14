@@ -5,6 +5,11 @@ import pandas as pd
 import scanpy as sc
 import os, re
 
+import logging
+from src.utils.hier_logger import logged
+logger = logging.getLogger(__name__)
+
+@logged
 def prepare_CPDB_input(adata: AnnData,
                        output_dir: str,
                        cell_by_obs: str = "Subset_Identity",
@@ -39,11 +44,11 @@ def prepare_CPDB_input(adata: AnnData,
     :return:
     '''
     if group_by_obs is None:
-        print(f"[prepare_CPDB_input] Skip grouping, take AnndataObject as whole.")
+        logger.info(f"Skip grouping, take AnndataObject as whole.")
     else:
         if cell_by_obs not in adata.obs.columns or group_by_obs not in adata.obs.columns:
             raise ValueError("Please recheck adata.obs column keys.")
-        print(f"[prepare_CPDB_input] Split by {group_by_obs}")
+        logger.info(f"Split by {group_by_obs}")
 
     np.random.seed(random_state)
 
@@ -53,7 +58,7 @@ def prepare_CPDB_input(adata: AnnData,
         valid_subsets = subset_counts[subset_counts >= min_count].index
         adata_subset = adata_subset[adata_subset.obs[cell_by_obs].isin(valid_subsets)].copy()
         after_filtered = adata_subset.shape[0]
-        print(f"[prepare_CPDB_input] Cell count before {before_filtered} → after {after_filtered}")
+        logger.info(f"Cell count before {before_filtered} → after {after_filtered}")
 
         if downsample:
             selected_indices = []
@@ -62,8 +67,8 @@ def prepare_CPDB_input(adata: AnnData,
                 selected_indices.extend(np.random.choice(indices, n, replace=False))
             adata_subset = adata_subset[selected_indices].copy()
 
-        print("[prepare_CPDB_input] Current subset components:\n")
-        print(adata_subset.obs[cell_by_obs].value_counts())
+        logger.info("Current subset components:\n")
+        logger.info(adata_subset.obs[cell_by_obs].value_counts())
 
         save_dir = os.path.join(output_dir, dirname)
         os.makedirs(save_dir, exist_ok=True)
@@ -90,7 +95,7 @@ def prepare_CPDB_input(adata: AnnData,
         count_file_path = os.path.join(save_dir, "counts.h5ad")
         adata_out.write(count_file_path)
 
-        print(f"[prepare_CPDB_input] File successfully saved in: {save_dir}")
+        logger.info(f"File successfully saved in: {save_dir}")
 
     if group_by_obs is None:
         _adata_subset_process(adata_subset=adata, dirname="total",

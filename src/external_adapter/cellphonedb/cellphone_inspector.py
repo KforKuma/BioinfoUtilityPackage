@@ -17,6 +17,10 @@ from src.external_adapter.cellphonedb.support import (
 
 import os, re
 
+import logging
+from src.utils.hier_logger import logged
+logger = logging.getLogger(__name__)
+
 
 # 对接 cellphonedb v5
 class CellphoneInspector():
@@ -55,14 +59,11 @@ class CellphoneInspector():
         self.deg = degs_analysis
         self.cellsign = cellsign
         self.data = self._load_file(cpdb_outfile)  # 格式为字典
-        self._log(f"Initialized with CPDB output directory: {cpdb_outfile}")
-
-    @staticmethod
-    def _log(msg):
-        print(f"[CellphoneInspector Message] {msg}")
-
+        self.logger = logging.getLogger(self.__class__.__name__)
+        self.logger.info(f"Initialized with CPDB output directory: {cpdb_outfile}")
+    
     def _load_file(self, path):
-        self._log("Loading CellPhoneDB output files...")
+        self.logger.info("Loading CellPhoneDB output files...")
         def find_file(pattern):
             matches = [s for s in os.listdir(path) if re.search(pattern, s)]
             if not matches:
@@ -97,16 +98,16 @@ class CellphoneInspector():
             if not matches:
                 raise FileNotFoundError(f"No file matching pattern '{v}.txt' in {path}")
             if len(matches) > 1:
-                self._log(f"Warning: multiple files match pattern '{v}.txt', using the first one: {matches[0]}")
+                self.logger.info(f"Warning: multiple files match pattern '{v}.txt', using the first one: {matches[0]}")
             df = pd.read_csv(os.path.join(path, matches[0]), sep="\t", low_memory=False)
             result[k] = df
 
         if "cellsign_interactions" not in result.keys() and "cellsign_deconvoluted" not in result.keys():
-            self._log("Cannot detect cellsign files, fallback to self.cellsign=False")
+            self.logger.info("Cannot detect cellsign files, fallback to self.cellsign=False")
 
-        self._log(f"Loaded tables: {list(result.keys())}")
+        self.logger.info(f"Loaded tables: {list(result.keys())}")
         for k, v in result.items():
-            self._log(f"  {k}: {v.shape[0] if v is not None else 0} rows × {v.shape[1] if v is not None else 0} cols")
+            self.logger.info(f"  {k}: {v.shape[0] if v is not None else 0} rows × {v.shape[1] if v is not None else 0} cols")
 
         return result
 
@@ -148,24 +149,24 @@ class CellphoneInspector():
         :param use_cellsign: 当且仅当 self.cellsign = True 时可用，否则自动忽略
         :return: 为 ci 类增加四个属性：ci.pvals, ci.means, ci.matrix, ci.meta
         '''
-        self._log("Preparing CPDB matrices...")
+        self.logger.info("Preparing CPDB matrices...")
 
         means_mat = self._prep_table(data=self.data["means"])
         pvals_mat = self._prep_table(data=self.data["pvalues"])
         interaction_scores = self.data["interaction_scores"]
-        self._log(f"Means table: {means_mat.shape}, P-values table: {pvals_mat.shape}")
+        self.logger.info(f"Means table: {means_mat.shape}, P-values table: {pvals_mat.shape}")
         self.means = means_mat
         self.pvals = pvals_mat
 
         if means_mat.shape[0] == 0:
-            self._log("[Warning] Empty means table — skipping further processing.")
+            self.logger.info("[Warning] Empty means table — skipping further processing.")
             return
 
         col_start = (
             DEFAULT_V5_COL_START if pvals_mat.columns[DEFAULT_CLASS_COL] == "classification" else DEFAULT_COL_START)
 
         if means_mat.shape[1] <= col_start:
-            self._log("[Warning] No sample columns detected after metadata — check input file.")
+            self.logger.info("[Warning] No sample columns detected after metadata — check input file.")
             return
 
         # 对齐 pvals 和 means 矩阵
@@ -202,7 +203,7 @@ class CellphoneInspector():
             self.mode = "interaction_scores"
 
 
-        self._log("Finished preparing CPDB tables.")
+        self.logger.info("Finished preparing CPDB tables.")
 
         # 处理额外添加的 meta 信息
         if col_start == DEFAULT_V5_COL_START and add_meta:
@@ -224,8 +225,9 @@ class CellphoneInspector():
             self.meta = {"directionality": direc,
                          "classification": classif,
                          "is_integrin": is_int}
-            self._log("Constructed mapping dictionaries for directionality, classification, and integrin.")
-
+            self.logger.info("Constructed mapping dictionaries for directionality, classification, and integrin.")
+    
+    @logged
     def prepare_cell_metadata(self, metadata, celltype_key, groupby_key=None):
         '''
 
@@ -249,12 +251,12 @@ class CellphoneInspector():
             函数会仅保留同一样本内的分组。当采用此参数时，推荐接下来 keep_significant_only = False 进行观察。
         :return: 为 ci 对象增加一个属性 ci.cell_metadata；存在 group 时增加 ci.group_info
         '''
-        self._log("Preparing cell information...")
+        self.logger.info("Preparing cell information...")
         # 确保为 category
         if not metadata[celltype_key].dtype.name == "category":
             metadata[celltype_key] = metadata[celltype_key].astype("category")
         if groupby_key is not None:
-            self._log(f"Grouping by '{groupby_key}' within cell type '{celltype_key}'")
+            self.logger.info(f"Grouping by '{groupby_key}' within cell type '{celltype_key}'")
             # 确保为 category
             if not metadata[groupby_key].dtype.name == "category":
                 metadata[groupby_key] = metadata[groupby_key].astype("category")
@@ -266,14 +268,14 @@ class CellphoneInspector():
             self.group_info = list(metadata[groupby_key].cat.categories)
 
         elif groupby_key is None:
-            self._log("No groupby key provided, using cell type only")
+            self.logger.info("No groupby key provided, using cell type only")
             metadata["_labels"] = metadata[celltype_key]
             self.group_info = None
 
         self.cell_metadata = metadata
-        self._log(f"Prepared metadata with {metadata.shape[0]} cells and columns {list(metadata.columns)}")
-
-
+        self.logger.info(f"Prepared metadata with {metadata.shape[0]} cells and columns {list(metadata.columns)}")
+    
+    @logged
     def prepare_celltype_pairs(self, cell_type1, cell_type2, lock_celltype_direction=False):
         '''
         Example
@@ -317,7 +319,8 @@ class CellphoneInspector():
         ct_columns = [ct for ct in self.means.columns if re.search(cell_type, ct)]
 
         return ct_columns
-
+    
+    @logged
     def filter_and_cluster(self, gene_query, celltype_pairs,
                            alpha=0.05, keep_significant_only=True, cluster_rows=True, standard_scale=True):
         '''
@@ -336,7 +339,7 @@ class CellphoneInspector():
         :param standard_scale:
         :return:
         '''
-        self._log("Filtering and hierarchical clustering matrices...")
+        self.logger.info("Filtering and hierarchical clustering matrices...")
         means_matx = self.means[self.means.interacting_pair.isin(gene_query)][celltype_pairs]
         pvals_matx = self.pvals[self.pvals.interacting_pair.isin(gene_query)][celltype_pairs]
         interact_matx = self.matrix[self.matrix.interacting_pair.isin(gene_query)][celltype_pairs]
@@ -372,7 +375,7 @@ class CellphoneInspector():
                 interact_matx = interact_matx.loc[keep_rows]
 
                 if interact_matx.size > 0:
-                    self._log(f"Totally {interact_matx.size} reads found available after significance filtering.")
+                    self.logger.info(f"Totally {interact_matx.size} reads found available after significance filtering.")
                 else:
                     raise ValueError("Your data may not contain significant hits.")
             else:
@@ -382,7 +385,7 @@ class CellphoneInspector():
         if cluster_rows:
             if means_matx.shape[0] > 2:
                 # 行聚类获取顺序
-                self._log("Performing hierarchical clustering...")
+                self.logger.info("Performing hierarchical clustering...")
                 h_order = hclust(means_matx, axis=0)  # axis Index = 0 and columns = 1，对行进行层次聚类
 
                 # 对主要矩阵重新排序
@@ -396,7 +399,7 @@ class CellphoneInspector():
                 else:
                     raise ValueError("No significant hits found after clustering. ")
         else:
-            self._log("Skipping scaling step.")
+            self.logger.info("Skipping scaling step.")
 
         def safe_scale(r):
             denom = np.max(r) - np.min(r)
@@ -413,14 +416,15 @@ class CellphoneInspector():
                         "scale": standard_scale,
                         "alpha": alpha,
                         "significance": keep_significant_only}
-
+    
+    @logged
     def format_outcome(self, exclude_interactions=None):
         '''
 
         :param exclude_interactions: list, 包含想要手动排除的作用对，不支持自动检索
         :return: 返回一个包含主要输出的 pd.Dataframe， 对其进行手动修改也是容易的
         '''
-        self._log("Formatting output table...")
+        self.logger.info("Formatting output table...")
         colm = "scaled_means" if self.outcome["scale"] else "means"
 
         df = self.outcome["means_matx"].melt(ignore_index=False).reset_index()  # 宽变长
@@ -477,7 +481,7 @@ class CellphoneInspector():
                 exclude_interactions = [exclude_interactions]
             df = df[~df.interaction_group.isin(exclude_interactions)]
         else:
-            self._log("No outcome excluded.")
+            self.logger.info("No outcome excluded.")
 
         # 补充计算显著性
         df.pvals = df.pvals.astype(np.float64)
@@ -493,9 +497,9 @@ class CellphoneInspector():
             df["classification"] = [self.meta["classification"].get(i, np.nan) for i in df.index]
 
         if df.shape[0] == 0:
-            self._log("The result is empty in this case.")
+            self.logger.info("The result is empty in this case.")
         else:
-            self._log(f"Formatted output: {df.shape} rows × {df.shape[1]} cols")
+            self.logger.info(f"Formatted output: {df.shape} rows × {df.shape[1]} cols")
 
         self.outcome.update({"final":df})
 

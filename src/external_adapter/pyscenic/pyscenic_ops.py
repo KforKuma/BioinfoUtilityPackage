@@ -1,20 +1,42 @@
-import pandas as pd
-import numpy as np
-from scipy.spatial.distance import jensenshannon
+# =====================
+# 标准库
+# =====================
+import gc
+import logging
+import os
+import re
+import sys
+from typing import Any, Dict, List
 
-import os, gc, sys, re
-from typing import Dict, List, Any
-# from MulticoreTSNE import MulticoreTSNE as TSNE
-import seaborn as sns
-
+# =====================
+# 第三方库
+# =====================
+import h5py
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
-import h5py
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import scipy.spatial.distance as ssd
 import statsmodels.api as sm
 from adjustText import adjust_text
 
-######################################
+# 如果需要，可以以后再启用
+# from MulticoreTSNE import MulticoreTSNE as TSNE
 
+# =====================
+# 本地模块 / 自定义包
+# =====================
+from src.utils.hier_logger import logged
+
+# =====================
+# logger 初始化
+# =====================
+logger = logging.getLogger(__name__)
+
+
+######################################
+@logged
 def regulons_to_gene_lists(incid_mat: pd.DataFrame,
                            omit_empty=True) -> Dict[str, List[Any]]:
     """
@@ -41,7 +63,7 @@ def regulons_to_gene_lists(incid_mat: pd.DataFrame,
             regulon_dict.pop(keys)
     return regulon_dict
 
-
+@logged
 def get_regulons_incid_matrix(loom_file: str) -> pd.DataFrame:
     with h5py.File(loom_file, "r") as f:
         regulon_struct = f["row_attrs/Regulons"][()]  # structured array
@@ -53,7 +75,7 @@ def get_regulons_incid_matrix(loom_file: str) -> pd.DataFrame:
         df = pd.DataFrame(data=data, index=genes, columns=regulon_names)
         return df
 
-
+@logged
 def get_regulons_auc_from_h5(loom_file: str,
                              col_attr_name: str = "RegulonsAUC") -> pd.DataFrame:
     '''
@@ -79,7 +101,7 @@ def get_regulons_auc_from_h5(loom_file: str,
         df.columns.name = "cells"
 
     return df
-
+@logged
 def get_most_var_regulon(
     data: pd.DataFrame,
     fit_thr: float = 1.5,
@@ -139,7 +161,7 @@ def get_most_var_regulon(
     hv_mask = cv2[use_for_fit] > fit_model * fit_thr
     hv_regulons = fit_model[hv_mask]
 
-    print(f"[get_most_var_regulon] {len(hv_regulons)} highly variable regulons selected.")
+    logger.info(f"{len(hv_regulons)} highly variable regulons selected.")
 
     if return_names:
         return hv_regulons.index.tolist()
@@ -147,17 +169,17 @@ def get_most_var_regulon(
         return data_no0.loc[hv_regulons.index], mean_auc, cv2, fit_model
 
 
-
+@logged
 def scale_tf_matrix(data):
     return data.sub(data.mean(axis=1), axis=0).div(data.std(axis=1), axis=0)
 
-
+@logged
 def calc_rss_one_regulon(p_regulon,
                          p_celltype):
     jsd = jensenshannon(p_regulon, p_celltype, base=2) ** 2
     return 1 - np.sqrt(jsd)
 
-
+@logged
 def calc_rss(auc: pd.DataFrame,
              cell_annotation: pd.Series,
              cell_types: list = None) -> pd.DataFrame:

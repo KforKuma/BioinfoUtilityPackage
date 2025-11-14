@@ -22,3 +22,6 @@ def count_element_list_occurrence(list_of_lists):
             counter[item] += 1
     return dict(counter)
 
+def sanitize_filename(filename):
+    import re
+    return re.sub(r'[<>:"/\\|?*]', '_', filename)

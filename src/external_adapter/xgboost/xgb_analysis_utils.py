@@ -22,7 +22,11 @@ import matplotlib
 matplotlib.use("Agg")  # 必须在导入 pyplot 之前设置后端
 import matplotlib.pyplot as plt
 
+import logging
+from src.utils.hier_logger import logged
+logger = logging.getLogger(__name__)
 
+@logged
 def _read_lodo_outcome(save_path, filename_prefix=None):
     # 默认名为 f"{save_path}/LODO_{donor}_dataset.npz"
     files = [f for f in os.listdir(save_path)
@@ -40,7 +44,7 @@ def _read_lodo_outcome(save_path, filename_prefix=None):
         donor = m.group(1)
 
         # 开始处理数据
-        print(f"[xgb_outcome_analyze_lodo] ({i}/{total}) Processing donor: {donor}")
+        logger.info(f"({i}/{total}) Processing donor: {donor}")
         npz_path = os.path.join(save_path, file)
         data = np.load(npz_path, allow_pickle=True)
         X_train, X_test, y_train, y_test = data["X_train"], data["X_test"], data["y_train"], data["y_test"];
@@ -70,6 +74,7 @@ def _read_lodo_outcome(save_path, filename_prefix=None):
 
 
     return results
+
 
 def _compute_cm(y_test, y_pred):
     """
@@ -141,7 +146,7 @@ def compute_donor_similarity_matrix(donor_matrix, metric='cosine'):
         sim = 1 - squareform(dist)
     return sim
 
-
+@logged
 def get_internal_clusters(Z, n_leaves):
     """
     遍历 linkage 矩阵，返回每个内部节点对应的叶子 index 列表
@@ -160,6 +165,7 @@ def get_internal_clusters(Z, n_leaves):
         clusters[i + n_leaves] = left_leaves + right_leaves
     return clusters  # key = cluster index, value = list of leaf indices
 
+@logged
 def bootstrap_consensus_dendrogram(sim_matrix, n_bootstrap=100, method="average", support_threshold=0.7):
     """
     基于 donor × donor 相似度矩阵 (sim_matrix) 计算 bootstrap consensus dendrogram

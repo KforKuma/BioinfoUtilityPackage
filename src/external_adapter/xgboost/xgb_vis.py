@@ -22,6 +22,13 @@ import matplotlib
 matplotlib.use("Agg")  # 必须在导入 pyplot 之前设置后端
 import matplotlib.pyplot as plt
 
+from src.core.base_anndata_vis import _matplotlib_savefig
+
+import logging
+from src.utils.hier_logger import logged
+logger = logging.getLogger(__name__)
+
+@logged
 def plot_tree_importance(clf,save_path,filename_prefix):
     """
     Plot feature importance of a XGBoost model.
@@ -46,13 +53,17 @@ def plot_tree_importance(clf,save_path,filename_prefix):
     This function uses the `xgb.plot_importance` function to plot the feature importance of a XGBClassifier model.
     The figure is saved to the specified path with the given filename prefix.
     """
-    xgb.plot_importance(clf, max_num_features=20)
+    ax = xgb.plot_importance(clf, max_num_features=20)
+    fig = ax.figure
+    
     prefix = f"{filename_prefix}_" if filename_prefix else ""
-    abs_path = os.path.join(save_path, "output", f"{prefix}FeatureImportance.png")
-    plt.savefig(abs_path,bbox_inches="tight", dpi=300)
-    plt.clf()
-    print(f"[plot_tree_importance] Plot saved at {abs_path}.")
+    
+    abs_path = os.path.join(save_path, "output", f"{prefix}FeatureImportance")
+    _matplotlib_savefig(fig, abs_path)
+    
+    logger.info(f"Plot saved at {abs_path}.")
 
+@logged
 def plot_confusion_matrix(cm_matrix,label_mapping,save_path,filename_prefix):
     """
     Plot a confusion matrix.
@@ -73,23 +84,28 @@ def plot_confusion_matrix(cm_matrix,label_mapping,save_path,filename_prefix):
     None
 
     """
-    sns.heatmap(
+    ax = sns.heatmap(
         cm_matrix,
         annot=True,
         fmt=".2f",  # 因为是浮点数了
         xticklabels=[label_mapping[i] for i in range(len(label_mapping))],
         yticklabels=[label_mapping[i] for i in range(len(label_mapping))]
     )
-    plt.xlabel('Predicted')
-    plt.ylabel('True')
-    plt.tight_layout()
-    plt.subplots_adjust(left=0.25, bottom=0.25)  # 这里调整边距
+    fig = ax.figure
+    
+    ax.set_xlabel('Predicted')  # 用 ax 设置标签
+    ax.set_ylabel('True')
+    
+    fig.tight_layout()  # 紧凑布局
+    fig.subplots_adjust(left=0.25, bottom=0.25)  # 调整边距
+    
     prefix = f"{filename_prefix}_" if filename_prefix else ""
     abs_path = os.path.join(save_path, "output", f"{prefix}ConfusionMatrix.png")
-    plt.savefig(abs_path,bbox_inches="tight", dpi=300)
-    plt.clf()
-    print(f"[plot_confusion_matrix] Plot saved at {abs_path}.")
+    _matplotlib_savefig(fig,abs_path)
+    
+    logger.info(f"Plot saved at {abs_path}.")
 
+@logged
 def plot_shap_summary(clf,X_test,label_mapping,save_path,filename_prefix):
     """
     Plot SHAP summary plot.
@@ -128,15 +144,19 @@ def plot_shap_summary(clf,X_test,label_mapping,save_path,filename_prefix):
     feature_names = [label_mapping.get(i, f"Feature {i}") for i in range(X_test.shape[1])]
     explainer = shap.TreeExplainer(clf)
     shap_values = explainer.shap_values(X_test)
-    shap.summary_plot(shap_values, X_test, feature_names=feature_names, show=False)
-    plt.tight_layout()
-    plt.subplots_adjust(top=0.9)  # 这里留白
+    ax = shap.summary_plot(shap_values, X_test, feature_names=feature_names, show=False)
+    fig = ax.figure
+    
+    fig.tight_layout()
+    fig.subplots_adjust(top=0.9)  # 这里留白
+    
     prefix = f"{filename_prefix}_" if filename_prefix else ""
     abs_path = os.path.join(save_path, "output", f"{prefix}ShapSummary.png")
-    plt.savefig(abs_path,bbox_inches="tight", dpi=300)
-    plt.clf()
-    print(f"[plot_shap_summary] Plot saved at {abs_path}.")
+    _matplotlib_savefig(fig, abs_path)
+    
+    logger.info(f"Plot saved at {abs_path}.")
 
+@logged
 def plot_roc_per_class(y_test,y_proba,label_mapping,save_path,filename_prefix):
     """
     Plot multi-class ROC curves.
@@ -161,22 +181,35 @@ def plot_roc_per_class(y_test,y_proba,label_mapping,save_path,filename_prefix):
 
     """
     y_bin = label_binarize(y_test, classes=range(len(np.unique(y_test))))
-    plt.figure(figsize=(8, 6))
+    fig, ax = plt.subplots(figsize=(8, 6))
+    
     for i in range(y_bin.shape[1]):
         fpr, tpr, _ = roc_curve(y_bin[:, i], y_proba[:, i])
         auc_i = roc_auc_score(y_bin[:, i], y_proba[:, i])
-        class_name = label_mapping[i]  # 这里用映射替换
-        plt.plot(fpr, tpr, lw=2, label=f'{class_name} (AUC={auc_i:.2f})')
-    plt.plot([0, 1], [0, 1], 'k--', lw=1)
-    plt.xlabel('False Positive Rate')
-    plt.ylabel('True Positive Rate')
-    plt.title('Multi-class ROC curves')
+        class_name = label_mapping[i]  # 使用映射
+        ax.plot(fpr, tpr, lw=2, label=f'{class_name} (AUC={auc_i:.2f})')
+    
+    # 对角线
+    ax.plot([0, 1], [0, 1], 'k--', lw=1)
+    
+    # 标签和标题
+    ax.set_xlabel('False Positive Rate')
+    ax.set_ylabel('True Positive Rate')
+    ax.set_title('Multi-class ROC curves')
+    
+    # 图例
+    ax.legend(loc='lower right')
+    
+    # 紧凑布局
+    fig.tight_layout()
+    
     prefix = f"{filename_prefix}_" if filename_prefix else ""
     abs_path = os.path.join(save_path, "output", f"{prefix}ROC.png")
-    plt.savefig(abs_path,bbox_inches="tight", dpi=300)
-    plt.clf()
-    print(f"[plot_roc_by_class] Plot saved at {abs_path}.")
+    _matplotlib_savefig(fig, abs_path)
+    
+    logger.info(f"Plot saved at {abs_path}.")
 
+@logged
 def plot_fpr_per_class(y_test, y_pred, label_mapping, save_path, filename_prefix):
     """
     Plot per-class precision/recall/f1 as three subplots in one figure.
@@ -195,11 +228,11 @@ def plot_fpr_per_class(y_test, y_pred, label_mapping, save_path, filename_prefix
     os.makedirs(out_dir, exist_ok=True)
 
     # 创建 1x3 子图，共享 y 轴
-    fig, axs = plt.subplots(1, 3, figsize=(16, 5), sharey=True)
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5), sharey=True)
 
     for idx, metric in enumerate(metrics):
         values = [report[str(cls)][metric] for cls in classes]
-        ax = axs[idx]
+        ax = axes[idx]
         ax.bar(range(len(values)), values, tick_label=labels)
         ax.axhline(y=0.5, color="red", linestyle="--", linewidth=1)
         ax.set_ylim(0, 1)
@@ -210,14 +243,15 @@ def plot_fpr_per_class(y_test, y_pred, label_mapping, save_path, filename_prefix
             tick.set_rotation(45)
             tick.set_ha("right")
 
-    plt.tight_layout()
+    fig.tight_layout()
+    
     prefix = f"{filename_prefix}_" if filename_prefix else ""
     abs_path = os.path.join(save_path, "output", f"{prefix}perClassMetrics.png")
-    plt.savefig(abs_path,bbox_inches="tight", dpi=300)
-    plt.clf()
-    print(f"[plot_fpr_by_class] Combined plot saved at {abs_path}.")
+    _matplotlib_savefig(fig, abs_path)
+    
+    logger.info(f"Combined plot saved at {abs_path}.")
 
-
+@logged
 def plot_fpr_violin(results, filename_prefix,save_path,show_points=True):
     """
     绘制 LODO 结果的三面 Boxplot (F1, Precision, Recall)
@@ -244,28 +278,30 @@ def plot_fpr_violin(results, filename_prefix,save_path,show_points=True):
     df = pd.DataFrame(records)
 
     # 画图
-    plt.figure(figsize=(8, 6))
+    fig, ax = plt.subplots(figsize=(8, 5))  # 先创建 fig, ax
+    
 
     # 先画 violin
-    sns.violinplot(data=df, x="metric", y="value", inner="box", cut=0, palette="Set2")
+    sns.violinplot(data=df, x="metric", y="value", inner="box", cut=0, palette="Set2", ax=ax)
 
     # 再叠加 stripplot（每个 donor 的点）
     if show_points:
         sns.stripplot(data=df, x="metric", y="value",
-                      color="black", size=3, jitter=True, alpha=0.5)
+                      color="black", size=3, jitter=True, alpha=0.5, ax=ax)
 
-    plt.ylim(-0.05, 1.05)  # 保证 [0,1] 的范围完整显示
-    plt.title("LODO Performance (F1 / Precision / Recall)", fontsize=14)
-    plt.ylabel("Value")
-    plt.xlabel("")
+    ax.set_ylim(-0.05, 1.05)  # 保证 [0,1] 的范围完整显示
+    ax.set_title("LODO Performance (F1 / Precision / Recall)", fontsize=14)
+    ax.set_ylabel("Value")
+    ax.set_xlabel("")
+    
 
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     prefix = f"{filename_prefix}_" if filename_prefix else ""
     abs_path = os.path.join(save_path, "output", f"{prefix}perClassMetrics.png")
-    plt.savefig(abs_path, dpi=300, bbox_inches="tight")
-    plt.close()
+    _matplotlib_savefig(fig, abs_path)
 
 
+@logged
 def plot_consensus_dendrogram(Z_consensus, donor_labels, branch_supports,
                               save_path,filename_prefix):
     """
@@ -320,14 +356,14 @@ def plot_consensus_dendrogram(Z_consensus, donor_labels, branch_supports,
 
     ax.set_ylabel("Distance")
     ax.set_title("Consensus Dendrogram with Branch Support")
-    plt.tight_layout()
+    fig.tight_layout()
 
     prefix = f"{filename_prefix}_" if filename_prefix else ""
     abs_path = os.path.join(save_path, "output", f"{prefix}ConsensusDendro.png")
-    plt.savefig(abs_path, dpi=300)
-    plt.close()
+    _matplotlib_savefig(fig, abs_path)
 
 
+@logged
 def plot_stability_dendrogram(co_matrix, labels, save_path, filename_prefix):
     """
     co_matrix: n x n 的稳定性矩阵
@@ -348,20 +384,20 @@ def plot_stability_dendrogram(co_matrix, labels, save_path, filename_prefix):
 
     prefix = f"{filename_prefix}_" if filename_prefix else ""
     abs_path = os.path.join(save_path, "output", f"{prefix}StabilityDendro.png")
-    plt.savefig(abs_path, bbox_inches="tight", dpi=300)
-    plt.close()
+    _matplotlib_savefig(fig, abs_path)
 
 
+@logged
 def plot_stability_clustermap(co_matrix, labels, save_path, filename_prefix):
     df = pd.DataFrame(co_matrix, index=labels, columns=labels)
-    sns.clustermap(df, cmap="viridis", row_cluster=True, col_cluster=True)
+    ax = sns.clustermap(df, cmap="viridis", row_cluster=True, col_cluster=True)
+    fig = ax.figure
 
     prefix = f"{filename_prefix}_" if filename_prefix else ""
     abs_path = os.path.join(save_path, "output", f"{prefix}StabilityCluster.png")
-    plt.savefig(abs_path, bbox_inches="tight", dpi=300)
-    plt.close()
+    _matplotlib_savefig(fig, abs_path)
 
-
+@logged
 def plot_xgb_prediction_umap(adata, save_path, filename_prefix=None, skip_subcluster=False,do_return=True,**kwargs):
     # 初始化 UMAP 绘图工具
     """
@@ -410,11 +446,11 @@ def plot_xgb_prediction_umap(adata, save_path, filename_prefix=None, skip_subclu
     # 取出对应测试集的子集
     adata_sub = adata[adata.obs.index.isin(test_idx)].copy()
     if adata_sub.n_obs < 100:
-        print("[plot_xgb_prediction_umap] Notice! Anndata subset has less than 100 cell, skip UMAP to avoid corruption.")
+        logger.info("Notice! Anndata subset has less than 100 cell, skip UMAP to avoid corruption.")
         return adata_sub
     if not skip_subcluster:
         from src.core.base_anndata_ops import subcluster
-        print(f"--> Starting subclustering process, this may take some time...")
+        logger.info(f"Starting subclustering process, this may take some time...")
         default_pars = {"adata":adata_sub,"n_neighbors":20, "n_pcs":20,
                         "skip_DR":False, "resolutions":[1.0], "use_rep":"X_scVI"}
         default_pars.update(kwargs)
@@ -424,7 +460,7 @@ def plot_xgb_prediction_umap(adata, save_path, filename_prefix=None, skip_subclu
     adata_sub.obs.loc[test_idx, "predicted_label"] = y_pred
     adata_sub.obs.loc[test_idx, "predicted_label_name"] = adata_sub.obs.loc[test_idx, "predicted_label"].map(mapping)
 
-    print(f"[plot_xgb_prediction_umap] Starting UMAP plotting.")
+    logger.info(f"Starting UMAP plotting.")
     # 绘制 UMAP
     umap_plot(
         save_addr=os.path.join(save_path, "output"),
@@ -433,23 +469,24 @@ def plot_xgb_prediction_umap(adata, save_path, filename_prefix=None, skip_subclu
         color=["disease_type", "predicted_label_name"],
         wspace=0.4
     )
-    print("[plot_xgb_prediction_umap] UMAP plotted.")
+    logger.info("UMAP plotted.")
 
     if do_return:
         return adata_sub
 
 
+@logged
 def plot_taxonomy(adata, save_path, filename_prefix=None):
     prefix = f"{filename_prefix}_" if filename_prefix else ""
     os.makedirs(f"{save_path}/output",exist_ok=True)
 
-    print("[plot_taxonomy] Loading datasets.")
+    logger.info("Loading datasets.")
     dataset_file = os.path.join(save_path, f"{prefix}dataset.npz")
     data = np.load(dataset_file, allow_pickle=True)
     X_train, X_test, y_train, y_test = data["X_train"], data["X_test"], data["y_train"], data["y_test"]
     mapping = data["label_mapping"].item()
 
-    print("[plot_taxonomy] Loading model.")
+    logger.info("Loading model.")
     clf = xgb.XGBClassifier()
     clf.load_model(f"{save_path}/{prefix}model.json")
 
@@ -460,7 +497,7 @@ def plot_taxonomy(adata, save_path, filename_prefix=None):
     # -------------------
     present_classes = sorted(np.unique(np.concatenate([y_train, y_test])))
     class_names = [mapping[i] for i in present_classes]
-    print(f"[plot_taxonomy] Present classes (for CM): {present_classes}, "
+    logger.info(f"Present classes (for CM): {present_classes}, "
           f"class_names: {class_names}")
 
     cm = confusion_matrix(y_test, y_pred, labels=present_classes).astype(float)
@@ -474,17 +511,17 @@ def plot_taxonomy(adata, save_path, filename_prefix=None):
     dist = (dist + dist.T) / 2
     np.fill_diagonal(dist, 0)
 
-    print(f"CM distance matrix shape: {dist.shape}")
+    logger.info(f"CM distance matrix shape: {dist.shape}")
     linkage_matrix = linkage(squareform(dist), method="average")
-    print(f"Linkage matrix shape: {linkage_matrix.shape}")
+    logger.info(f"Linkage matrix shape: {linkage_matrix.shape}")
 
-    plt.figure(figsize=(6, 4))
-    dendrogram(linkage_matrix, labels=class_names, orientation="right")
-    plt.title("Class taxonomy (from confusion matrix)")
-    plt.savefig(f"{save_path}/output/{prefix}TaxonomyByCm.png", bbox_inches="tight")
-    plt.clf()
-    print(f"[plot_taxonomy] Linkage map (confusion matrix) plotted.")
-
+    fig, ax = plt.subplots(figsize=(6, 4))
+    dendrogram(linkage_matrix, labels=class_names, orientation="right",ax=ax)
+    ax.set_title("Class taxonomy (from confusion matrix)")
+    _matplotlib_savefig(fig, abs_path)
+    
+    logger.info(f"Linkage map (confusion matrix) plotted.")
+    del fig, ax
     # -------------------
     # 2. SHAP
     # -------------------
@@ -502,19 +539,19 @@ def plot_taxonomy(adata, save_path, filename_prefix=None):
         shap_per_class.append(shap_mean.flatten())  # 拉平成向量
 
     shap_per_class = np.vstack(shap_per_class)
-    print(f"[plot_taxonomy] SHAP per class matrix shape: {shap_per_class.shape}")
+    logger.info(f"SHAP per class matrix shape: {shap_per_class.shape}")
 
     dist_matrix = pdist(shap_per_class, metric="correlation")
     linkage_matrix = linkage(dist_matrix, method="average")
-    print(f"[plot_taxonomy] SHAP linkage matrix shape: {linkage_matrix.shape}")
+    logger.info(f"SHAP linkage matrix shape: {linkage_matrix.shape}")
 
-    plt.figure(figsize=(6, 4))
-    dendrogram(linkage_matrix, labels=class_names, orientation="right")
-    plt.title("Class taxonomy (from feature importances)")
-    plt.savefig(f"{save_path}/output/{prefix}TaxonomyByShap.png", bbox_inches="tight")
-    plt.clf()
-    print(f"[plot_taxonomy] Linkage map (SHAP) plotted.")
-
+    fig, ax = plt.subplots(figsize=(6, 4))
+    dendrogram(linkage_matrix, labels=class_names, orientation="right",ax=ax)
+    ax.set_title("Class taxonomy (from feature importances)")
+    _matplotlib_savefig(fig, abs_path)
+    
+    logger.info(f"Linkage map (SHAP) plotted.")
+    del fig, ax
     # -------------------
     # 3. latent space
     # -------------------
@@ -525,24 +562,25 @@ def plot_taxonomy(adata, save_path, filename_prefix=None):
     for cname in class_names:
         mask = labels == cname
         if np.sum(mask) == 0:
-            print(f"--> Warning: no samples for class {cname} in latent space, skipping")
+            logger.info(f"Warning: no samples for class {cname} in latent space, skipping")
             continue
         class_means.append(latent[mask].mean(axis=0))
 
     class_means = np.vstack(class_means)
-    print(f"[plot_taxonomy] Latent space class_means shape: {class_means.shape}")
+    logger.info(f"Latent space class_means shape: {class_means.shape}")
 
     dist = pdist(class_means, metric="euclidean")
     linkage_matrix = linkage(dist, method="ward")
 
-    plt.figure(figsize=(6, 4))
-    dendrogram(linkage_matrix, labels=class_names, orientation="right")
-    plt.title("Class taxonomy (from latent space)")
-    plt.savefig(f"{save_path}/output/{prefix}TaxonomyByLateneSpace.png", bbox_inches="tight")
-    plt.clf()
-    print(f"[plot_taxonomy] Linkage map (latent space) plotted.")
+    fig, ax = plt.subplots(figsize=(6, 4))
+    dendrogram(linkage_matrix, labels=class_names, orientation="right",ax=ax)
+    ax.set_title("Class taxonomy (from latent space)")
+    _matplotlib_savefig(fig, abs_path)
+    
+    logger.info(f"Linkage map (latent space) plotted.")
+    del fig, ax
 
-
+@logged
 def plot_lodo_stripplots(results, save_path,filename_prefix,show_points=True):
     """
     绘制 LODO 结果的三面 Boxplot (F1, Precision, Recall)
@@ -568,30 +606,28 @@ def plot_lodo_stripplots(results, save_path,filename_prefix,show_points=True):
     df = pd.DataFrame(records)
 
     # 画图
-    plt.figure(figsize=(8, 6))
-
+    fig, ax = plt.subplots(figsize=(8, 6))  # 先创建 fig, ax
+    
+    
     # 先画 violin
-    sns.violinplot(data=df, x="metric", y="value", inner="box", cut=0, palette="Set2")
+    sns.violinplot(data=df, x="metric", y="value", inner="box", cut=0, palette="Set2", ax=ax)
 
     # 再叠加 stripplot（每个 donor 的点）
     if show_points:
         sns.stripplot(data=df, x="metric", y="value",
-                      color="black", size=3, jitter=True, alpha=0.5)
+                      color="black", size=3, jitter=True, alpha=0.5, ax=ax)
 
-    plt.ylim(-0.05, 1.05)  # 保证 [0,1] 的范围完整显示
-    plt.title("LODO Performance (F1 / Precision / Recall)", fontsize=14)
-    plt.ylabel("Value")
-    plt.xlabel("")
+    ax.set_ylim(-0.05, 1.05)  # 保证 [0,1] 的范围完整显示
+    ax.set_title("LODO Performance (F1 / Precision / Recall)", fontsize=14)
+    ax.set_ylabel("Value")
+    ax.set_xlabel("")
 
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
-
     prefix = f"{filename_prefix}_" if filename_prefix else ""
     abs_path = os.path.join(save_path, "output", f"{prefix}LodoStripplots.png")
-    plt.savefig(abs_path, dpi=300, bbox_inches="tight")
-    plt.close()
+    _matplotlib_savefig(fig, abs_path)
 
-
-
+@logged
 def plot_lodo_confusion_matrix(results, save_path, filename_prefix):
     """
     all_results: list of dict，每个 dict 包含:
@@ -632,11 +668,10 @@ def plot_lodo_confusion_matrix(results, save_path, filename_prefix):
     axes[1].set_title("Sigma of Confusion Matrix")
     axes[1].set_ylabel("True label")
     axes[1].set_xlabel("Predicted label")
-    plt.tight_layout()
+    fig.tight_layout()
 
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     prefix = f"{filename_prefix}_" if filename_prefix else ""
     abs_path = os.path.join(save_path, "output", f"{prefix}LodoConfusionMatrix.png")
-    plt.savefig(abs_path, dpi=300, bbox_inches="tight")
-    plt.close()
+    _matplotlib_savefig(fig, abs_path)
 

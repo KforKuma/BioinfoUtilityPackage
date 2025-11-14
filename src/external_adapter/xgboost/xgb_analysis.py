@@ -28,7 +28,12 @@ from xgb_vis import (plot_tree_importance, plot_confusion_matrix, plot_roc_per_c
 from xgb_analysis_utils import (_compute_cm,_read_lodo_outcome,_donor_vectors_from_proba,
                                 compute_donor_similarity_matrix,bootstrap_consensus_dendrogram)
 
+import logging
+from src.utils.hier_logger import logged
+logger = logging.getLogger(__name__)
+
 #——————————————————————————————————————————————————————————————————————————————————————
+@logged
 def xgb_outcome_analyze(save_path, filename_prefix=None):
     os.makedirs(f"{save_path}/output", exist_ok=True)
 
@@ -61,7 +66,7 @@ def xgb_outcome_analyze(save_path, filename_prefix=None):
         f.write("Classification Report:\n")
         f.write(report)
 
-    print(f"[xgb_outcome_analyze] Result is saved at {filename}")
+    logger.info(f"Result is saved at {filename}")
 
     # 开始做图
     ## 特征重要性
@@ -81,9 +86,9 @@ def xgb_outcome_analyze(save_path, filename_prefix=None):
     # F1/Precision/Recall评估
     plot_fpr_per_class(y_test, y_pred, label_mapping, save_path, filename_prefix)
 
-    print("[xgb_outcome_analyze] Finished.\n")
+    logger.info("Finished.\n")
 
-
+@logged
 def xgb_outcome_analyze_lodo(save_path,filename_prefix=None):
     '''
     LODO 多每个细胞亚群进行一组LODO的处理
@@ -98,11 +103,11 @@ def xgb_outcome_analyze_lodo(save_path,filename_prefix=None):
     os.makedirs(f"{save_path}/output",exist_ok=True
                 )
     # 绘制箱型图
-    print("[xgb_outcome_analyze_lodo] Starting plot_lodo_stripplots ...")
+    logger.info("Starting plot_lodo_stripplots ...")
     plot_lodo_stripplots(results, save_path=f"{save_path}/output/combined_boxplot.png")
 
     # 绘制对比混淆矩阵（Mean|Sigma)
-    print("[xgb_outcome_analyze_lodo] Starting plot_lodo_confusion_matrix ...")
+    logger.info("Starting plot_lodo_confusion_matrix ...")
     plot_lodo_confusion_matrix(results, save_path=f"{save_path}/output/average_confusion_matrix.png")
 
     # 映射一个疾病标签用
@@ -110,15 +115,15 @@ def xgb_outcome_analyze_lodo(save_path,filename_prefix=None):
     label_mapping = results['mapping']
     disease_label = [label_mapping.get(lab, lab) for lab in donor_labels]
 
-    print("[xgb_outcome_analyze_lodo] Starting plot_stability_dendrogram ...")
+    logger.info("Starting plot_stability_dendrogram ...")
     donor_mat = _donor_vectors_from_proba(results["y_proba"])
     sim = compute_donor_similarity_matrix(donor_mat, metric='cosine')
     plot_stability_dendrogram(sim, disease_label, save_path=f"{save_path}/output/stability_dendro.png")
 
-    print("[xgb_outcome_analyze_lodo] Starting plot_stability_clustermap ...")
+    logger.info("Starting plot_stability_clustermap ...")
     plot_stability_clustermap(sim, disease_label, save_path=f"{save_path}/output/stability_cluster.png")
 
-    print("[xgb_outcome_analyze_lodo] Starting plot plot_consensus_dendrogram ...")
+    logger.info("Starting plot plot_consensus_dendrogram ...")
     consensus_tree, branch_supports = bootstrap_consensus_dendrogram(sim_matrix=sim, n_bootstrap=100,
                                                                      method="average", support_threshold=0.5)
     np.fill_diagonal(sim, 0)  # 直接修改 sim
@@ -127,7 +132,7 @@ def xgb_outcome_analyze_lodo(save_path,filename_prefix=None):
     plot_consensus_dendrogram(Z_real, disease_label, branch_supports,
                               save_path=f"{save_path}/output/consensual_tree.png")
 
-    print("[xgb_outcome_analyze_lodo] Finished.\n")
+    logger.info("Finished.\n")
 
 
 

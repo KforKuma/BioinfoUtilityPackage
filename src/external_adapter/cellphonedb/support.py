@@ -5,6 +5,11 @@ import inspect
 import scipy.cluster.hierarchy as shc
 from scipy.spatial.distance import pdist
 
+import logging
+from src.utils.hier_logger import logged
+logger = logging.getLogger(__name__)
+
+@logged
 def prep_query_group(means: pd.DataFrame,
                      custom_dict: dict[str, list[str]] | None = None) -> dict:
     """Return gene family query groups.
@@ -65,7 +70,7 @@ def prep_query_group(means: pd.DataFrame,
             query_dict.update({k: [i for i in means.interacting_pair if re.search(r"|".join(r), i)]})
     return query_dict
 
-
+@logged
 def hclust(
         data: pd.DataFrame,
         axis: int = 0,

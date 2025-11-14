@@ -4,7 +4,11 @@ import os, gc
 from src.core.ext_anndata_ops import process_adata
 from src.core.utils import geneset_editor
 
+import logging
+from src.utils.hier_logger import logged
+logger = logging.getLogger(__name__)
 
+@logged
 def make_a_focus(adata,filename,
                  cat_key="Celltype", type_key="Subset_Identity", resubset=False):
     '''
@@ -44,7 +48,7 @@ class IdentifyFocus():
         :param adata:
         '''
         self.adata = adata
-
+        self.logger = logging.getLogger(self.__class__.__name__)
         excelFile = pd.ExcelFile(focus_file)
         focus_sheet = excelFile.parse(excelFile.sheet_names[0])
         # 去除方括号并拆分基因集
@@ -59,10 +63,7 @@ class IdentifyFocus():
         )
         self.focus = focus_sheet
 
-    @staticmethod
-    def _log(msg):
-        print(f"[IdentifyFocus Message] {msg}")
-
+    @logged
     def filter_and_save_subsets(self,
                                 h5ad_prefix, # 建议使用时间控制版本
                                 save_addr,  # 取消预设值以避免储存在意外的地方
@@ -74,18 +75,19 @@ class IdentifyFocus():
             if subsets:
                 index_list = self.adata.obs[obs_key].isin(subsets)
                 adata_subset = self.adata[index_list]
-                self._log(f"Name: {name}, Subsets: {subsets}")
-                self._log(adata_subset.obs[obs_key].value_counts())
+                self.logger.info(f"Name: {name}, Subsets: {subsets}")
+                self.logger.info(adata_subset.obs[obs_key].value_counts())
 
                 output_path = os.path.join(save_addr, f"{h5ad_prefix}_{name}.h5ad")
                 try:
                     adata_subset.write(output_path)
-                    self._log(f"Data for {name} written to {output_path}")
+                    self.logger.info(f"Data for {name} written to {output_path}")
                 except Exception as e:
-                    self._log(f"Error saving {name} to {output_path}: {e}")
+                    self.logger.info(f"Error saving {name} to {output_path}: {e}")
             else:
-                self._log(f"Subsets for {name} is empty, skipping.")
-
+                self.logger.info(f"Subsets for {name} is empty, skipping.")
+    
+    @logged
     def process_filtered_files(self,
                                Geneset_class,
                                save_addr,
@@ -95,11 +97,11 @@ class IdentifyFocus():
             name = row['Name']
             resubset = row['Resubset']
 
-            self._log(f"Processing cat {name}, containing types {resubset}.")
+            self.logger.info(f"Processing cat {name}, containing types {resubset}.")
 
             input_path = os.path.join(save_addr, f"{h5ad_prefix}_{name}.h5ad")
             if not os.path.exists(input_path):
-                self._log(f"File {input_path} does not exist. Giving up reading {name} from h5ad.")
+                self.logger.info(f"File {input_path} does not exist. Giving up reading {name} from h5ad.")
                 continue
 
             adata_subset = anndata.read_h5ad(input_path)
@@ -129,9 +131,8 @@ class IdentifyFocus():
                 output_dir=output_dir,
                 **default_pars
             )
-
-
+            
             adata_subset.write_h5ad(input_path)
-            self._log(f"Finished cat {name}, h5ad saved inplace.")
+            self.logger.info(f"Finished cat {name}, h5ad saved inplace.")
             del adata_subset
             gc.collect()

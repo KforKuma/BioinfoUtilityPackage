@@ -10,8 +10,13 @@ import h5py
 import statsmodels.api as sm
 from adjustText import adjust_text
 
-######################################
+import logging
+from src.utils.hier_logger import logged
+logger = logging.getLogger(__name__)
 
+
+######################################
+@logged
 def _make_palette(cell_identity_list, seed=42):
     """
     自动根据细胞类型数量选择合适的调色板：
@@ -58,10 +63,10 @@ def _make_palette(cell_identity_list, seed=42):
             ]
             mode = "HSV-random"
 
-    print(f"[make_palette] {n} unique identities → using '{mode}' palette.")
+    logger.info(f"{n} unique identities → using '{mode}' palette.")
     return dict(zip(unique_idents, palette_idents))
 
-
+@logged
 def pyscenic_pheatmap(tf_data: pd.DataFrame,
                       metadata: pd.DataFrame,
                       plt_savedir: str,
@@ -181,9 +186,9 @@ def pyscenic_pheatmap(tf_data: pd.DataFrame,
     outpath = os.path.join(plt_savedir, f"{plt_name}.png")
     plt.savefig(outpath, dpi=300, bbox_inches="tight")
     plt.close()
-    print(f"[pyscenic_pheatmap] Saved figure: {outpath}")
+    logger.info(f"Saved figure: {outpath}")
 
-
+@logged
 def plot_regulon_variability(
     mean_auc: pd.Series,
     cv2: pd.Series,
@@ -263,9 +268,10 @@ def plot_regulon_variability(
     outfile = os.path.join(plt_savedir, f"{plt_name}.png")
     plt.savefig(outfile, dpi=300, bbox_inches="tight")
     plt.close()
-    print(f"[plot_regulon_variability] Saved figure: {outfile}")
+    
+    logger.info(f"Saved figure: {outfile}")
 
-
+@logged
 def plot_rss_heatmap(rss: pd.DataFrame,
                      plt_savedir: object,
                      plt_name: object,
@@ -308,10 +314,10 @@ def plot_rss_heatmap(rss: pd.DataFrame,
     rss_subset = rss.loc[(rss > thr).any(axis=1), (rss > thr).any(axis=0)]
 
     if verbose:
-        print(f"Showing regulons and cell types with any RSS > {thr} (dim: {rss_subset.shape})")
+        logger.info(f"Showing regulons and cell types with any RSS > {thr} (dim: {rss_subset.shape})")
 
     if rss_subset.shape[0] == 0 or rss_subset.shape[1] == 0:
-        print("No regulons or cell types exceed the threshold.")
+        logger.info("No regulons or cell types exceed the threshold.")
         return
 
     if order_rows:
@@ -334,7 +340,7 @@ def plot_rss_heatmap(rss: pd.DataFrame,
     g.savefig(f"{plt_savedir}/{plt_name}.png", dpi=300, bbox_inches="tight")
     plt.close()
 
-
+@logged
 def plot_rss_one_set(rss_df: pd.DataFrame,
                      plt_savedir, plt_name, set_name,
                      n: int = 5):
