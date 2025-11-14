@@ -1,8 +1,18 @@
-import logging
+import logging,sys
 from contextvars import ContextVar
 from functools import wraps
 
 _current_level = ContextVar("current_level", default=0)
+# -------------------
+# 配置 root logger
+# -------------------
+logging.basicConfig(
+    level=logging.INFO,               # INFO 及以上会显示
+    format="%(message)s",             # 只显示消息（hierarchical decorator 会加缩进）
+    stream=sys.stdout,                # 输出到控制台
+)
+def get_logger(name):
+    return logging.getLogger(name)
 
 class HierLogger(logging.Logger):
     indent_str = "  "
