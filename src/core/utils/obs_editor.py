@@ -9,36 +9,55 @@ from src.utils.env_utils import ensure_package
 '''
 主要函数功能来自先前的src.EasyInterface.Anndata_Annotator.py
 并整合了src.ScanpyTools.AnnotationMaker.py
+
+增加了 proxy pattern 将剩余功能转发给 anndata
 '''
 
 class ObsEditor:
     """工具类：专门用于编辑 AnnData.obs 的各种操作"""
 
     def __init__(self, adata: AnnData):
-        self.adata = adata
+        self._adata = adata
 
     @staticmethod
     def _log(msg):
         print(f"[ObsEditor Message] {msg}")
-
+        
+    # ------- 代理未知属性 -------
+    def __getattr__(self, attr):
+        """Forward all unknown attributes to AnnData"""
+        return getattr(self._adata, attr)
+        
+    # ------- 代理 __setattr__ -------
+    def __setattr__(self, name, value):
+        # 注意：__setattr__方法内不能直接写 self.key = value，这会循环调用
+        if name == "_adata":
+            super().__setattr__(name, value)
+        else:
+            # 若 adata 有这个属性，直接写到 adata 上
+            if hasattr(self._adata, name):
+                setattr(self._adata, name, value)
+            else:
+                super().__setattr__(name, value)
+    
     def add_column(self, col, default):
         """添加一个新的 obs 列"""
-        self.adata.obs[col] = default
+        self._adata.obs[col] = default
         self._log("New category '{}' added".format(col))
-        return self.adata
+        return self
 
     def rename_column(self, old, new):
         """重命名 obs 列"""
-        self.adata.obs.rename(columns={old: new}, inplace=True)
+        self._adata.obs.rename(columns={old: new}, inplace=True)
         self._log("Rename column '{}' to '{}'".format(old, new))
-        return self.adata
+        return self
 
     def drop_missing(self, col):
         """去掉指定列中缺失值的细胞"""
-        mask = self.adata.obs[col].isna() | (self.adata.obs[col] == None)
-        self.adata = self.adata[~mask]
+        mask = self._adata.obs[col].isna() | (self._adata.obs[col] == None)
+        self._adata = self._adata[~mask]
         self._log("Drop missing column '{}'".format(col))
-        return self.adata
+        return self._adata
 
     def slice_with_key(self, obs_key, value, inplace=False):
         """
@@ -52,15 +71,15 @@ class ObsEditor:
 
         """
         if isinstance(value, list):
-            adata_tmp = self.adata[self.adata.obs[obs_key].isin(value)]
+            adata_tmp = self._adata[self._adata.obs[obs_key].isin(value)]
         elif isinstance(value, str) | isinstance(value, int):
-            adata_tmp = self.adata[self.adata.obs[obs_key] == value]
+            adata_tmp = self._adata[self._adata.obs[obs_key] == value]
         else:
             raise ValueError("Argument value must be list, str or int.")
         if inplace:
-            self.adata = adata_tmp
+            self._adata = adata_tmp
         self._log("Filter by value successfully: '{}'".format(value))
-        return self.adata
+        return self._adata
 
     def assign_cluster_identities(self, annotator, anno_obs_key, target_obs_key):
         """
@@ -87,7 +106,7 @@ class ObsEditor:
         AnnData
             更新后的 AnnData 对象。
         """
-        cluster_ids = sorted(self.adata.obs[anno_obs_key].unique(), key=lambda x: int(x))
+        cluster_ids = sorted(self._adata.obs[anno_obs_key].unique(), key=lambda x: int(x))
         if len(annotator) != len(cluster_ids):
             raise ValueError(
                 f"The number in new identities: ({len(annotator)}) does not match the number of the reference cluster:  ({len(cluster_ids)})."
@@ -102,7 +121,7 @@ class ObsEditor:
         else:
             raise ValueError("Argument annotator must be a list or dict.")
 
-        self.adata.obs[target_obs_key] = self.adata.obs[anno_obs_key].map(cl_annotation)
+        self._adata.obs[target_obs_key] = self._adata.obs[anno_obs_key].map(cl_annotation)
 
         print("Identity assignment done.")
 
@@ -123,7 +142,7 @@ class ObsEditor:
         obs_data = adata_from.obs[from_obs_key]
 
         # 检查是否有共享细胞
-        shared_index = obs_data.index.intersection(self.adata.obs.index)
+        shared_index = obs_data.index.intersection(self._adata.obs.index)
         if len(shared_index) == 0:
             raise ValueError("No cell barcodes shared between two AnnData objects.")
 
@@ -131,33 +150,113 @@ class ObsEditor:
         obs_data = obs_data.loc[shared_index]
 
         # 如果目标列不存在则新建
-        if to_obs_key not in self.adata.obs.columns:
-            self.adata.obs[to_obs_key] = None  # 或者 np.nan
+        if to_obs_key not in self._adata.obs.columns:
+            self._adata.obs[to_obs_key] = None  # 或者 np.nan
 
         # 按照来源列内容更新
         for new_ident in obs_data.unique().tolist():
             index = obs_data[obs_data == new_ident].index
-            self.adata.obs.loc[index, to_obs_key] = new_ident
-            cell_counts = len(self.adata.obs[self.adata.obs[to_obs_key] == new_ident])
+            self._adata.obs.loc[index, to_obs_key] = new_ident
+            cell_counts = len(self._adata.obs[self._adata.obs[to_obs_key] == new_ident])
             self._log(f"New cell identity '{new_ident}' updated, total count: {cell_counts}")
 
     def change_one_ident_fast(self, obs_key, old, new):
         """
         更快速地替换分类列中的值，仅当必要时添加类别，忽略执行缓慢的 remove_categories 操作。
         """
-        if pd.api.types.is_categorical_dtype(self.adata.obs[obs_key]):
-            if new not in self.adata.obs[obs_key].cat.categories:
-                self.adata.obs[obs_key] = self.adata.obs[obs_key].cat.add_categories([new])
+        if pd.api.types.is_categorical_dtype(self._adata.obs[obs_key]):
+            if new not in self._adata.obs[obs_key].cat.categories:
+                self._adata.obs[obs_key] = self._adata.obs[obs_key].cat.add_categories([new])
 
             # 布尔索引一次完成
-            mask = self.adata.obs[obs_key] == old
-            self.adata.obs.loc[mask, obs_key] = new
+            mask = self._adata.obs[obs_key] == old
+            self._adata.obs.loc[mask, obs_key] = new
             self._log(f"Replaced {mask.sum()} cells from '{old}' to '{new}'.")
         else:
-            mask = self.adata.obs[obs_key] == old
-            self.adata.obs.loc[mask, obs_key] = new
+            mask = self._adata.obs[obs_key] == old
+            self._adata.obs.loc[mask, obs_key] = new
             self._log(f"Replaced {mask.sum()} cells from '{old}' to '{new}'.")
+    
+    def update_assignment(self,
+                          assignment: str or pd.DataFrame,
+                          h5ad_dir: str,
+                          obs_key_col: str = "Obs_key_select",
+                          subset_file_col: str = "Subset_File",
+                          subset_no_col: str = "Subset_No",
+                          identity_col: str = "Identity",
+                          output_key: str = "Subset_Identity",
+                          fillna_from_col: str = None
+    ):
+        """
+        根据 assignment 表格更新主 AnnData 对象中的细胞亚群注释。
 
+        参数:
+        - assignment_file: assignment Excel 文件路径
+        - h5ad_dir: 子集 h5ad 文件所在目录
+        - obs_key_col, subset_file_col, subset_no_col, identity_col: assignment 表格中对应的列名
+            - obs_key_col: remap 的 key 的列
+            - subset_file_col: 对应的 .h5ad 文件名
+            - subset_no_col: obs_key_col 里的值
+            - identity_col: 新的定义
+        - output_key: 主 AnnData 中需要写入的列名
+        - fillna_from_col: 用于填充 output_key 中空值的备用列；比如，当 subset_no_col 不包含所有行，会依赖原 dataframe 的此列进行填充
+        """
+        if isinstance(assignment, pd.DataFrame):
+            assignment_sheet = assignment
+        elif isinstance(assignment, str):
+            excel_data = pd.ExcelFile(assignment)
+            assignment_sheet = excel_data.parse(excel_data.sheet_names[0])
+        else:
+            raise ValueError("Assignment must either be string or a dataframe.")
+        
+        for subset_filename in set(assignment_sheet[subset_file_col]):
+            self._log(f"Now reading {subset_filename} subset.")
+            input_path = f"{h5ad_dir}/{subset_filename}"
+            adata_subset = anndata.read(input_path)
+            
+            # 提取 obs_key
+            obs_key_series = assignment_sheet.loc[
+                assignment_sheet[subset_file_col] == subset_filename, obs_key_col
+            ].dropna().drop_duplicates()
+            obs_key = obs_key_series.iat[0] if not obs_key_series.empty else None
+            self._log(f"Obs key for {subset_filename}: {obs_key}")
+            
+            # identity 映射字典
+            subset_data = assignment_sheet[assignment_sheet[subset_file_col] == subset_filename]
+            result_dict = subset_data.set_index(subset_no_col)[identity_col].to_dict()
+            updated_dict = {str(k): v for k, v in result_dict.items()}
+            self._log(f"Created identity dictionary for {subset_filename} with {len(updated_dict)} entries")
+            adata_subset.obs[obs_key] = adata_subset.obs[obs_key].astype(str) # 确保全都是字符串
+            adata_subset.obs["tmp"] = adata_subset.obs[obs_key].map(updated_dict)
+            unique_identities = adata_subset.obs["tmp"].dropna().unique()
+            
+            # 如果 output_key 不存在，则初始化为空列
+            if output_key not in self._adata.obs.columns:
+                self._adata.obs[output_key] = pd.Series(index=self._adata.obs_names, dtype="str")
+            
+            # 处理 Categorical 类型的列，扩展类别
+            if pd.api.types.is_categorical_dtype(self._adata.obs[output_key]):
+                existing_categories = set(self._adata.obs[output_key].cat.categories)
+                new_categories = set(unique_identities) - existing_categories
+                if new_categories:
+                    self._adata.obs[output_key] = self._adata.obs[output_key].cat.add_categories(list(new_categories))
+            
+            for cell_identity in unique_identities:
+                self._log(f"Processing identity: {cell_identity}")
+                index = adata_subset.obs_names[adata_subset.obs["tmp"] == cell_identity]
+                self._adata.obs.loc[index, output_key] = cell_identity
+                updated_cells = (self._adata.obs[output_key] == cell_identity).sum()
+                self._log(f"Updated {updated_cells} cells with identity '{cell_identity}'")
+            
+            del adata_subset
+        
+        # 用其他列补全缺失值
+        if fillna_from_col and fillna_from_col in self._adata.obs.columns:
+            n_missing = self._adata.obs[output_key].isna().sum()
+            self._adata.obs[output_key] = self._adata.obs[output_key].fillna(self._adata.obs[fillna_from_col])
+            self._log(f"Filled {n_missing} missing '{output_key}' values using '{fillna_from_col}'")
+        
+        self._log("All assignments applied.")
 
 
 def gene_annotator(adata: AnnData, chr_annot_path=None, cyc_annot_path=None):
