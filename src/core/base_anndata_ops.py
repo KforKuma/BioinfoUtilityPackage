@@ -129,16 +129,49 @@ def obs_keywise_downsample(adata, obs_key, downsample=1000):
     return adata[indices].copy()
 
 @logged
-def easy_DEG(adata, save_addr, filename_prefix,
-             obs_key="Subset_Identity",
-             save_plot=True, plot_gene_num=5, downsample=False,
-             method='wilcoxon', use_raw=False):
+def easy_DEG(
+        adata, save_addr, filename_prefix,
+        obs_key="Subset_Identity",
+        save_plot=True, plot_gene_num=5, downsample=False,
+        method='wilcoxon', use_raw=False,
+        min_cells=3,  # <<< 新增参数，可调
+):
     """
     快速进行差异基因富集（DEG）
+    自动处理以下情况：
+        - 某些 group 的细胞数为 0（不会出现，但稳妥）
+        - 某些 group 细胞数过小（< min_cells）
+        - group 数不足 2 → 打印 warning，并跳过 DEG
     """
-    if use_raw and adata.raw is None:
-        logger.info("Warning: use_raw=True, but .raw not found in AnnData. Will fallback to .X.")
     
+    if use_raw and adata.raw is None:
+        logger.info("Warning: use_raw=True, but .raw not found. Using .X instead.")
+    
+    # --- 检查 obs_key 是否是 category ---
+    if not pd.api.types.is_categorical_dtype(adata.obs[obs_key]):
+        adata.obs[obs_key] = adata.obs[obs_key].astype("category")
+    
+    # --- 统计每个 group 细胞数 ---
+    vc = adata.obs[obs_key].value_counts()
+    logger.info(f"[easy_DEG] Initial group sizes for '{obs_key}':\n{vc.to_dict()}")
+    
+    # --- 去掉 extremely small group ---
+    small_groups = vc[vc < min_cells].index.tolist()
+    if len(small_groups) > 0:
+        logger.info(f"[easy_DEG] Removing small groups (<{min_cells} cells): {small_groups}")
+        adata = adata[~adata.obs[obs_key].isin(small_groups)].copy()
+    
+    # --- 重新统计剩余 group ---
+    vc2 = adata.obs[obs_key].value_counts()
+    logger.info(f"[easy_DEG] Remaining group sizes: {vc2.to_dict()}")
+    
+    # --- 检查 group 是否 >=2 ---
+    if vc2.size < 2:
+        logger.info(f"[easy_DEG] Only one group left after filtering. "
+                    f"DEG skipped. Remaining categories: {vc2.to_dict()}")
+        return adata
+    
+    # --- 正常执行下游 DE 流程 ---
     deg_key = "deg_" + obs_key
     save_addr = save_addr if save_addr.endswith("/") else save_addr + "/"
     os.makedirs(save_addr, exist_ok=True)
@@ -150,47 +183,64 @@ def easy_DEG(adata, save_addr, filename_prefix,
         logger.info("No downsampling performed.")
     
     logger.info(f"Starting DEG ranking for '{obs_key}'...")
-    sc.tl.rank_genes_groups(adata, groupby=obs_key, use_raw=use_raw,
-                            method=method, key_added=deg_key)
+    sc.tl.rank_genes_groups(
+        adata, groupby=obs_key,
+        use_raw=use_raw, method=method, key_added=deg_key
+    )
     
     filename_prefix = f"{filename_prefix}_" if filename_prefix is not None else filename_prefix
     
+    # --- 绘图部分 ---
     if save_plot:
         try:
             from src.core.utils.plot_wrapper import ScanpyPlotWrapper
             rank_genes_groups_dotplot = ScanpyPlotWrapper(sc.pl.rank_genes_groups_dotplot)
-            rank_genes_groups_dotplot(save_addr=save_addr, filename=f"{filename_prefix}{obs_key}_HVG_Dotplot",
-                                      adata=adata, groupby=obs_key, key=deg_key, standard_scale="var",
-                                      n_genes=plot_gene_num, dendrogram=False, use_raw=use_raw, show=False)
+            rank_genes_groups_dotplot(
+                save_addr=save_addr,
+                filename=f"{filename_prefix}{obs_key}_HVG_Dotplot",
+                adata=adata,
+                groupby=obs_key,
+                key=deg_key,
+                standard_scale="var",
+                n_genes=plot_gene_num,
+                dendrogram=False,
+                use_raw=use_raw,
+                show=False
+            )
             logger.info("Dotplot saved successfully.")
         except Exception as e:
-            logger.info(f"Plot generation failed: {e}")
+            logger.info(f"Dotplot generation failed: {e}")
     
+    # --- 整理 DataFrame ---
     groups = adata.uns[deg_key]['names'].dtype.names
-    # 合并所有 group 的结果
     df_all = pd.concat([
         sc.get.rank_genes_groups_df(adata, group=grp, key=deg_key).assign(cluster=grp)
         for grp in groups
     ])
     
-    # 第一种排序方式：按 logfoldchanges 降序，再按 names 升序
-    df_sorted_logfc = df_all.sort_values(by=['names', 'logfoldchanges'], ascending=[True, False])
+    # 排序1
+    df_sorted_logfc = df_all.sort_values(
+        by=['names', 'logfoldchanges'], ascending=[True, False]
+    )
     
-    # 第二种排序方式：按 pvals_adj 升序，再按 cluster 升序
-    df_sorted_pval = df_all.sort_values(by=['cluster', 'pvals_adj'], ascending=[True, True])
+    # 排序2
+    df_sorted_pval = df_all.sort_values(
+        by=['cluster', 'pvals_adj'], ascending=[True, True]
+    )
     
-    # 保存到 Excel 两个 sheet 中
-    abs_csv_path = os.path.join(save_addr, f"{filename_prefix}_HVG.xlsx")
+    # 保存 Excel
+    excel_path = os.path.join(save_addr, f"{filename_prefix}{obs_key}_HVG.xlsx")
     try:
-        with pd.ExcelWriter(abs_csv_path, engine='xlsxwriter') as writer:
+        with pd.ExcelWriter(excel_path, engine='xlsxwriter') as writer:
             df_sorted_logfc.to_excel(writer, sheet_name='Sorted_by_logFC', index=False)
             df_sorted_pval.to_excel(writer, sheet_name='Sorted_by_pval', index=False)
             logger.info("Excel file saved successfully.")
     except Exception as e:
         logger.info(f"Error saving Excel file: {e}")
     
-    logger.info("Successfully saved.")
+    logger.info("DEG completed successfully.")
     return adata
+
 
 @logged
 def score_gene_analysis(marker_dict, adata_subset,

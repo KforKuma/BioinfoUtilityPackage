@@ -21,15 +21,20 @@ class Geneset():
         v2: signature_id        genes        status        facet        description        source        species(sheet_name)
         '''
         self.file_path = file_path
-        self.data = self._load_file(file_path)
         self.logger = logging.getLogger(self.__class__.__name__)
+        
+        self.data = self._load_file(file_path)
+        
         if version is not None:
             self.version = version
+            self.logger.info(f"Using user-provided version: {version}")
         else:
-            self._detect_version()
-            self.logger.info(f"Detected file version: {version}")
-        if self.version != "unknown":
+            self.version = self._detect_version()
+            self.logger.info(f"Detected file version: {self.version}")
+        
+        if self.version != "v2":
             self._migrate_to_current()
+        
         self.data = self._clear_format()
     
     @logged
@@ -58,10 +63,10 @@ class Geneset():
     
     @logged
     def _migrate_to_current(self):
-        if self.version != "v2":
+        if getattr(self, "version", None) != "v2":
             self.logger.info("Detected v0 or v1 format, migrating to v2...")
             df = self.data.copy()
-
+            
             # 更新列名
             colname_remap = {
                 "cell_type": "signature_id",
@@ -70,89 +75,173 @@ class Geneset():
                 "remark": "description"
             }
             colname_remap = {k: v for k, v in colname_remap.items() if k in df.columns}
-            df = df.rename(colname_remap)
-
-            # 进行默认值处理
+            df = df.rename(columns=colname_remap)
+            
+            # genes 列必须解析为 list
+            if "genes" in df.columns:
+                def parse_genes(x):
+                    if isinstance(x, list):
+                        return x
+                    s = str(x).strip().strip("[]")
+                    if not s:
+                        return []
+                    return [t.strip().strip("'").strip('"') for t in s.split(",")]
+                
+                df["genes"] = df["genes"].map(parse_genes)
+            else:
+                df["genes"] = [[] for _ in range(len(df))]
+            
+            # status
             if "status" in df.columns:
-                df["status"] = df['status'].replace({'True': True, 'False': False,
+                df["status"] = df["status"].replace({'True': True, 'False': False,
                                                      'true': True, 'false': False}).astype(bool)
                 df["status"] = df["status"].apply(lambda x: "active" if not x else "archived")
-                    # 把先前的 False 转换为 active，其余备用
             else:
                 df["status"] = "active"
-            df["source"] = None
-            df["species"] = None
-
+            
+            # source / species
+            df["source"] = ""
+            df["species"] = "Unknown"
+            
+            # sheet_name 默认值
+            if "sheet_name" not in df.columns:
+                df["sheet_name"] = "Sheet1"
+            
             # 调整顺序
             desired_cols = ["signature_id", "genes", "status", "species", "source",
                             "facet", "description", "sheet_name"]
-            df = df.reindex(columns=[c for c in desired_cols if c in df.columns])
-
+            df = df.reindex(columns=desired_cols)
+            
             self.data = df
             self.version = "v2"
             self.logger.info("Migration complete. Upgraded to v2 format.")
     
     @logged
     def _clear_format(self):
+        """
+        Clean and normalize the unified v2 dataframe.
+        Expected columns:
+        ["signature_id", "genes", "status", "species",
+         "source", "facet", "description", "sheet_name"]
+        """
         df = self.data.copy()
-        df["species"] = df['species'].replace({'human': "Human",
-                                               'mouse': "Mouse", 'mice': "Mouse"})
-        try:
-            df['genes'] = (
-                df['gene_set']
-                .astype(str)
-                .str.strip('[]')
-                .str.split(',')
-                .apply(lambda lst: [x.strip().strip("'").strip('"') for x in lst])
-            )
-        except Exception as e:
-            self.logger.info(f"Error while parsing gene_set: {e}")
-            raise e
-
-        # 基因格式标准化
+        
+        # -----------------------------
+        # 1) Normalize species
+        # -----------------------------
+        df["species"] = (
+            df["species"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .replace({
+                "human": "Human",
+                "homo sapiens": "Human",
+                "mouse": "Mouse",
+                "mice": "Mouse",
+            })
+        )
+        
+        # -----------------------------
+        # 2) Parse genes column safely
+        # -----------------------------
+        def parse_genes(x):
+            """Parse a gene list that may be already a list or a string."""
+            if isinstance(x, list):
+                return [str(g).strip() for g in x if str(g).strip()]
+            
+            s = str(x).strip().strip("[]")
+            if not s:
+                return []
+            return [t.strip().strip("'").strip('"') for t in s.split(",") if t.strip()]
+        
+        df["genes"] = df["genes"].map(parse_genes)
+        
+        # Human upper / Mouse Capitalize
         df.loc[df["species"] == "Human", "genes"] = df.loc[df["species"] == "Human", "genes"].apply(
             lambda g: [x.upper() for x in g]
         )
         df.loc[df["species"] == "Mouse", "genes"] = df.loc[df["species"] == "Mouse", "genes"].apply(
             lambda g: [x.capitalize() for x in g]
         )
-
-        df_uni = pd.DataFrame()
-
+        
+        # -----------------------------
+        # 3) Clean text fields
+        # -----------------------------
+        df["description"] = df["description"].fillna("").astype(str).str.strip()
+        df["source"] = df["source"].fillna("").astype(str).str.strip()
+        df["facet"] = df["facet"].fillna("").astype(str).str.strip()
+        df["signature_id"] = df["signature_id"].fillna("").astype(str).str.strip()
+        
+        # -----------------------------
+        # 4) For each sheet, merge duplicates
+        # -----------------------------
+        df_clean_all = []
+        
         for sheet in df["sheet_name"].unique():
             df_s = df[df["sheet_name"] == sheet].copy()
-            df_s["uniqueness"] = df_s["signature_id"] + "_" + df_s["status"] + "_" + df_s["species"]
-
-            df_sheet_clean = pd.DataFrame()
-
-            for key, group in df_s.groupby('signature_id', group_keys=False):
+            
+            # safer uniqueness identifier
+            df_s["uniq"] = (
+                    df_s["signature_id"]
+                    + "|||"
+                    + df_s["status"]
+                    + "|||"
+                    + df_s["species"]
+            )
+            
+            df_sheet_clean = []
+            
+            for sig, group in df_s.groupby("signature_id"):
                 if len(group) == 1:
-                    row = group.copy()
-                    df_sheet_clean = pd.concat([df_sheet_clean, row], ignore_index=True)
+                    # No duplicates
+                    df_sheet_clean.append(group.iloc[0])
                     continue
-
-                for unique_id, subgroup in group.groupby('uniqueness', group_keys=False):
-                    if len(subgroup) > 1:
-                        # 完全重复：合并
-                        row = subgroup.iloc[0].to_frame().T
-                        row['genes'] = ','.join(subgroup['genes'].astype(str).unique())
-                        row['description'] = ';'.join(subgroup['description'].astype(str).unique())
-                        row['source'] = ';'.join(subgroup['source'].astype(str).unique())
-                        row['facet'] = subgroup['facet'].iloc[0]
-                        df_sheet_clean = pd.concat([df_sheet_clean, row], ignore_index=True)
+                
+                # Handle duplicates by uniqueness
+                for uniq_id, sub in group.groupby("uniq"):
+                    if len(sub) > 1:
+                        # Fully duplicated → merge
+                        merged = sub.iloc[0].copy()
+                        
+                        # merge genes as list without duplicates
+                        merged["genes"] = sorted({g for lst in sub["genes"] for g in lst})
+                        
+                        # merge description/source, remove empty & duplicates
+                        def merge_str(col):
+                            uniq_vals = {str(v).strip() for v in sub[col] if str(v).strip()}
+                            return ";".join(sorted(uniq_vals))
+                        
+                        merged["description"] = merge_str("description")
+                        merged["source"] = merge_str("source")
+                        
+                        merged["facet"] = sub["facet"].iloc[0]
+                        
+                        df_sheet_clean.append(merged)
                     else:
-                        # 半重复：改名
-                        row = subgroup.copy()
-                        row["signature_id"] = unique_id
-                        df_sheet_clean = pd.concat([df_sheet_clean, row], ignore_index=True)
-
+                        # Half duplicated → rename signature_id using uniq_id
+                        row = sub.iloc[0].copy()
+                        row["signature_id"] = uniq_id
+                        df_sheet_clean.append(row)
+            
+            df_sheet_clean = pd.DataFrame(df_sheet_clean)
+            df_sheet_clean.drop(columns=["uniq"], inplace=True, errors="ignore")
+            
             self.logger.info(f"Sheet [{sheet}] cleaned: {len(df_s)} → {len(df_sheet_clean)} rows.")
-            df_sheet_clean = df_sheet_clean.drop("uniqueness", axis=1)
-            df_uni = pd.concat([df_uni, df_sheet_clean], ignore_index=True)
-
-        df_uni.sort_values(by=["sheet_name", "facet", "signature_id"], ascending=True, inplace=True)
-        return df_uni
-    
+            df_clean_all.append(df_sheet_clean)
+        
+        df_final = pd.concat(df_clean_all, ignore_index=True)
+        
+        # -----------------------------
+        # 5) Final sorting
+        # -----------------------------
+        df_final.sort_values(
+            by=["sheet_name", "facet", "signature_id"],
+            ascending=True,
+            inplace=True,
+        )
+        
+        return df_final
     @logged
     def save(self,file_name=None):
         '''

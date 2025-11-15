@@ -76,8 +76,8 @@ def geneset_dotplot(adata,
     """
 
     :param adata:
-    :param markers: Markers 类对象
-    :param marker_sheet:  Markers 的 sheet 名
+    :param markers: Geneset 类对象
+    :param marker_sheet:  Geneset 的 sheet_name 参数
     :param save_addr:
     :param filename_prefix:
     :param groupby_key:
@@ -91,7 +91,7 @@ def geneset_dotplot(adata,
     if isinstance(marker_sheet, pd.Series):
         raise ValueError("marker_sheet is pd.Series, please recheck input.")
 
-    gene_dicts = markers.get_gene_dict(marker_sheet=marker_sheet, facet_split=True)
+    gene_dicts = markers.get(sheet_name=marker_sheet, facet_split=True)
 
     for facet_name, gene_list_dict in gene_dicts.items():
         # 构造文件名
@@ -679,19 +679,43 @@ def process_resolution_umaps(adata, output_dir, resolutions,use_raw=True,**kwarg
 @logged
 def plot_QC_umap(adata, save_addr, filename_prefix):
     umap_plot = ScanpyPlotWrapper(sc.pl.umap)
+    
+    # 先构造 key_dict
     key_dict = {
         "organelles": [i for i in adata.obs.columns if re.search(r'mt|mito|rb|ribo', i)],
         "phase": [i for i in adata.obs.columns if re.search(r'phase', i)],
         "counts": [i for i in adata.obs.columns if re.search(r'disease|tissue', i)]
     }
-    key_list = [item for sublist in key_dict.values() for item in sublist if sublist]
-    if len(key_list) == 0:
-        raise ValueError("[plot_QC_umap] No QC obs_key founded, unable to draw QC umap plot.")
-
-    # 对每类调用一次
-    for name, cols in key_dict.items():
+    
+    # 新字典才安全
+    cleaned = {}
+    
+    for k, cols in key_dict.items():
         if not cols:
             continue
+        
+        # 过滤掉 bool 和 object 列
+        new_cols = []
+        for c in cols:
+            dtype = adata.obs[c].dtype
+            if pd.api.types.is_bool_dtype(dtype):
+                continue
+            if pd.api.types.is_object_dtype(dtype):
+                continue
+            new_cols.append(c)
+        
+        if new_cols:
+            cleaned[k] = new_cols
+    
+    # 展平成 key_list
+    key_list = [c for cols in cleaned.values() for c in cols]
+    if len(key_list) == 0:
+        raise ValueError("[plot_QC_umap] No QC obs_key found; cannot draw UMAP.")
+    
+    logger.info(f"Find satisfied obs key: {key_list}.")
+    
+    # 一个 category 画一次
+    for name, cols in cleaned.items():
         umap_plot(
             save_addr=save_addr,
             filename=f"{filename_prefix}_UMAP_{name}",

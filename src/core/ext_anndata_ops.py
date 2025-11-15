@@ -141,6 +141,12 @@ def run_deg_on_subsets(
     if save_prefix is None:
         save_prefix = "SubsetSplit_"
     
+    if output_suffix is None:
+        output_suffix = "_DEG"
+    
+    if not output_suffix.endswith(".h5ad"):
+        output_suffix = f"{output_suffix}.h5ad"
+    
     if resolutions is None:
         resolutions = [0.5,1.0]
     
@@ -381,7 +387,7 @@ def process_adata(
                 adata=adata_subset,
                 markers=my_markers,
                 marker_sheet=marker_sheet,
-                output_dir=save_addr,
+                save_addr=save_addr,
                 filename_prefix=f"{filename_prefix}_Geneset({marker_sheet})",
                 groupby_key=groupby_key,
                 use_raw=use_raw,

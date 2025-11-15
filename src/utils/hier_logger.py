@@ -31,15 +31,25 @@ def exit():
     _current_level.set(max(0, lvl - 1))
 
 def logged(func):
-    """Decorator: before call -> indent +1, after call -> indent -1."""
+    """Decorator: print entering/leaving function with hierarchical indent."""
     @wraps(func)
     def wrapper(*args, **kwargs):
+        logger = logging.getLogger(func.__module__)
+        lvl = _current_level.get()
+        indent = "  " * lvl
+        # 打印 entering
+        logger.info(f"{indent}▶ entering {func.__name__}")
         enter()
         try:
-            return func(*args, **kwargs)
+            result = func(*args, **kwargs)
         finally:
             exit()
+            lvl_after = _current_level.get()
+            indent_after = "  " * lvl_after
+            logger.info(f"{indent_after}◀ leaving {func.__name__}")
+        return result
     return wrapper
+
 
 # 注册 logger 类
 logging.setLoggerClass(HierLogger)

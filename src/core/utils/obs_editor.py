@@ -18,8 +18,15 @@ logger = logging.getLogger(__name__)
 '''
 
 class ObsEditor:
-    """工具类：专门用于编辑 AnnData.obs 的各种操作"""
-
+    """
+    工具类：专门用于编辑 AnnData.obs 的各种操作
+    
+    TODO: 目前功能函数转发均正常，但是可以对 andnata 对象直接进行的截取操作如 adata[index_list] 不能进行.
+    
+    """
+    
+    
+    
     def __init__(self, adata: AnnData):
         self._adata = adata
         self.logger = logging.getLogger(self.__class__.__name__)
