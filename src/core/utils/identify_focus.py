@@ -89,6 +89,9 @@ class IdentifyFocus():
                                 save_addr,  # 取消预设值以避免储存在意外的地方
                                 obs_key="Subset_Identity"):
         self.obs_key = obs_key
+        
+        os.makedirs(save_addr,exist_ok=True)
+        
         for index, row in self.focus.iterrows():
             name = row['Name']
             subsets = row['Subsets']

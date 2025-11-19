@@ -222,7 +222,6 @@ def make_a_meta(adata, meta_file, batch_key="orig.ident"):
 @logged
 def kdk_prepare(adata, meta_file=None, batch_key="orig.ident", type_key="Subset_Identity"):
     '''
-
     :param adata:
     :param meta_file: 包含样本制作信息的表格，兼容 csv 和 xlsx，默认 header=True index=False
     :param batch_key:
@@ -241,10 +240,18 @@ def kdk_prepare(adata, meta_file=None, batch_key="orig.ident", type_key="Subset_
         else:
             raise ValueError("[kdk_prepare] Meta file must ends with 'csv' or 'xlsx'.")
     
+    # ⚡ 保证关键列都是字符串
+    for key in [batch_key, type_key]:
+        if key in meta.columns:
+            meta[key] = meta[key].astype(str)
+        if key in adata.obs.columns:
+            adata.obs[key] = adata.obs[key].astype(str)
+    
     # 准备 KW 分析所需矩阵
     count_df = _kdk_data_prepare(adata, meta, batch_key=batch_key, type_key=type_key)
     
     return count_df
+
 
 @logged
 def run_kdk(count_df, type_key, group_key, save_addr, batch_key, sample_key=None, method="Dunn"):

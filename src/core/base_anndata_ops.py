@@ -224,8 +224,12 @@ def easy_DEG(
     )
     
     # 排序2
-    df_sorted_pval = df_all.sort_values(
-        by=['cluster', 'pvals_adj'], ascending=[True, True]
+    df_sorted_pval = (
+        df_all[df_all["scores"] > 0]  # 过滤
+        .sort_values(
+            by=["cluster", "pvals_adj"],
+            ascending=[True, True]
+        )
     )
     
     # 保存 Excel
@@ -537,6 +541,7 @@ def _run_pca(logfc_matrix, n_components=2):
     result_df['cell_type'] = result_df['label'].apply(lambda x: '_'.join(x.split('_')[-2:]))
 
     return result_df, pca
+
 
 
 
