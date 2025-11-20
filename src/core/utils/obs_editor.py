@@ -21,7 +21,7 @@ class ObsEditor:
     """
     工具类：专门用于编辑 AnnData.obs 的各种操作
     
-    TODO: 目前功能函数转发均正常，但是可以对 andnata 对象直接进行的截取操作如 adata[index_list] 不能进行.
+    有待测试
     
     """
     
@@ -47,6 +47,39 @@ class ObsEditor:
                 setattr(self._adata, name, value)
             else:
                 super().__setattr__(name, value)
+    
+    def __getitem__(self, key):
+        # 支持 row selection 或 (rows, cols) tuple
+        if isinstance(key, tuple):
+            rows, cols = key
+            # 处理列选择
+            if isinstance(cols, str):
+                cols = [cols]
+            elif isinstance(cols, (list, np.ndarray, pd.Series)):
+                pass
+            else:
+                raise TypeError(f"Unsupported column selection: {type(cols)}")
+            
+            new_df = self.df.loc[rows, cols]
+        else:
+            new_df = self.df.loc[key, :]
+        
+        # 返回新的 ObsEditor，保持链式调用
+        return ObsEditor(new_df)
+    
+    def __len__(self):
+        return len(self.df)
+    
+    def __repr__(self):
+        return f"ObsEditor({repr(self.df)})"
+    
+    @property
+    def columns(self):
+        return self.df.columns
+    
+    @property
+    def shape(self):
+        return self.df.shape
     
     def add_column(self, col, default):
         """添加一个新的 obs 列"""
