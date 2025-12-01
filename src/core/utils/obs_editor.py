@@ -33,9 +33,31 @@ class ObsEditor:
         
     # ------- 代理未知属性 -------
     def __getattr__(self, attr):
-        """Forward all unknown attributes to AnnData"""
-        return getattr(self._adata, attr)
+        # 1. 先查自身的 __dict__
+        if attr in self.__dict__:
+            return self.__dict__[attr]
+
+        # 2. 再查 adata
+        if hasattr(self._adata, attr):
+            return getattr(self._adata, attr)
+
+        # 3. 否则真正报错
+        raise AttributeError(f"'ObsEditor' has no attribute '{attr}'")
+    
+    def __repr__(self):
+        # 直接从 __dict__ 取，避免 __getattr__
+        adata = self.__dict__.get("_adata", None)
         
+        header = "ObsEditor Proxy (you are working on an AnnData proxy)\n"
+        
+        if adata is None:
+            return header + "<No underlying AnnData>"
+        
+        # adata_repr 是 AnnData 本来的 repr
+        adata_repr = repr(adata)
+        
+        return header + adata_repr
+    
     # ------- 代理 __setattr__ -------
     def __setattr__(self, name, value):
         # 注意：__setattr__方法内不能直接写 self.key = value，这会循环调用
@@ -49,30 +71,38 @@ class ObsEditor:
                 super().__setattr__(name, value)
     
     def __getitem__(self, key):
-        # 支持 row selection 或 (rows, cols) tuple
+        """
+        支持：
+        - adata_proxy[cell_idx] -> 返回切片后的 ObsEditor
+        - adata_proxy[cell_idx, gene_idx] -> 返回切片后的 AnnData
+        """
         if isinstance(key, tuple):
             rows, cols = key
-            # 处理列选择
-            if isinstance(cols, str):
-                cols = [cols]
-            elif isinstance(cols, (list, np.ndarray, pd.Series)):
-                pass
-            else:
-                raise TypeError(f"Unsupported column selection: {type(cols)}")
-            
-            new_df = self.df.loc[rows, cols]
+            return ObsEditor(self._adata[rows, cols])
         else:
-            new_df = self.df.loc[key, :]
-        
-        # 返回新的 ObsEditor，保持链式调用
-        return ObsEditor(new_df)
+            return ObsEditor(self._adata[key])
+    
     
     def __len__(self):
         return len(self.df)
     
-    def __repr__(self):
-        return f"ObsEditor({repr(self.df)})"
+    @property
+    def df(self):
+        """快速访问 obs DataFrame"""
+        return self._adata.obs
     
+    @property
+    def X(self):
+        return self._adata.X
+    
+    @property
+    def var_names(self):
+        return self._adata.var_names
+    
+    @property
+    def obs_names(self):
+        return self._adata.obs_names
+        
     @property
     def columns(self):
         return self.df.columns
@@ -80,6 +110,12 @@ class ObsEditor:
     @property
     def shape(self):
         return self.df.shape
+    
+    def subset_cells(self, cells):
+        return ObsEditor(self._adata[cells, :])
+    
+    def subset_genes(self, genes):
+        return ObsEditor(self._adata[:, genes])
     
     def add_column(self, col, default):
         """添加一个新的 obs 列"""
