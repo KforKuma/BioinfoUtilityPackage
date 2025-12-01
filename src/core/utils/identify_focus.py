@@ -57,8 +57,6 @@ class IdentifyFocus():
         Resubset : bool
         Marker_class : str
         
-        TODO: 给每个大类都加个print()工具用来打印信息和提示
-        
         :param focus_file:
         :param adata:
         '''
@@ -82,6 +80,7 @@ class IdentifyFocus():
             lambda gene_list: [gene.strip().strip("'").strip('"').strip() for gene in gene_list]
         )
         self.focus = focus_sheet
+        print(self.focus)
     
     @logged
     def filter_and_save_subsets(self,

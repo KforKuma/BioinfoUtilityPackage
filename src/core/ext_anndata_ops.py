@@ -11,7 +11,9 @@ from src.core.utils.plot_wrapper import ScanpyPlotWrapper
 
 import logging
 from src.utils.hier_logger import logged
+
 logger = logging.getLogger(__name__)
+
 
 @logged
 def generate_subclusters_by_identity(
@@ -59,21 +61,21 @@ def generate_subclusters_by_identity(
         cell_idents_list = adata.obs[identity_key].unique()
     if resolutions is None:
         resolutions = [0.5, 1.0]
-
+    
     for ident in cell_idents_list:
         logger.info(f"Now processing subset: {ident}")
         adata_subset = adata[adata.obs[identity_key] == ident].copy()
-
+        
         # 删除 leiden_res 相关列（obs）
         leiden_cols = [col for col in adata_subset.obs.columns if 'leiden_res' in col]
         if leiden_cols:
             adata_subset.obs.drop(columns=leiden_cols, inplace=True)
-
+        
         # 删除 leiden_res 相关项（uns）
         leiden_keys = [key for key in adata_subset.uns.keys() if 'leiden_res' in key]
         for key in leiden_keys:
             del adata_subset.uns[key]
-
+        
         # 子聚类
         adata_subset = subcluster_func(
             adata_subset,
@@ -82,12 +84,12 @@ def generate_subclusters_by_identity(
             resolutions=resolutions,
             use_rep=use_rep
         )
-
+        
         # 保存
         filename = os.path.join(output_dir, f"{filename_prefix}_{ident}.h5ad")
         adata_subset.write(filename)
         logger.info(f"Saved to {filename}")
-
+        
         # 清理内存
         del adata_subset
         gc.collect()

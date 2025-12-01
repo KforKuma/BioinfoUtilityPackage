@@ -51,13 +51,14 @@ class ScanpyPlotWrapper(object):
 
             # 拆分 filename 与 ext
             root, ext = split_filename_with_ext(filename)
-
             ext = ext.lower()
 
             # 根据用户是否指定后缀，决定保存哪些格式
             if not ext or ext == '':
                 exts = ['.pdf', '.png']
-
+            else:
+                exts = [ext]
+            
             # 循环保存
             for e in exts:
                 out_path = os.path.join(save_addr, root + e)
