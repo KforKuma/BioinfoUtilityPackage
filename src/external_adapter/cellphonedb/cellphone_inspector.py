@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 
+
 from src.external_adapter.cellphonedb.settings import (
     DEFAULT_V5_COL_START,
     DEFAULT_COL_START,
@@ -10,6 +11,7 @@ from src.external_adapter.cellphonedb.settings import (
     DEFAULT_V5_COL_NAMES,
     DEFAULT_CELLSIGN_ALPHA,
     DEFAULT_COLUMNS,
+    DEFAULT_CPDB_SEP
 )
 from src.external_adapter.cellphonedb.support import (
     prep_query_group,hclust,split_kwargs
@@ -35,7 +37,7 @@ class CellphoneInspector():
 
     # 准备查询
     ## 输出是可读的，所以这一步可以手动修改
-    gene_query = ci.prepare_gene_query(gene_family=“th17”)
+    gene_query = prepare_gene_query(gene_family=“th17”)
     celltype_pairs = ci.prepare_celltype_pairs(cell_type1=["Th17","Tfh"], cell_type2="B cell", lock_celltype_direction=True)
 
     # 查询
@@ -58,8 +60,8 @@ class CellphoneInspector():
         self.file_path = cpdb_outfile
         self.deg = degs_analysis
         self.cellsign = cellsign
-        self.data = self._load_file(cpdb_outfile)  # 格式为字典
         self.logger = logging.getLogger(self.__class__.__name__)
+        self.data = self._load_file(cpdb_outfile)  # 格式为字典
         self.logger.info(f"Initialized with CPDB output directory: {cpdb_outfile}")
     
     def _load_file(self, path):
@@ -72,9 +74,9 @@ class CellphoneInspector():
 
         # cpdb_analysis_method
         basic_file_keys = {
-            "means":'means_result',
-            "deconvoluted":'deconvoluted',
+            "means":'means',
             "deconvoluted_percents":'deconvoluted_percents',
+            "deconvoluted":'deconvoluted',
             "interaction_scores":'interaction_scores',
             "pvals":'pvalues' # 默认 cpdb_analysis_method 不含此方法
         }
@@ -93,15 +95,17 @@ class CellphoneInspector():
             })
 
         result = {}
+        filelist = os.listdir(path)
         for k, v in basic_file_keys.items():
-            matches = [s for s in os.listdir(path) if re.search(v + r'\.txt$', s)]
+            matches = [s for s in filelist if re.search(rf'^.*({v}).*\.txt$', s)]
             if not matches:
-                raise FileNotFoundError(f"No file matching pattern '{v}.txt' in {path}")
+                raise FileNotFoundError(f"No file matching pattern '{v} and .txt' in {path}")
             if len(matches) > 1:
-                self.logger.info(f"Warning: multiple files match pattern '{v}.txt', using the first one: {matches[0]}")
+                self.logger.info(f"Warning: multiple files match pattern '{v} and .txt', using the first one: {matches[0]}")
             df = pd.read_csv(os.path.join(path, matches[0]), sep="\t", low_memory=False)
+            filelist.remove(matches[0])
             result[k] = df
-
+        
         if "cellsign_interactions" not in result.keys() and "cellsign_deconvoluted" not in result.keys():
             self.logger.info("Cannot detect cellsign files, fallback to self.cellsign=False")
 
@@ -152,7 +156,7 @@ class CellphoneInspector():
         self.logger.info("Preparing CPDB matrices...")
 
         means_mat = self._prep_table(data=self.data["means"])
-        pvals_mat = self._prep_table(data=self.data["pvalues"])
+        pvals_mat = self._prep_table(data=self.data["pvals"])
         interaction_scores = self.data["interaction_scores"]
         self.logger.info(f"Means table: {means_mat.shape}, P-values table: {pvals_mat.shape}")
         self.means = means_mat
@@ -170,21 +174,27 @@ class CellphoneInspector():
             return
 
         # 对齐 pvals 和 means 矩阵
-        if pvals_mat.shape != means_mat.shape:
-            tmp_pvals_mat = pd.DataFrame(index=means_mat.index,
-                                         columns=means_mat.columns)
-
-            # 把 means_mat 复制到 new_df
-            tmp_pvals_mat.iloc[:, :col_start] = means_mat.iloc[:, :col_start]
-            tmp_pvals_mat.update(pvals_mat)
-
+        if self.pvals.shape != self.means.shape:
+            # 保留 metadata 前 col_start 列来自 means
+            tmp_pvals_mat = means_mat.iloc[:, :col_start].copy()
+            
+            # 对 sample columns 进行安全对齐
+            pvals_aligned = pvals_mat.reindex(
+                index=means_mat.index,
+                columns=means_mat.columns[col_start:],  # 只对 sample 区域按列名对齐
+            )
+            
+            # 合并
+            tmp_pvals_mat = pd.concat([tmp_pvals_mat, pvals_aligned], axis=1)
+            
+            # 填充
             if self.deg:
-                tmp_pvals_mat.fillna(0, inplace=True)
+                tmp_pvals_mat.iloc[:, col_start:] = tmp_pvals_mat.iloc[:, col_start:].fillna(0)
             else:
-                tmp_pvals_mat.fillna(1, inplace=True)
-
-            pvals_mat = tmp_pvals_mat.copy()
-
+                tmp_pvals_mat.iloc[:, col_start:] = tmp_pvals_mat.iloc[:, col_start:].fillna(1)
+            
+            self.pvals = tmp_pvals_mat
+        
         if self.deg:
             pvals_mat.iloc[:, col_start: pvals_mat.shape[1]] = 1 - pvals_mat.iloc[:, col_start: pvals_mat.shape[1]]
 
@@ -252,6 +262,7 @@ class CellphoneInspector():
         :return: 为 ci 对象增加一个属性 ci.cell_metadata；存在 group 时增加 ci.group_info
         '''
         self.logger.info("Preparing cell information...")
+        self.celltype_key = celltype_key
         # 确保为 category
         if not metadata[celltype_key].dtype.name == "category":
             metadata[celltype_key] = metadata[celltype_key].astype("category")
@@ -288,37 +299,29 @@ class CellphoneInspector():
         :return:
         '''
         # 全部的细胞类别
-        labels = list(self.cell_metadata._labels.cat.categories)
+        labels = list(self.cell_metadata[self.celltype_key].cat.categories)
         c_type1 = cell_type1 if cell_type1 != "." else labels
         c_type2 = cell_type2 if cell_type2 != "." else labels
-
+        
+        
         # 生成全部的细胞-细胞对组合
-        celltype = []
+        ctx = []
         for i in range(0, len(c_type1)):
-            cq = []
             for cx2 in c_type2:
                 # 无论是否锁定，我们都有c_type1在左边，ctype_2在右边的情况
-                cq.append("^" + c_type1[i] + DEFAULT_SEP + cx2 + "$")
+                ctx.append("^" + c_type1[i] + DEFAULT_SEP + cx2 + "$")
                 if not lock_celltype_direction:
                     # 当锁定的时候，不进行交换
-                    cq.append("^" + cx2 + DEFAULT_SEP + c_type1[i] + "$")
-            cq = "|".join(cq)
-            if self.group_info is not None:
-                for g in self.group_info:
-                    ctx = cq.split("|")
-                    ctx = [x for x in ctx if re.search(g + ".*" + DEFAULT_SEP + g, x)]
-                    cqi = "|".join(ctx)
-                    if cqi != "":
-                        celltype.append(cqi)
-            else:
-                celltype.append(cq)
-
-        cell_type = "|".join(celltype)
-
+                    ctx.append("^" + cx2 + DEFAULT_SEP + c_type1[i] + "$")
+        
+        cq = "|".join(ctx)
+        
         # keep cell types
-        ct_columns = [ct for ct in self.means.columns if re.search(cell_type, ct)]
+        # 有 bug，self.mean.columns的格式 "c1>@<c2"，但是 cell_type 是 "g1_c1>@<g1_c2"
+        ct_columns = [ct for ct in self.means.columns if re.search(cq, ct)]
 
         return ct_columns
+    
     
     @logged
     def filter_and_cluster(self, gene_query, celltype_pairs,
@@ -339,83 +342,131 @@ class CellphoneInspector():
         :param standard_scale:
         :return:
         '''
+        # --- 1) 基本取子集：**不要** 在这里把 NaN -> 0（特别是 pvals）
+        # 确保 interacting_pair 列存在
         self.logger.info("Filtering and hierarchical clustering matrices...")
+        
+        for df_name in ("means", "pvals", "matrix"):
+            if "interacting_pair" not in getattr(self, df_name).columns:
+                raise KeyError(f"{df_name} does not contain required column 'interacting_pair'.")
+        
         means_matx = self.means[self.means.interacting_pair.isin(gene_query)][celltype_pairs]
         pvals_matx = self.pvals[self.pvals.interacting_pair.isin(gene_query)][celltype_pairs]
         interact_matx = self.matrix[self.matrix.interacting_pair.isin(gene_query)][celltype_pairs]
-
-        # 重新对列排序
-        col_order = []
-        if self.group_info is not None:
+        
+        # 只保留感兴趣的列（但先不要盲目 replace NaN）
+        # 构建 col_order（基于 group_info 的正则匹配），保持唯一性并补齐剩余列
+        if self.group_info:
+            col_order = []
+            seen = set()
             for g in self.group_info:
                 for c in means_matx.columns:
+                    if c in seen:
+                        continue
                     if re.search(g, c):
                         col_order.append(c)
+                        seen.add(c)
+            # append any remaining columns that were not matched
+            for c in means_matx.columns:
+                if c not in seen:
+                    col_order.append(c)
         else:
-            col_order = means_matx.columns
-
-        shared_cols = [c for c in col_order if c in means_matx.columns]
-        means_matx, pvals_matx, interact_matx = (
-            means_matx[shared_cols],
-            pvals_matx[shared_cols],
-            interact_matx[shared_cols]
-        )
-
-        # 处理显著过滤
+            col_order = list(means_matx.columns)
+        
+        # 保证交集顺序和存在性
+        shared_cols = [c for c in col_order if
+                       c in means_matx.columns and c in pvals_matx.columns and c in interact_matx.columns]
+        if len(shared_cols) == 0:
+            raise ValueError(
+                "No shared columns between means/pvals/matrix after filtering. Check `celltype_pairs` and `group_info`.")
+        
+        means_matx = means_matx[shared_cols]
+        pvals_matx = pvals_matx[shared_cols]
+        interact_matx = interact_matx[shared_cols]
+        
+        # --- 2) 显著性过滤 （注意：NaN 在 .lt(alpha) 中会被当作 False，因此不会被选中）
         if keep_significant_only:
-            # 筛选出任意列中 p 值小于 alpha 的行
-            keep_rows = pvals_matx.index[pvals_matx.lt(alpha).any(axis=1)]
-            # 用.lt (lower than)方法，比lamda方法可读可维护性更好
-            if keep_rows.size > 0:
-                print(f"{keep_rows.size} different cell-cell interaction pairs are found in the output.")
-                # 更新主要矩阵
-                pvals_matx = pvals_matx.loc[keep_rows]
-                means_matx = means_matx.loc[keep_rows]
-                keep_rows = keep_rows.intersection(interact_matx.index)
-                interact_matx = interact_matx.loc[keep_rows]
-
-                if interact_matx.size > 0:
-                    self.logger.info(f"Totally {interact_matx.size} reads found available after significance filtering.")
-                else:
-                    raise ValueError("Your data may not contain significant hits.")
+            # 确保 pvals 为 numeric
+            pvals_numeric = pvals_matx.apply(pd.to_numeric, errors="coerce")
+            # any(axis=1) 会对 NaN 处理为 False（不会误判）
+            keep_mask = pvals_numeric.lt(alpha).any(axis=1)
+            keep_rows = pvals_matx.index[keep_mask]
+            
+            if keep_rows.empty:
+                raise ValueError("No significant rows found in the data (after thresholding).")
+            
+            # 筛出 rows；之后对 interact_matx 做交集保守处理
+            pvals_matx = pvals_matx.loc[keep_rows]
+            means_matx = means_matx.loc[keep_rows]
+            # keep only those rows that also exist in interact matrix
+            common_rows = [r for r in keep_rows if r in interact_matx.index]
+            interact_matx = interact_matx.loc[common_rows] if common_rows else interact_matx.iloc[0:0]
+            
+            if interact_matx.shape[0] == 0:
+                self.logger.warning(
+                    "No interaction rows remain in interact_matx after significance filtering; continuing with empty interact_matx.")
             else:
-                raise ValueError("No significant rows found in the data.")
-
-        # 处理层次聚类
-        if cluster_rows:
-            if means_matx.shape[0] > 2:
-                # 行聚类获取顺序
-                self.logger.info("Performing hierarchical clustering...")
-                h_order = hclust(means_matx, axis=0)  # axis Index = 0 and columns = 1，对行进行层次聚类
-
-                # 对主要矩阵重新排序
-                means_matx = means_matx.loc[h_order]
-                pvals_matx = pvals_matx.loc[h_order]
-
-                # 对 interaction_scores 和 cellsign 数据处理，记住 cellsign 只是个子集，为了兼容：
-                valid_h_order = [h for h in h_order if h in interact_matx.index]
-                if valid_h_order:
-                    interact_matx = interact_matx.loc[valid_h_order]
-                else:
-                    raise ValueError("No significant hits found after clustering. ")
+                self.logger.info(f"Totally {interact_matx.size} reads found available after significance filtering.")
         else:
-            self.logger.info("Skipping scaling step.")
-
-        def safe_scale(r):
-            denom = np.max(r) - np.min(r)
-            return (r - np.min(r)) / denom if denom != 0 else r - np.min(r)
-
+            self.logger.info("Skipping significance filtering (keep_significant_only=False).")
+        
+        # --- 3) 聚类（安全版）
+        if cluster_rows:
+            if means_matx.shape[0] < 2:
+                self.logger.info("Less than 2 rows -> skipping clustering.")
+                h_order = list(means_matx.index)
+            else:
+                self.logger.info("Performing hierarchical clustering (safe path)...")
+                try:
+                    h_order = _safe_hclust(means_matx)
+                except Exception as e:
+                    # 聚类失败时，降级为不聚类（并记录错误）
+                    self.logger.exception("Hierarchical clustering failed; returning original row order. Error: %s",
+                                          str(e))
+                    h_order = list(means_matx.index)
+            
+            # 重新排序
+            means_matx = means_matx.reindex(h_order)
+            pvals_matx = pvals_matx.reindex(h_order)
+            # interact 仅 reindex 那些存在的
+            valid_h_order = [h for h in h_order if h in interact_matx.index]
+            if valid_h_order:
+                interact_matx = interact_matx.reindex(valid_h_order)
+            else:
+                # 保持空 df（不抛错，已在上游处理过提示）
+                interact_matx = interact_matx.iloc[0:0]
+        else:
+            self.logger.info("Skipping clustering step as cluster_rows=False.")
+        
+        # --- 4) 标准化（行尺度）: safe_scale 改进
+        def safe_scale_series(s: pd.Series):
+            vals = pd.to_numeric(s, errors="coerce")
+            if vals.isna().all():
+                return s * 0  # all-NaN -> keep shape but zeros
+            mn = vals.min()
+            mx = vals.max()
+            denom = mx - mn
+            if denom == 0 or np.isclose(denom, 0):
+                return vals - mn  # all zeros
+            return (vals - mn) / denom
+        
         if standard_scale:
-            means_matx = means_matx.apply(safe_scale, axis=1)
-
-        means_matx.fillna(0, inplace=True)
-
-        self.outcome = {"means_matx": means_matx,
-                        "pvals_matx": pvals_matx,
-                        "interact_matx": interact_matx,
-                        "scale": standard_scale,
-                        "alpha": alpha,
-                        "significance": keep_significant_only}
+            means_matx = means_matx.apply(safe_scale_series, axis=1)
+        
+        # 最终填充 NaN（只在显示或导出前填 0，如果你想保留 NaN 则可以不填）
+        means_matx = means_matx.fillna(0)
+        pvals_matx = pvals_matx.fillna(np.nan)  # 保持 NaN，避免误判
+        interact_matx = interact_matx.fillna(0)
+        
+        self.outcome = {
+            "means_matx": means_matx,
+            "pvals_matx": pvals_matx,
+            "interact_matx": interact_matx,
+            "scale": standard_scale,
+            "alpha": alpha,
+            "significance": keep_significant_only
+        }
+        self.logger.info("filter_and_cluster finished: %d rows, %d cols", means_matx.shape[0], means_matx.shape[1])
     
     @logged
     def format_outcome(self, exclude_interactions=None):
@@ -442,8 +493,8 @@ class CellphoneInspector():
         df_matrix = self.outcome["interact_matx"].melt(ignore_index=False).reset_index()
         df_matrix.index = df_matrix["index"] + DEFAULT_SEP * 3 + df_matrix["variable"]
         df_matrix.columns = DEFAULT_COLUMNS + ["scores"]
-        df = df.join(df_pvals["pvals"]).join(df_matrix["scores"]) # 对齐索引
-
+        df["scores"] = pd.to_numeric(df_matrix["scores"], errors="coerce")  # invalid parsing will be set as NaN
+        
         # set factors
         df.celltype_group = df.celltype_group.astype("category")
         df["cell_left"] = [item.split("-")[0] for item in df["celltype_group"]]
@@ -468,8 +519,9 @@ class CellphoneInspector():
             if df.at[i, "pvals"] >= self.outcome["alpha"]:
                 if self.outcome["significance"]:
                     df.at[i, "y_means"] = np.nan
+            
             if self.mode == "interaction_scores":
-                if df.at[i, "interaction_scores"] < 1:
+                if df.at[i, "scores"] < 1:
                     df.at[i, "x_means"] = np.nan
             elif self.mode == "cellsign":
                 if df.at[i, "cellsign"] < 1:
@@ -937,3 +989,40 @@ class _prepare_gene_query:
     def print():
         print("[prepare_gene_query] Allowed keywords for gene_family is:\n "
               + ", ".join(CellphoneInspector._prepare_gene_query.builtin_gene_keys))
+
+
+@logged
+def _safe_hclust(means_df, method="average", metric="euclidean", min_rows_for_clustering=3):
+    """
+    安全的层次聚类 wrapper：
+    - 检查数据类型与 finite
+    - 若行数 < min_rows_for_clustering，返回原 index 不做聚类
+    - 使用 pdist + linkage + leaves_list 获取叶子顺序（避免绘图 dendrogram 导致的递归）
+    返回：list of index labels in clustered order
+    """
+    if means_df.shape[0] < min_rows_for_clustering:
+        return list(means_df.index)
+    
+    # 保证为 numeric 矩阵（把 non-numeric 列先转换或抛错）
+    numeric = means_df.applymap(lambda x: np.isreal(x) and not (pd.isna(x) or np.isinf(x)))
+    if not numeric.all(axis=None):
+        # 可以选择填充或抛错，这里抛错并提示不合法的行/列
+        bad = np.where(~numeric.values)
+        raise ValueError(
+            f"Non-finite / non-numeric values found in means_df at positions (row_idx, col_idx): {bad}. "
+            "Please clean/replace NaN/inf before clustering.")
+    
+    # 如果所有列相同（每行恒定），pdist 会返回 zeros -> linkage 仍能工作，但 leaves_list 可能没意义
+    X = means_df.values.astype(float)
+    
+    # 若有常数行也可以继续（pdist 结果 zeros），linkage 仍可处理
+    # 计算距离并做 linkage
+    # 对高维大数据，pdist 可能内存消耗较大，这里不给自动降维
+    dists = pdist(X, metric=metric)
+    if np.any(np.isnan(dists)) or np.any(np.isinf(dists)):
+        raise ValueError("Distance computation produced NaN or Inf — check your input for constant/invalid rows.")
+    
+    Z = linkage(dists, method=method)
+    leaf_idx = leaves_list(Z)  # safer than dendrogram for programmatic ordering
+    ordered_labels = [means_df.index[i] for i in leaf_idx]
+    return ordered_labels
