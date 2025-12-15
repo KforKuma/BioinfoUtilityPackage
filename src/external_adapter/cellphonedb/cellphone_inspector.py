@@ -1,5 +1,7 @@
 import numpy as np
 import pandas as pd
+from scipy.cluster.hierarchy import leaves_list, linkage
+from scipy.spatial.distance import pdist
 
 
 from src.external_adapter.cellphonedb.settings import (
@@ -14,7 +16,7 @@ from src.external_adapter.cellphonedb.settings import (
     DEFAULT_CPDB_SEP
 )
 from src.external_adapter.cellphonedb.support import (
-    prep_query_group,hclust,split_kwargs
+    prep_query_group,split_kwargs
 )
 
 import os, re
@@ -909,16 +911,17 @@ def search_results(CIObject,
 
 def prepare_gene_query(self, genes=None, gene_family=None, custom_gene_family=None):
     '''
+    之所以从类内拿出来还是考虑到反复使用和编辑比较方便，传入一次就行。
 
     Example
     -------
-    gene_query = prepare_gene_query(genes=[]) # 默认查询全部基因
-    gene_query = prepare_gene_query(genes=["IL2", "IL6"]) # 列表也行
-    gene_query = prepare_gene_query(genes="IL2|IL6") # 可正则搜索的字符串也行
+    gene_query = prepare_gene_query(ci, genes=[]) # 默认查询全部基因
+    gene_query = prepare_gene_query(ci, genes=["IL2", "IL6"]) # 列表也行
+    gene_query = prepare_gene_query(ci, genes="IL2|IL6") # 可正则搜索的字符串也行
 
-    gene_query = prepare_gene_query(gene_family=“th17”) # 内置基因字典，自动搜索相关基因
+    gene_query = prepare_gene_query(ci, gene_family=“th17”) # 内置基因字典，自动搜索相关基因
 
-    gene_query = prepare_gene_query(custom_gene_family={“scavenger_rec”:["^ACKR","^SR-"]})
+    gene_query = prepare_gene_query(ci, custom_gene_family={“scavenger_rec”:["^ACKR","^SR-"]})
 
     # 当然，也可以和 geneset 类联用
     my_markers = Geneset(save_addr + "Markers-updated.xlsx")
@@ -1026,3 +1029,69 @@ def _safe_hclust(means_df, method="average", metric="euclidean", min_rows_for_cl
     leaf_idx = leaves_list(Z)  # safer than dendrogram for programmatic ordering
     ordered_labels = [means_df.index[i] for i in leaf_idx]
     return ordered_labels
+
+
+def combine_outcome(dfs):
+    df_merge = pd.concat(dfs)
+    
+    # 看一下无 classification 标注的都在什么细胞类型里？
+    df_merge[df_merge["classification"].isna()]["directionality"].value_counts()
+    
+    mask = df_merge["directionality"].notna() & df_merge["classification"].isna()
+    df_merge.loc[mask, "classification"] = "Unlabeled_" + df_merge.loc[mask, "directionality"]
+    
+    with pd.option_context('display.max_rows', None):
+        df_merge["classification"].value_counts()
+    
+    return df_merge
+
+
+def split_and_save(df_merge, save_addr, by_key="classification", zero_omit=True):
+    from src.utils.env_utils import sanitize_filename
+    from src.external_adapter.cellphonedb.settings import DEFAULT_SEP
+    
+    if df_merge[by_key].isna().any():
+        raise ValueError(f"Please fix the missing value in column {by_key} before saving.")
+    
+    # 整理 interaction_group
+    if DEFAULT_SEP in str(df_merge["interaction_group"].iloc[0]):
+        sep3 = DEFAULT_SEP * 3
+        df_merge["interaction_group"] = (
+            df_merge["interaction_group"]
+            .astype(str)
+            .str.rsplit(pat=sep3, n=1)
+            .str[-1]
+        )
+    
+    for key in df_merge[by_key].unique():
+        print(f"Saving {key} to {save_addr}")
+        key_name = sanitize_filename(key)
+        filename = os.path.join(save_addr, f"CPDB_combined_{key_name}.csv")
+        
+        df_sub = df_merge[df_merge[by_key] == key].copy()
+        
+        if zero_omit:
+            print("Mode: omitting all zero items.")
+            # 计算每个 interaction × celltype 组合的得分和
+            score_sum = (
+                df_sub.groupby(["interaction_group", "celltype_group"])["scores"]
+                .sum()
+                .reset_index()
+            )
+            
+            # 找出 sum == 0 的组合
+            zero_pairs = score_sum[score_sum["scores"] == 0]
+            
+            if len(zero_pairs) > 0:
+                # 合并回去，删除这些组合
+                zero_pairs["to_remove"] = True
+                df_sub = df_sub.merge(
+                    zero_pairs[["interaction_group", "celltype_group", "to_remove"]],
+                    on=["interaction_group", "celltype_group"],
+                    how="left"
+                )
+                df_sub = df_sub[df_sub["to_remove"] != True].drop(columns=["to_remove"])
+        
+        df_sub.to_csv(filename, index=False)
+        print("Saved.")
+

@@ -77,7 +77,7 @@ def hclust(
         method: str = "average",
         metric: str = "euclidean",
         optimal_ordering: bool = True,
-) -> list:
+) -> list: # 目前被 _safe_hclust 代替
     """
     Perform hierarchical clustering on rows or columns of a DataFrame.
 
