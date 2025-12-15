@@ -162,36 +162,48 @@ cell_type_inclusion = {"CD3+CD19-":['CD4 Th17', 'CD4 Tmem', 'CD4 Tfh', 'CD4 Tmem
 
 ###########################################################
 # 模拟输入数据
-df_sim = simulate_DM_data(
-    disease_effect_size=1.0,      # log-fold-change
-    sampling_bias_strength=0.8,   # 模拟采样混杂
-    disease_levels=["HC", "CD","UC"]
+df_sim,df_true_effect = simulate_DM_data(
+    n_donors=8,
+    n_samples_per_donor=4,
+    disease_levels=["HC", "CD","UC"],
+    sampling_bias_strength=2
 )
 
 df_sim.head()
+df_true_effect[df_true_effect.True_Significant==True]
+
+# 测试
+Dir_res = run_Dirichlet_Wald(df_sim, "CT1",
+                             formula="disease + C(tissue, Treatment(reference=\"nif\"))")
+# Dir_res["extra"]["fixed_effect"]
+Dir_res["extra"]["contrast_table"]
 
 
 
 
-df_sim,metadata, true_effect = simulate_LogisticNormal_data(
-    meta_factors={"disease": ["HC", "CD","UC"]}
+
+df_sim,df_true_effect = simulate_LogisticNormal_hierarchical(
+    N_samples=12,
+    N_cell_types=50,
+    # disease_levels=("HC", "CD","UC","BD")
 )
+df_sim.head()
+df_true_effect[df_true_effect.True_Significant==True]
+# 测试
+Dir_res = run_Dirichlet_Wald(df_sim, "CT1",
+                             formula="disease + C(tissue, Treatment(reference=\"nif\"))")
+# Dir_res["extra"]["fixed_effect"]
+Dir_res["extra"]["contrast_table"]
 
-counts = count_df.pivot_table(index="sample_id", columns="cell_type", values="count", fill_value=0)
-from src.core.kdk_ops import _kdk_make_meta
-metas = _kdk_make_meta(adata_obs)
-metas = metas.set_index("orig.ident")
-df_sim,metadata = simulate_real_resampling_data(real_counts=counts,real_metadata=metas,
-                                                disease_levels=["HC","CD","UC"])
 
-########################
-n_donors = 8
-n_samples_per_donor = 4
-cell_types = 50
-baseline_alpha_scale = 30
-disease_effect_size = 0.0
-sampling_bias_strength = 0.0
-disease_levels: list = ["HC", "disease"]
-tissue_levels: list = ["nif", "if"]
-sample_size_range = (5000, 20000)
-random_state = 1234
+df_sim,df_true_effect = simulate_CLR_resample_data(count_df,
+                                    disease_levels=["HC", "CD","UC"])
+df_sim.head()
+df_true_effect[df_true_effect.True_Significant==True]
+
+# 测试
+Dir_res = run_Dirichlet_Wald(df_sim, "CT1",
+                             formula="disease + C(tissue, Treatment(reference=\"nif\"))")
+# Dir_res["extra"]["fixed_effect"]
+Dir_res["extra"]["contrast_table"]
+

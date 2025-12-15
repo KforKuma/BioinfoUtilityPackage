@@ -218,7 +218,7 @@ def collapse_dunn_matrix(dunn_p_matrix, group_means, ref="HC", alpha=0.05):
     return pd.DataFrame(results).set_index("other")
 
 
-def _extract_contrast(ref_label, means, tukey_res):
+def extract_contrast(ref_label, means, tukey_res):
     """Extract contrast results relative to a specified reference level."""
     
     # Normalize means into a dict-like structure

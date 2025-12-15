@@ -13,6 +13,8 @@ from scipy.optimize import minimize
 from scipy.special import gammaln
 from scipy.special import gammaln, psi  # psi = digamma
 from scipy.stats import norm
+import scipy.stats as sps
+
 from statsmodels.stats.multitest import multipletests
 from statsmodels.stats.multicomp import pairwise_tukeyhsd
 
@@ -996,7 +998,7 @@ def run_ANOVA_naive(
             groups=df_sub[factor_name],
             alpha=alpha
         )
-        contrast_rows = _extract_contrast(ref_label, means, tukey)
+        contrast_rows = extract_contrast(ref_label, means, tukey)
     else:
         contrast_rows = []
 
@@ -1048,7 +1050,7 @@ def run_ANOVA_transformed(
             groups=df_sub[main_factor],
             alpha=alpha
         )
-        contrast_rows = _extract_contrast(ref_label, means, tukey)
+        contrast_rows = extract_contrast(ref_label, means, tukey)
     else:
         contrast_rows = []
 
@@ -1069,112 +1071,248 @@ def run_ANOVA_transformed(
 # 有利于 Dirichlet 回归
 # -----------------------
 from scipy.stats import dirichlet_multinomial
+from scipy.stats import dirichlet, multinomial
 
 def simulate_DM_data(
         n_donors=8,
         n_samples_per_donor=4,
         cell_types=50,
-        baseline_alpha_scale=30,  # 基础组成（越大越低离散）
-        disease_effect_size=0.0,  # log-fold-change on α
-        sampling_bias_strength=0.0,  # 采样偏差大小
-        disease_levels:list = ["HC","disease"],
-        tissue_levels:list =["nif", "if"],
-        # presort_levels:list =["none", "CD45+", "EpCAM+"],
-        sample_size_range=(5000, 20000),  # 每个样本总细胞数
+        baseline_alpha_scale=30,
+        disease_effect_size=0.5,  # <-- 新增参数
+        tissue_effect_size=0.6,
+        interaction_effect_size=1.0,
+        inflamed_cell_frac=0.15,
+        sampling_bias_strength=0.0,
+        disease_levels=("HC", "CD", "UC"),  # 适配多疾病
+        tissue_levels=("nif", "if"),
+        sample_size_range=(5000, 20000),
+        donor_noise_sd=0.3,
         random_state=1234
 ):
-    """
-    返回一个与你的 KDKD pipeline 兼容的宽格式 dataframe：
-    每行 = sample
-    每列 = 50 个 cell types 的计数
-    以及 meta 信息：donor / disease / tissue / presort
-    """
-    
     rng = np.random.default_rng(random_state)
+    n_celltypes = cell_types
+    cell_type_names = [f"CT{i + 1}" for i in range(n_celltypes)]
     
     # ---------------------------
-    # Step 1: baseline α 向量
+    # Step 1: baseline α₀
     # ---------------------------
-    baseline = rng.uniform(0.5, 2.0, cell_types)
-    baseline = baseline / baseline.sum() * baseline_alpha_scale  # scale to overdispersion
+    baseline = rng.uniform(0.5, 2.0, n_celltypes)
+    baseline = baseline / baseline.sum() * baseline_alpha_scale
     
     # ---------------------------
-    # Step 2: 构造 donor × sample 信息
+    # Step 1.5: 构建效应向量和 True Effect Table (新增)
     # ---------------------------
+    disease_main_effects_dict, tissue_effect_vec, interaction_effects_dict, df_true_effect = build_DM_effects_with_main_effect(
+        cell_type_names, disease_levels, tissue_levels,
+        disease_effect_size, tissue_effect_size, interaction_effect_size,
+        inflamed_cell_frac, rng
+    )
+    
     records = []
-    
     donors = [f"D{i + 1}" for i in range(n_donors)]
+    
+    # ---------------------------
+    # Step 2: donor-level baseline (不变)
+    # ---------------------------
+    donor_info = {}
+    ref_disease = disease_levels[0]
+    
+    for donor in donors:
+        disease = rng.choice(disease_levels)
+        alpha_d = baseline.copy()
+        donor_noise = rng.normal(0, donor_noise_sd, n_celltypes)
+        alpha_d *= np.exp(donor_noise)
+        
+        donor_info[donor] = {
+            "disease": disease,
+            "alpha": alpha_d
+        }
+    
+    # ---------------------------
+    # Step 3: sample-level generation (关键修改：应用主效应)
+    # ---------------------------
+    ref_tissue = tissue_levels[0]
+    
+    # 提前计算采样偏差 latent_axis (不变)
+    if sampling_bias_strength > 0:
+        latent_axis = rng.normal(0, 1, n_celltypes)
+        latent_axis = latent_axis / np.linalg.norm(latent_axis)
     
     for donor in donors:
         for sample_id in range(n_samples_per_donor):
             
-            disease = rng.choice(disease_levels)
             tissue = rng.choice(tissue_levels)
+            disease = donor_info[donor]["disease"]
             
-            # --------------------------
-            # Step 3: 构造 α_i
-            # --------------------------
-            alpha = baseline.copy()
+            alpha = donor_info[donor]["alpha"].copy()
             
-            # ---- (1) disease effect ----
-            if disease == "disease":
-                disease_effect = np.zeros(cell_types)
-                disease_effect[:5] = disease_effect_size  # 假设前5类细胞受影响
-                alpha *= np.exp(disease_effect)
+            # ---- 1. Disease Main Effect (新增) ----
+            if disease != ref_disease:
+                # 获取当前疾病对应的 Disease 主效应向量
+                disease_main_effect_vec = disease_main_effects_dict[disease]
+                alpha *= np.exp(disease_main_effect_vec)
             
-            # ---- (2) sampling bias ----
-            # e.g. deep biopsy enriches stromal/epithelial
+            # ---- 2. Tissue Main Effect ----
+            if tissue != ref_tissue:
+                # 对 if 施加 tissue main effect
+                alpha *= np.exp(tissue_effect_vec)
+                
+                # ---- 3. Disease x Tissue Interaction ----
+                if disease != ref_disease:
+                    # 获取当前疾病对应的交互作用效应向量
+                    disease_inter_effect_vec = interaction_effects_dict[disease]
+                    alpha *= np.exp(disease_inter_effect_vec)
+            
+            # ---- 4. technical sampling bias ----
             if sampling_bias_strength > 0:
-                bias = np.zeros(cell_types)
-                # 前 10 类作为 “深层细胞”
-                bias[:10] = sampling_bias_strength
-                # 后 10 类作为 “浅层细胞”
-                bias[-10:] = -sampling_bias_strength
+                bias_scalar = rng.normal(0, sampling_bias_strength)
+                bias = bias_scalar * latent_axis
                 alpha *= np.exp(bias)
             
-            # Normalize α
+            # 所有效应累积后得到样本特异性的最终 alpha 向量。
             alpha = np.maximum(alpha, 1e-6)
             
-            # --------------------------
-            # Step 4: 总细胞数
-            # --------------------------
             N = rng.integers(*sample_size_range)
             
-            # --------------------------
-            # Step 5: DM 采样
-            # --------------------------
-            # counts = dirichlet_multinomial.rvs(N, alpha)
-            import scipy.stats as sps
-            def dirichlet_multinomial_sample(alpha, n):
-                p = sps.dirichlet.rvs(alpha=alpha, size=1).ravel()
-                return sps.multinomial.rvs(n=n, p=p)
-            
-            counts = dirichlet_multinomial_sample(alpha, N)
+            # 使用 sps.dirichlet/multinomial (假设已正确导入)
+            p = dirichlet.rvs(alpha, size=1, random_state=rng).ravel()
+            counts = multinomial.rvs(n=N, p=p, size=1, random_state=rng).ravel()
             
             record = {
                 "donor_id": donor,
                 "disease": disease,
                 "tissue": tissue,
+                "sample_id": f"{donor}_S{sample_id}"
             }
             
-            # 加入 cell type count
-            for i in range(cell_types):
+            for i in range(n_celltypes):
                 record[f"CT{i + 1}"] = counts[i]
             
             records.append(record)
     
     df = pd.DataFrame(records)
     
+    # ---------------------------
+    # Step 4: format output (不变)
+    # ---------------------------
+    
     df_long = df.melt(
-        id_vars=["donor_id", "disease", "tissue"],
+        id_vars=["donor_id", "sample_id", "disease", "tissue"],
         var_name="cell_type",
         value_name="count"
     )
+    df_long['total_count'] = df_long.groupby('sample_id')['count'].transform('sum')
+    df_long['prop'] = df_long['count'] / df_long['total_count']
     
-    return df_long
+    return df_long, df_true_effect
 
 
-# -----------------------
+def build_DM_effects_with_main_effect(
+        cell_types, disease_levels, tissue_levels,
+        disease_effect_size, tissue_effect_size, interaction_effect_size,
+        inflamed_cell_frac, rng
+):
+    """
+    DM 模型的效应生成函数，现在包含独立的 Disease Main Effect。
+    同时，根据 HC ≡ nif 的约束，修正了 True Effect Table 中的参照组 (contrast_ref)。
+    """
+    n_celltypes = len(cell_types)
+    ref_disease = disease_levels[0]  # 例如 HC
+    ref_tissue = tissue_levels[0]  # 例如 nif
+    other_tissue = tissue_levels[1]  # 例如 if
+    
+    # ... (效应向量生成逻辑保持不变，确保随机性) ...
+    
+    # 随机选择受影响的细胞集
+    disease_main_cts = rng.choice(
+        n_celltypes,
+        size=max(1, int(n_celltypes * 0.1)),
+        replace=False
+    )
+    inflamed_cts = rng.choice(
+        n_celltypes,
+        size=max(1, int(n_celltypes * inflamed_cell_frac)),
+        replace=False
+    )
+    
+    # --- 1. Disease Main Effects (字典存储) ---
+    disease_main_effects_dict = {}
+    for other_disease in disease_levels[1:]:
+        effect_vec = np.zeros(n_celltypes)
+        random_multiplier = rng.uniform(0.8, 1.2) if len(disease_levels) > 2 else 1.0
+        effect_vec[disease_main_cts] = disease_effect_size * random_multiplier
+        disease_main_effects_dict[other_disease] = effect_vec
+    
+    # --- 2. Tissue Main Effect ---
+    tissue_effect_vec = np.zeros(n_celltypes)
+    tissue_effect_vec[inflamed_cts] = tissue_effect_size
+    
+    # --- 3. Disease x Tissue Interaction Effects (字典存储) ---
+    interaction_effects_dict = {}
+    for other_disease in disease_levels[1:]:
+        effect_vec = np.zeros(n_celltypes)
+        random_multiplier = rng.uniform(0.5, 1.5) if len(disease_levels) > 2 else 1.0
+        effect_vec[inflamed_cts] = interaction_effect_size * random_multiplier
+        interaction_effects_dict[other_disease] = effect_vec
+    
+    # --------------------
+    # 构建 True Effect Table (关键修正点在此)
+    # --------------------
+    true_effects = []
+    
+    # 1. Disease Main Effect (Disease vs HC)
+    for other_disease, E_vec in disease_main_effects_dict.items():
+        for i, ct_name in enumerate(cell_types):
+            E_disease = E_vec[i]
+            true_effects.append({
+                'cell_type': ct_name,
+                'contrast_factor': 'disease',
+                'contrast_group': other_disease,
+                'contrast_ref': ref_disease,  # HC (隐含 HC ≡ nif)
+                'True_Effect': E_disease,
+                'True_Direction': 'other_greater' if E_disease > 0 else ('ref_greater' if E_disease < 0 else 'None'),
+                'True_Significant': True if E_disease != 0 else False
+            })
+    
+    # 2. Tissue Main Effect (if vs nif)
+    # 注意：这个主效应在 HC 组中不发生。它表示的是 "disease" 组中 if vs nif 的平均 LogFC。
+    for i, ct_name in enumerate(cell_types):
+        E_tissue = tissue_effect_vec[i]
+        true_effects.append({
+            'cell_type': ct_name,
+            'contrast_factor': 'tissue',
+            'contrast_group': other_tissue,
+            'contrast_ref': ref_tissue,  # nif
+            'True_Effect': E_tissue,
+            'True_Direction': 'other_greater' if E_tissue > 0 else ('ref_greater' if E_tissue < 0 else 'None'),
+            'True_Significant': True if E_tissue != 0 else False
+        })
+    
+    # 3. Disease x Tissue Interaction
+    for other_disease, E_inter_vec in interaction_effects_dict.items():
+        for i, ct_name in enumerate(cell_types):
+            E_interaction = E_inter_vec[i]
+            
+            # 修正 contrast_ref:
+            # 交互作用通常被定义为： (Disease_if - Disease_nif) - (HC_if - HC_nif)
+            # 由于 HC_if 不存在，这简化为 (Disease_if - Disease_nif) - (0 - 0)
+            # 施加的 E_inter 实际上是该交互作用项的系数。
+            # 为了评估功效，最简单、最准确的参照组是唯一的全局基线 HC x nif。
+            true_effects.append({
+                'cell_type': ct_name,
+                'contrast_factor': 'interaction',
+                'contrast_group': f'{other_disease} x {other_tissue}',
+                # *** 修正点 ***: 使用最简洁的全局参照组标记
+                'contrast_ref': f'{ref_disease} x {ref_tissue}',
+                'True_Effect': E_interaction,  # LogFC
+                'True_Direction': 'other_greater' if E_interaction > 0 else (
+                    'ref_greater' if E_interaction < 0 else 'None'),
+                'True_Significant': True if E_interaction != 0 else False
+            })
+    
+    return disease_main_effects_dict, tissue_effect_vec, interaction_effects_dict, pd.DataFrame(true_effects)
+
+
 # 生成模拟数据：Logistic-Normal Multinomial 模拟
 # 有利于 LMM/CLR
 # -----------------------
@@ -1182,131 +1320,492 @@ def simulate_DM_data(
 from scipy.special import softmax
 
 
-def simulate_LogisticNormal_data(
-        n_samples=200,
+def simulate_LogisticNormal_hierarchical(
+        n_donors=8,
+        n_samples_per_donor=4,
         n_celltypes=50,
-        meta_factors={"disease": ["control", "case"]},
-        mean_shift=None,
+        baseline_mu_scale=1.0,
+        disease_effect_size=0.5,
+        tissue_effect_size=0.8,
+        interaction_effect_size=0.5,
+        inflamed_cell_frac=0.1,  # 比例，tissue=if受影响的细胞类型
+        latent_sd=0.5,
         total_count_mean=5e4,
         total_count_sd=2e4,
-        random_state=0
+        disease_levels=("HC", "CD", "UC"),  # 假设多疾病状态，例如：HC, CD, UC
+        tissue_levels=("nif", "if"),
+        random_state=1234
 ):
     """
-    Logistic-Normal compositional simulator.
+    Logit-Normal 层次化模拟器，现在支持每个疾病 (如 CD, UC) 具有独立的效应向量。
+    返回 (模拟数据, 真实效应查找表)。
     """
     rng = np.random.default_rng(random_state)
     
-    # ----- 1) 随机生成 metadata -----
-    metadata = {}
-    for k, levels in meta_factors.items():
-        metadata[k] = rng.choice(levels, n_samples)
-    metadata = pd.DataFrame(metadata)
+    ref_disease = disease_levels[0]
+    ref_tissue = tissue_levels[0]
     
-    # ----- 2) 生成 baseline mean vector -----
-    baseline_mu = rng.normal(0, 1, n_celltypes)
+    # ------------------------------------------------------------------
+    # 步骤 1: 构建 donor × sample metadata (不变)
+    # ------------------------------------------------------------------
+    donors = [f"D{i + 1}" for i in range(n_donors)]
+    records = []
+    # 确保疾病状态是均匀随机分配的，以确保每个疾病组都有样本
+    disease_choices = disease_levels
     
-    # ----- 3) 加入 meta 因素 effect -----
-    if mean_shift is None:
-        # 每个 celltype 给 disease 一个随机 effect
-        mean_shift = {
-            "disease": rng.normal(0, 0.6, n_celltypes)  # effect size
-        }
+    for donor in donors:
+        # 假设 donor-level disease 随机分配
+        disease = rng.choice(disease_choices)
+        for sample_id in range(n_samples_per_donor):
+            tissue = rng.choice(tissue_levels)
+            records.append({
+                "donor_id": donor,
+                "disease": disease,
+                "tissue": tissue,
+                "sample_id": f"{donor}_S{sample_id}"
+            })
+    df_meta = pd.DataFrame(records)
+    n_samples = len(df_meta)
+    cell_types = [f"CT{i + 1}" for i in range(n_celltypes)]
     
-    # 保存真实 effect
-    true_effect = mean_shift
+    # ------------------------------------------------------------------
+    # 步骤 2-5: 定义独立的效应向量
+    # ------------------------------------------------------------------
     
-    # ----- 4) 生成 logistic-normal proportions -----
+    # 2) baseline mu
+    baseline_mu = rng.normal(0, baseline_mu_scale, n_celltypes)
+    
+    # --- 3) donor-level disease effects (字典存储) ---
+    disease_effects = {}
+    
+    # 遍历所有非参照疾病组 (CD, UC, ...)
+    for other_disease in disease_levels[1:]:
+        effect_vec = np.zeros(n_celltypes)
+        # 随机选择受影响的细胞类型 (为每个疾病独立选择，或基于原设计)
+        disease_cts = rng.choice(
+            n_celltypes,
+            size=max(1, int(n_celltypes * 0.1)),
+            replace=False
+        )
+        # 为了创造不同的分布，我们为不同疾病的效应大小添加一个随机乘数
+        random_multiplier = rng.uniform(0.8, 1.2)
+        
+        effect_vec[disease_cts] = disease_effect_size * random_multiplier
+        disease_effects[other_disease] = effect_vec
+    
+    # --- 4) sample-level tissue effect (不变) ---
+    tissue_effect = np.zeros(n_celltypes)
+    inflamed_cts = rng.choice(
+        n_celltypes,
+        size=max(1, int(n_celltypes * inflamed_cell_frac)),
+        replace=False
+    )
+    tissue_effect[inflamed_cts] = tissue_effect_size
+    
+    # --- 5) disease × tissue interaction effects (字典存储) ---
+    interaction_effects = {}
+    
+    # 交互作用也应该针对每个疾病和 tissue 组合独立定义
+    for other_disease in disease_levels[1:]:
+        effect_vec = np.zeros(n_celltypes)
+        interaction_cts = rng.choice(
+            n_celltypes,
+            size=max(1, int(n_celltypes * inflamed_cell_frac)),
+            replace=False
+        )
+        # 为了区分，交互作用大小也随机变化
+        random_multiplier = rng.uniform(0.5, 1.5)
+        
+        effect_vec[interaction_cts] = interaction_effect_size * random_multiplier
+        interaction_effects[other_disease] = effect_vec
+    
+    # ------------------------------------------------------------------
+    # 步骤 5.5: 构建真实效应查找表 (关键修改：从字典中读取效应)
+    # ------------------------------------------------------------------
+    
+    df_true_effect = build_true_effect_table(
+        cell_types, ref_disease, ref_tissue,
+        disease_effects, tissue_effect, interaction_effects, tissue_levels[1]
+    )
+    
+    # ------------------------------------------------------------------
+    # 步骤 6: 构建 logits (关键修改：根据 row["disease"] 查找对应的效应向量)
+    # ------------------------------------------------------------------
+    
     logits = np.zeros((n_samples, n_celltypes))
     
-    for i in range(n_samples):
+    for i, row in df_meta.iterrows():
         mu = baseline_mu.copy()
+        current_disease = row["disease"]
+        current_tissue = row["tissue"]
         
-        # 每个 meta factor 施加 effect
-        for factor, effect in mean_shift.items():
-            level = metadata.loc[i, factor]
-            # 假设 effect 施加于（level != 第一个 level）
-            if level != meta_factors[factor][0]:
-                mu += effect
+        # 查找 donor-level disease effect
+        if current_disease != ref_disease:
+            mu += disease_effects[current_disease]  # **使用对应疾病的效应向量**
         
-        # logistic-normal 随机误差
+        # sample-level tissue effect
+        if current_tissue != ref_tissue:
+            mu += tissue_effect
+        
+        # disease × tissue interaction
+        if current_disease != ref_disease and current_tissue != ref_tissue:
+            mu += interaction_effects[current_disease]  # **使用对应疾病的交互作用向量**
+        
+        # latent sample-level variation
+        mu += rng.normal(0, latent_sd, n_celltypes)
+        
+        # logistic-normal sample
         logits[i] = rng.multivariate_normal(mean=mu, cov=np.eye(n_celltypes) * 0.5)
+    
+    # ------------------------------------------------------------------
+    # 步骤 7-9: 转换到 proportions 并采样 (不变)
+    # ------------------------------------------------------------------
     
     proportions = softmax(logits, axis=1)
     
-    # ----- 5) 生成 total counts + multinomial -----
     total_counts = np.maximum(
-        rng.normal(total_count_mean, total_count_sd, n_samples).astype(int),
-        1000
+        rng.normal(total_count_mean, total_count_sd, n_samples).astype(int), 1000
     )
+    
+    epsilon = 1e-12
+    proportions = np.clip(proportions, epsilon, 1 - epsilon)
+    row_sums = proportions.sum(axis=1, keepdims=True)
+    proportions = proportions / row_sums
     
     counts = np.vstack([
         rng.multinomial(n=total_counts[i], pvals=proportions[i])
         for i in range(n_samples)
     ])
     
-    return counts, metadata, true_effect
+    df = df_meta.copy()
+    for ct_idx in range(n_celltypes):
+        df[f"CT{ct_idx + 1}"] = counts[:, ct_idx]
+    
+    df_long = df.melt(
+        id_vars=["donor_id", "sample_id", "disease", "tissue"],
+        var_name="cell_type",
+        value_name="count"
+    )
+    df_long['total_count'] = df_long.groupby('sample_id')['count'].transform('sum')
+    df_long['prop'] = df_long['count'] / df_long['total_count']
+    
+    return df_long, df_true_effect
+
+
+# ------------------------------------------------------------------
+# 辅助函数: 构建真实效应查找表 (分离出来，便于清晰度)
+# ------------------------------------------------------------------
+
+def build_true_effect_table(
+        cell_types, ref_disease, ref_tissue,
+        disease_effects, tissue_effect, interaction_effects, other_tissue
+):
+    """
+    根据效应字典和向量构建真实效应查找表。
+    已修正：根据 HC ≡ nif 的约束，修正了交互作用的参照组 (contrast_ref)。
+    """
+    
+    true_effects = []
+    n_celltypes = len(cell_types)
+    
+    # 1. 疾病效应 (Disease vs Ref_Disease)
+    for other_disease, E_vec in disease_effects.items():
+        for i, ct_name in enumerate(cell_types):
+            E_disease = E_vec[i]
+            true_effects.append({
+                'cell_type': ct_name,
+                'contrast_factor': 'disease',
+                'contrast_group': other_disease,
+                'contrast_ref': ref_disease,
+                'True_Effect': E_disease,
+                'True_Direction': 'other_greater' if E_disease > 0 else ('ref_greater' if E_disease < 0 else 'None'),
+                'True_Significant': True if E_disease != 0 else False
+            })
+    
+    # 2. 组织效应 (Tissue vs Ref_Tissue)
+    for i, ct_name in enumerate(cell_types):
+        E_tissue = tissue_effect[i]
+        true_effects.append({
+            'cell_type': ct_name,
+            'contrast_factor': 'tissue',
+            'contrast_group': other_tissue,
+            'contrast_ref': ref_tissue,
+            'True_Effect': E_tissue,
+            'True_Direction': 'other_greater' if E_tissue > 0 else ('ref_greater' if E_tissue < 0 else 'None'),
+            'True_Significant': True if E_tissue != 0 else False
+        })
+    
+    # 3. 交互作用效应 (Disease_Group * Tissue_Group)
+    for other_disease, E_inter_vec in interaction_effects.items():
+        for i, ct_name in enumerate(cell_types):
+            E_interaction = E_inter_vec[i]
+            true_effects.append({
+                'cell_type': ct_name,
+                'contrast_factor': 'interaction',
+                'contrast_group': f'{other_disease} x {other_tissue}',
+                # *** 修正点 ***: 简化交互作用的参照组为唯一的全局基线 HC x nif
+                'contrast_ref': f'{ref_disease} x {ref_tissue}',
+                'True_Effect': E_interaction,
+                'True_Direction': 'other_greater' if E_interaction > 0 else (
+                    'ref_greater' if E_interaction < 0 else 'None'),
+                'True_Significant': True if E_interaction != 0 else False
+            })
+    
+    return pd.DataFrame(true_effects)
 
 
 # -----------------------
 # 生成模拟数据：“真实数据 resampling” 模拟
 # 相对最公正
 # -----------------------
+from scipy.special import softmax  # 用于 Logit 到 Proportion 的转换
 
-def simulate_real_resampling_data(
-        real_counts: pd.DataFrame,
-        real_metadata: pd.DataFrame,
-        n_samples=200,
-        disease_effect_strength=1.5,
-        disease_levels=("control", "case"),
-        effect_n_celltypes=5,
-        random_state=0
+
+def simulate_CLR_resample_data(
+        count_df,
+        n_sim_samples=100,
+        disease_effect_size=0.5,
+        tissue_effect_size=0.8,
+        interaction_effect_size=0.5,
+        inflamed_cell_frac=0.1,
+        latent_axis_sd=0.5,
+        disease_levels=("HC", "CD", "UC"),  # 适配多疾病
+        tissue_levels=("nif", "if"),
+        pseudocount=1.0,
+        random_state=1234
 ):
-    """
-    模拟真实 resampling：
-    - 从真实单细胞计数表中 bootstrap 抽样
-    - 随机赋予疾病标签
-    - 在疾病组中施加 Dirichlet-like composition 变化
-
-    返回：
-        new_counts (np.ndarray, shape = n_samples × n_celltypes)
-        new_metadata (pd.DataFrame)
-    """
     rng = np.random.default_rng(random_state)
     
-    m_real, n_celltypes = real_counts.shape
+    # ---------------------------
+    # Step 1 & 2: 数据准备、宽化和 CLR 转换 (保持不变)
+    # ---------------------------
+    metadata_cols = ['sample_id', 'donor_id', 'disease', 'tissue']
+    count_df['total_count'] = count_df.groupby('sample_id')['count'].transform('sum')
     
-    # ----- 1) bootstrap sample -----
-    sampled_idx = rng.integers(0, m_real, n_samples)
-    base_counts = real_counts.iloc[sampled_idx].reset_index(drop=True)
-    metadata = real_metadata.iloc[sampled_idx].reset_index(drop=True)
+    df_wide = count_df.pivot_table(
+        index=metadata_cols + ['total_count'], columns='cell_type', values='count', fill_value=0
+    ).reset_index()
     
-    # ----- 2) random disease assignment -----
-    metadata["disease"] = rng.choice(disease_levels, n_samples)
+    cell_types_original = df_wide.columns[len(metadata_cols) + 1:].tolist()
+    n_celltypes = len(cell_types_original)
+    ct_map = {original_name: f"CT{i + 1}" for i, original_name in enumerate(cell_types_original)}
     
-    # ----- 3) construct disease effect vector -----
-    effect_vector = np.ones(n_celltypes)
-    effect_vector[:effect_n_celltypes] = disease_effect_strength
+    baseline_level = (disease_levels[0], tissue_levels[0])
+    df_baseline = df_wide[(df_wide['disease'] == baseline_level[0]) & (df_wide['tissue'] == baseline_level[1])].copy()
     
-    # ----- 4) allocate new count matrix -----
-    new_counts = np.zeros((n_samples, n_celltypes), dtype=int)
+    if df_baseline.empty:
+        raise ValueError(
+            f"基线样本池为空。请确保数据中存在 {baseline_level[0]} (disease) 和 {baseline_level[1]} (tissue) 的样本组合。")
     
-    # ----- 5) apply effect and resample -----
-    for i in range(n_samples):
-        row = base_counts.iloc[i].to_numpy()
-        total = row.sum()
+    counts_baseline = df_baseline[cell_types_original].values + pseudocount
+    log_counts = np.log(counts_baseline)
+    log_g_mean = np.mean(log_counts, axis=1, keepdims=True)
+    clr_logits_baseline = log_counts - log_g_mean
+    
+    # ---------------------------
+    # Step 3: 设计效应向量和 True Effect Table (使用辅助函数)
+    # ---------------------------
+    ref_disease = disease_levels[0]
+    ref_tissue = tissue_levels[0]
+    
+    disease_main_effects_dict, tissue_effect, interaction_effects_dict, df_true_effect = build_CLR_effects_and_table(
+        cell_types=[f"CT{i + 1}" for i in range(n_celltypes)],
+        disease_levels=disease_levels,
+        tissue_levels=tissue_levels,
+        disease_effect_size=disease_effect_size,
+        interaction_effect_size=interaction_effect_size,
+        tissue_effect_size=tissue_effect_size,
+        inflamed_cell_frac=inflamed_cell_frac,
+        rng=rng
+    )
+    
+    # ---------------------------
+    # Step 4: 模拟元数据和 Logit 注入 (关键修改：动态查找效应向量)
+    # ---------------------------
+    
+    sim_records = []
+    donors = [f"D{i // n_sim_samples}" for i in range(n_sim_samples)]
+    
+    for i in range(n_sim_samples):
+        disease = rng.choice(disease_levels)
+        tissue = rng.choice(tissue_levels)
         
-        if total == 0:
-            new_counts[i] = 0
-            continue
+        idx_resample = rng.integers(0, len(clr_logits_baseline))
+        clr_logit_base = clr_logits_baseline[idx_resample].copy()
         
-        probs = row / total
+        clr_logit_sim = clr_logit_base
         
-        if metadata.loc[i, "disease"] == disease_levels[1]:
-            probs = probs * effect_vector
-            probs = probs / probs.sum()
+        # 注入疾病主效应
+        if disease != ref_disease:
+            # *** 修正点: 查找当前疾病对应的独立效应向量 ***
+            E_disease = disease_main_effects_dict[disease]
+            clr_logit_sim += E_disease
+            
+            # 注入组织主效应 (tissue_effect 是一个单一向量)
+        if tissue != ref_tissue:
+            clr_logit_sim += tissue_effect
         
-        new_counts[i] = rng.multinomial(total, probs)
+        # 注入交互作用效应
+        if disease != ref_disease and tissue != ref_tissue:
+            # *** 修正点: 查找当前疾病对应的独立交互作用向量 ***
+            E_interaction = interaction_effects_dict[disease]
+            clr_logit_sim += E_interaction
+            
+            # 施加潜在扰动
+        clr_logit_sim += rng.normal(0, latent_axis_sd, n_celltypes)
+        
+        sim_records.append({
+            "donor_id": donors[i],
+            "sample_id": f"{donors[i]}_S{i}",
+            "disease": disease,
+            "tissue": tissue,
+            "clr_logit_sim": clr_logit_sim
+        })
     
-    return new_counts, metadata
+    df_sim_meta = pd.DataFrame(sim_records)
+    
+    # ---------------------------
+    # Step 5 & 6: 反向转换和最终输出 (不变，但确保使用映射后的 cell_type)
+    # ---------------------------
+    
+    logits_matrix = np.vstack(df_sim_meta['clr_logit_sim'].values)
+    
+    # ... (安全检查和 softmax/归一化代码, 与原函数一致) ...
+    MAX_LOGIT = 700
+    logits_matrix = np.clip(logits_matrix, -MAX_LOGIT, MAX_LOGIT)
+    
+    proportions = softmax(logits_matrix, axis=1)
+    epsilon = 1e-12
+    proportions = np.clip(proportions, epsilon, 1 - epsilon)
+    row_sums = proportions.sum(axis=1, keepdims=True)
+    proportions = proportions / row_sums
+    
+    N_real = count_df['total_count'].unique()
+    total_counts = rng.choice(N_real, size=n_sim_samples, replace=True)
+    
+    counts = np.vstack([
+        rng.multinomial(n=total_counts[i], pvals=proportions[i])
+        for i in range(n_sim_samples)
+    ])
+    
+    df_sim = df_sim_meta[['donor_id', 'sample_id', 'disease', 'tissue']].copy()
+    
+    for ct_idx, ct_name in enumerate(cell_types_original):
+        # 注意: 这里使用原始 cell_type 名称作为列名
+        df_sim[ct_name] = counts[:, ct_idx]
+    
+    df_sim_long = df_sim.melt(
+        id_vars=['donor_id', 'sample_id', 'disease', 'tissue'],
+        var_name='cell_type',
+        value_name='count'
+    )
+    
+    df_sim_long['total_count'] = df_sim_long.groupby('sample_id')['count'].transform('sum')
+    df_sim_long['prop'] = df_sim_long['count'] / df_sim_long['total_count']
+    
+    # *** 关键点: 将 cell_type 列的值映射为 CT1, CT2... 编号 ***
+    df_sim_long['cell_type'] = df_sim_long['cell_type'].map(ct_map)
+    
+    return df_sim_long, df_true_effect
 
 
+def build_CLR_effects_and_table(
+        cell_types, disease_levels, tissue_levels,
+        disease_effect_size, tissue_effect_size, interaction_effect_size,
+        inflamed_cell_frac, rng
+):
+    """
+    CLR 模型的效应生成函数，现在支持每个疾病具有独立效应。
+    """
+    n_celltypes = len(cell_types)
+    ref_disease = disease_levels[0]  # HC
+    ref_tissue = tissue_levels[0]  # nif
+    other_tissue = tissue_levels[1]  # if
+    
+    # --- 1. 疾病效应 (Donor-level Logit Effects, 字典存储) ---
+    disease_main_effects_dict = {}
+    
+    for other_disease in disease_levels[1:]:
+        effect_vec = np.zeros(n_celltypes)
+        # 随机选择受影响的细胞类型 (为每个疾病独立选择)
+        disease_cts = rng.choice(
+            n_celltypes,
+            size=max(1, int(n_celltypes * 0.1)),
+            replace=False
+        )
+        # 为了创造不同的分布，添加一个随机乘数
+        random_multiplier = rng.uniform(0.8, 1.2)
+        
+        effect_vec[disease_cts] = disease_effect_size * random_multiplier
+        disease_main_effects_dict[other_disease] = effect_vec
+        
+        # --- 2. 组织效应 (Sample-level Logit Effect, 向量存储) ---
+    inflamed_cts = rng.choice(n_celltypes, size=max(1, int(n_celltypes * inflamed_cell_frac)), replace=False)
+    tissue_effect = np.zeros(n_celltypes)
+    tissue_effect[inflamed_cts] = tissue_effect_size
+    
+    # --- 3. 交互作用效应 (Sample-level Logit Effects, 字典存储) ---
+    interaction_effects_dict = {}
+    
+    for other_disease in disease_levels[1:]:
+        effect_vec = np.zeros(n_celltypes)
+        # 交互作用影响的细胞集和大小也可以独立
+        interaction_cts = rng.choice(
+            n_celltypes,
+            size=max(1, int(n_celltypes * inflamed_cell_frac)),
+            replace=False
+        )
+        random_multiplier = rng.uniform(0.5, 1.5)
+        
+        effect_vec[interaction_cts] = interaction_effect_size * random_multiplier
+        interaction_effects_dict[other_disease] = effect_vec
+    
+    # --------------------
+    # 构建 True Effect Table (保持先前修正的参照组逻辑)
+    # --------------------
+    true_effects = []
+    
+    # 1. Disease Main Effect (Disease vs HC)
+    for other_disease, E_vec in disease_main_effects_dict.items():
+        for i, ct_name in enumerate(cell_types):
+            E_disease = E_vec[i]
+            true_effects.append({
+                'cell_type': ct_name,
+                'contrast_factor': 'disease',
+                'contrast_group': other_disease,
+                'contrast_ref': ref_disease,
+                'True_Effect': E_disease,  # Logit Coef
+                'True_Direction': 'other_greater' if E_disease > 0 else ('ref_greater' if E_disease < 0 else 'None'),
+                'True_Significant': True if E_disease != 0 else False
+            })
+    
+    # 2. Tissue Main Effect (if vs nif)
+    for i, ct_name in enumerate(cell_types):
+        E_tissue = tissue_effect[i]
+        true_effects.append({
+            'cell_type': ct_name,
+            'contrast_factor': 'tissue',
+            'contrast_group': other_tissue,
+            'contrast_ref': ref_tissue,
+            'True_Effect': E_tissue,
+            'True_Direction': 'other_greater' if E_tissue > 0 else ('ref_greater' if E_tissue < 0 else 'None'),
+            'True_Significant': True if E_tissue != 0 else False
+        })
+    
+    # 3. Disease x Tissue Interaction
+    for other_disease, E_inter_vec in interaction_effects_dict.items():
+        for i, ct_name in enumerate(cell_types):
+            E_interaction = E_inter_vec[i]
+            
+            true_effects.append({
+                'cell_type': ct_name,
+                'contrast_factor': 'interaction',
+                'contrast_group': f'{other_disease} x {other_tissue}',
+                'contrast_ref': f'{ref_disease} x {ref_tissue}',
+                'True_Effect': E_interaction,
+                'True_Direction': 'other_greater' if E_interaction > 0 else (
+                    'ref_greater' if E_interaction < 0 else 'None'),
+                'True_Significant': True if E_interaction != 0 else False
+            })
+    
+    return disease_main_effects_dict, tissue_effect, interaction_effects_dict, pd.DataFrame(true_effects)
