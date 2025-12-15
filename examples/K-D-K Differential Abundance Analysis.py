@@ -21,7 +21,7 @@ make_a_meta(adata,meta_file=meta_file_path)
 
 # 准备数据，应当确保 batch 是存在的
 # 不填写 meta_file 的话也会默认按上述方法生成，但建议检查一下
-count_df = kdk_prepare(adata,meta_file=meta_file_path,
+count_df = kdk_prepare(adata.obs,meta_file=meta_file_path,
                        batch_key="orig.ident", type_key="Subset_Identity")
 
 # 运行计算

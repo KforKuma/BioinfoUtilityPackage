@@ -19,7 +19,7 @@ import logging
 from src.utils.hier_logger import logged
 logger = logging.getLogger(__name__)
 
-def _kdk_data_prepare(adata, meta, batch_key="orig.ident", type_key="Subset_Identity"):
+def _kdk_data_prepare(adata_obs, meta, batch_key="orig.ident", type_key="Subset_Identity"):
     '''
 
     :param adata:
@@ -29,7 +29,7 @@ def _kdk_data_prepare(adata, meta, batch_key="orig.ident", type_key="Subset_Iden
     :return: count_group_df，一个包含至少 unit_key, type_key, count 的 pd.DataFrame，其他列来自 meta 表格的合并
     '''
     count_dataframe = (
-        adata.obs[[batch_key, type_key]]
+        adata_obs[[batch_key, type_key]]
         .groupby([batch_key, type_key])
         .size()
         .reset_index(name='count')
@@ -44,7 +44,7 @@ def _kdk_data_prepare(adata, meta, batch_key="orig.ident", type_key="Subset_Iden
     
     return count_group_df
 
-def _kdk_make_meta(adata, group_key="orig.ident"):
+def _kdk_make_meta(adata_obs, group_key="orig.ident"):
     '''
     生成一个用来进行下游分析 meta 文件，包含必要控制的变量。
 
@@ -52,7 +52,7 @@ def _kdk_make_meta(adata, group_key="orig.ident"):
     :return:
     '''
     # 选出字符串列（object 或 string）
-    string_cols = [c for c in adata.obs.columns if type(adata.obs[c][0]) == str]
+    string_cols = [c for c in adata_obs.columns if type(adata_obs[c][0]) == str]
     
     # 确保 group_key 也在结果里
     if group_key not in string_cols:
@@ -66,7 +66,7 @@ def _kdk_make_meta(adata, group_key="orig.ident"):
             return None  # 多值或空值用 None
     
     # 聚合
-    df_grouped = adata.obs[string_cols].groupby(group_key).agg(unique_or_none).reset_index()
+    df_grouped = adata_obs[string_cols].groupby(group_key).agg(unique_or_none).reset_index()
     
     # 去除全 None 列
     cols_remain = [c for c in df_grouped.columns if not df_grouped[c].isna().all()]
@@ -118,7 +118,7 @@ def kdk_analyze(df, subset, group_key, batch_key, sample_key=None, save_addr=Non
         plot_residual_boxplot(df, subset, group_key, sample_key, save_addr)
     else:
         logger.info(f"{subset} Skip residual analysis: no significant sampling effect (p={p:.3g})")
-        return  # 不进入后续分析
+        return pd.DataFrame(),pd.DataFrame() # 不进入后续分析
     
     # Step 3: 检查疾病组之间残差是否有显著差异
     groups = [g["residual"].values for _, g in df.groupby(group_key)]
@@ -220,7 +220,7 @@ def make_a_meta(adata, meta_file, batch_key="orig.ident"):
     meta.to_csv(meta_file)
 
 @logged
-def kdk_prepare(adata, meta_file=None, batch_key="orig.ident", type_key="Subset_Identity"):
+def kdk_prepare(adata_obs, meta_file=None, batch_key="orig.ident", type_key="Subset_Identity"):
     '''
     :param adata:
     :param meta_file: 包含样本制作信息的表格，兼容 csv 和 xlsx，默认 header=True index=False
@@ -230,7 +230,7 @@ def kdk_prepare(adata, meta_file=None, batch_key="orig.ident", type_key="Subset_
     '''
     # 读取 meta 信息
     if meta_file is None:
-        meta = _kdk_make_meta(adata, batch_key)
+        meta = _kdk_make_meta(adata_obs, batch_key)
     else:
         meta_file = meta_file.strip()
         if meta_file.lower().endswith("csv"):
@@ -244,11 +244,11 @@ def kdk_prepare(adata, meta_file=None, batch_key="orig.ident", type_key="Subset_
     for key in [batch_key, type_key]:
         if key in meta.columns:
             meta[key] = meta[key].astype(str)
-        if key in adata.obs.columns:
-            adata.obs[key] = adata.obs[key].astype(str)
+        if key in adata_obs.columns:
+            adata_obs[key] = adata_obs[key].astype(str)
     
     # 准备 KW 分析所需矩阵
-    count_df = _kdk_data_prepare(adata, meta, batch_key=batch_key, type_key=type_key)
+    count_df = _kdk_data_prepare(adata_obs, meta, batch_key=batch_key, type_key=type_key)
     
     return count_df
 
@@ -271,6 +271,7 @@ def run_kdk(count_df, type_key, group_key, save_addr, batch_key, sample_key=None
                                      save_addr=save_addr,
                                      method=method,
                                      do_return=True)
+        dfs.append(df)
         if posthoc_df.empty is False:
             posthoc_df["subset"] = subset
     

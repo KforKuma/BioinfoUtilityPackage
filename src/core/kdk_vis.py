@@ -113,7 +113,7 @@ def plot_better_residual(df, tukey_df, group_key, subset, save_addr):
     
     # 绘制柱状图
     sns.barplot(
-        x="disease_group",
+        x=group_key,
         y="residual",
         data=grouped,
         order=group_order,
@@ -163,19 +163,19 @@ def plot_better_residual(df, tukey_df, group_key, subset, save_addr):
     _matplotlib_savefig(fig, abs_fig_path)
 
 @logged
-def plot_de_novo_ANOVA(df, subset, save_addr):
+def plot_de_novo_ANOVA(df, group_key, subset, save_addr):
     # 计算 mean 和 sem
-    summary = df.groupby("disease_group")["percent"].agg(['mean', 'sem']).reset_index()
+    summary = df.groupby(group_key)["percent"].agg(['mean', 'sem']).reset_index()
     sorted_summary = summary.sort_values("mean").reset_index(drop=True)
-    group_order = sorted_summary["disease_group"].tolist()
+    group_order = sorted_summary[group_key].tolist()
     
     # ANOVA 检验
-    groups = [df[df["disease_group"] == group]["percent"] for group in group_order]
+    groups = [df[df[group_key] == group]["percent"] for group in group_order]
     f_stat, p_value = f_oneway(*groups)
     anova_text = f"(ANOVA p = {p_value:.3e})"
     
     # Tukey 检验
-    tukey = pairwise_tukeyhsd(endog=df["percent"], groups=df["disease_group"], alpha=0.05)
+    tukey = pairwise_tukeyhsd(endog=df["percent"], groups=df[group_key], alpha=0.05)
     tukey_df = pd.DataFrame(data=tukey.summary().data[1:], columns=tukey.summary().data[0])
     
     # 创建图和坐标轴
@@ -225,7 +225,7 @@ def plot_de_novo_ANOVA(df, subset, save_addr):
     _matplotlib_savefig(fig, abs_fig_path)
 
 @logged
-def perform_pca_clustering_on_residuals(df, save_addr, auto_choose_k_func):
+def perform_pca_clustering_on_residuals(df, group_key, save_addr, auto_choose_k_func):
     """
     对 residual 进行标准化、PCA、聚类、绘图（fig, ax 风格）。
     参数:
@@ -240,7 +240,7 @@ def perform_pca_clustering_on_residuals(df, save_addr, auto_choose_k_func):
     """
     
     # pivot + 缺失填补
-    resid_pivot = df.groupby(["Subset_Identity", "disease_group"])["residual"].mean().unstack().fillna(0)
+    resid_pivot = df.groupby(["Subset_Identity", group_key])["residual"].mean().unstack().fillna(0)
     
     # 标准化（按 subset 行）
     scaler = StandardScaler()
