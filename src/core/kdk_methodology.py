@@ -1073,6 +1073,7 @@ def run_ANOVA_transformed(
 from scipy.stats import dirichlet_multinomial
 from scipy.stats import dirichlet, multinomial
 
+
 def simulate_DM_data(
         n_donors=8,
         n_samples_per_donor=4,
@@ -1213,50 +1214,65 @@ def build_DM_effects_with_main_effect(
         inflamed_cell_frac, rng
 ):
     """
-    DM 模型的效应生成函数，现在包含独立的 Disease Main Effect。
-    同时，根据 HC ≡ nif 的约束，修正了 True Effect Table 中的参照组 (contrast_ref)。
+    DM 模型的效应生成函数，现在包含独立的 Disease Main Effect 和双向效应（增加或减少）。
+    同时，使用全局基线 HC x nif 修正了 True Effect Table 中的交互作用参照组。
     """
     n_celltypes = len(cell_types)
-    ref_disease = disease_levels[0]  # 例如 HC
-    ref_tissue = tissue_levels[0]  # 例如 nif
-    other_tissue = tissue_levels[1]  # 例如 if
+    ref_disease = disease_levels[0]  #  HC
+    ref_tissue = tissue_levels[0]  #  nif
+    other_tissue = tissue_levels[1]  #  if
     
-    # ... (效应向量生成逻辑保持不变，确保随机性) ...
+    # ------------------------------------
+    # Step 1: 确定受影响的细胞集和方向
+    # ------------------------------------
     
-    # 随机选择受影响的细胞集
-    disease_main_cts = rng.choice(
-        n_celltypes,
-        size=max(1, int(n_celltypes * 0.1)),
-        replace=False
-    )
-    inflamed_cts = rng.choice(
-        n_celltypes,
-        size=max(1, int(n_celltypes * inflamed_cell_frac)),
-        replace=False
-    )
+    # 疾病主效应细胞集 (Disease Main Effect Cells)
+    n_disease_main_cts = max(1, int(n_celltypes * 0.1))
+    disease_main_cts_indices = rng.choice(n_celltypes, size=n_disease_main_cts, replace=False)
+    # NEW: 随机分配方向 (+1 或 -1)
+    disease_signs = rng.choice([-1, 1], size=n_disease_main_cts)
     
-    # --- 1. Disease Main Effects (字典存储) ---
+    # 组织/交互作用效应细胞集 (Tissue/Interaction Effect Cells)
+    n_inflamed_cts = max(1, int(n_celltypes * inflamed_cell_frac))
+    inflamed_cts_indices = rng.choice(n_celltypes, size=n_inflamed_cts, replace=False)
+    # NEW: 随机分配方向 (+1 或 -1)
+    inflamed_signs = rng.choice([-1, 1], size=n_inflamed_cts)
+    
+    # --- 2. Disease Main Effects (字典存储) ---
     disease_main_effects_dict = {}
     for other_disease in disease_levels[1:]:
         effect_vec = np.zeros(n_celltypes)
-        random_multiplier = rng.uniform(0.8, 1.2) if len(disease_levels) > 2 else 1.0
-        effect_vec[disease_main_cts] = disease_effect_size * random_multiplier
+        # 清理逻辑：移除对 len(disease_levels) > 2 的判断
+        random_multiplier = rng.uniform(0.8, 1.2)
+        
+        # NEW: 应用双向效应
+        effect_values = disease_effect_size * random_multiplier * disease_signs
+        effect_vec[disease_main_cts_indices] = effect_values
+        
         disease_main_effects_dict[other_disease] = effect_vec
     
-    # --- 2. Tissue Main Effect ---
+    # --- 3. Tissue Main Effect ---
     tissue_effect_vec = np.zeros(n_celltypes)
-    tissue_effect_vec[inflamed_cts] = tissue_effect_size
+    random_multiplier = rng.uniform(0.8, 1.2)  # 同样增加随机性
     
-    # --- 3. Disease x Tissue Interaction Effects (字典存储) ---
+    # NEW: 应用双向效应
+    tissue_effect_values = tissue_effect_size * random_multiplier * inflamed_signs
+    tissue_effect_vec[inflamed_cts_indices] = tissue_effect_values
+    
+    # --- 4. Disease x Tissue Interaction Effects (字典存储) ---
     interaction_effects_dict = {}
     for other_disease in disease_levels[1:]:
         effect_vec = np.zeros(n_celltypes)
-        random_multiplier = rng.uniform(0.5, 1.5) if len(disease_levels) > 2 else 1.0
-        effect_vec[inflamed_cts] = interaction_effect_size * random_multiplier
+        random_multiplier = rng.uniform(0.5, 1.5)
+        
+        # NEW: 应用双向效应 (使用与 Tissue Main 效应相同的受影响细胞集和方向，但大小独立)
+        interaction_effect_values = interaction_effect_size * random_multiplier * inflamed_signs
+        effect_vec[inflamed_cts_indices] = interaction_effect_values
+        
         interaction_effects_dict[other_disease] = effect_vec
     
     # --------------------
-    # 构建 True Effect Table (关键修正点在此)
+    # Step 5: 构建 True Effect Table (保持先前修正的参照组和方向判断逻辑)
     # --------------------
     true_effects = []
     
@@ -1268,22 +1284,23 @@ def build_DM_effects_with_main_effect(
                 'cell_type': ct_name,
                 'contrast_factor': 'disease',
                 'contrast_group': other_disease,
-                'contrast_ref': ref_disease,  # HC (隐含 HC ≡ nif)
+                'contrast_ref': ref_disease,
                 'True_Effect': E_disease,
+                # NEW: E_disease < 0 时为 ref_greater
                 'True_Direction': 'other_greater' if E_disease > 0 else ('ref_greater' if E_disease < 0 else 'None'),
                 'True_Significant': True if E_disease != 0 else False
             })
     
     # 2. Tissue Main Effect (if vs nif)
-    # 注意：这个主效应在 HC 组中不发生。它表示的是 "disease" 组中 if vs nif 的平均 LogFC。
     for i, ct_name in enumerate(cell_types):
         E_tissue = tissue_effect_vec[i]
         true_effects.append({
             'cell_type': ct_name,
             'contrast_factor': 'tissue',
             'contrast_group': other_tissue,
-            'contrast_ref': ref_tissue,  # nif
+            'contrast_ref': ref_tissue,
             'True_Effect': E_tissue,
+            # NEW: E_tissue < 0 时为 ref_greater
             'True_Direction': 'other_greater' if E_tissue > 0 else ('ref_greater' if E_tissue < 0 else 'None'),
             'True_Significant': True if E_tissue != 0 else False
         })
@@ -1293,25 +1310,19 @@ def build_DM_effects_with_main_effect(
         for i, ct_name in enumerate(cell_types):
             E_interaction = E_inter_vec[i]
             
-            # 修正 contrast_ref:
-            # 交互作用通常被定义为： (Disease_if - Disease_nif) - (HC_if - HC_nif)
-            # 由于 HC_if 不存在，这简化为 (Disease_if - Disease_nif) - (0 - 0)
-            # 施加的 E_inter 实际上是该交互作用项的系数。
-            # 为了评估功效，最简单、最准确的参照组是唯一的全局基线 HC x nif。
             true_effects.append({
                 'cell_type': ct_name,
                 'contrast_factor': 'interaction',
                 'contrast_group': f'{other_disease} x {other_tissue}',
-                # *** 修正点 ***: 使用最简洁的全局参照组标记
                 'contrast_ref': f'{ref_disease} x {ref_tissue}',
-                'True_Effect': E_interaction,  # LogFC
+                'True_Effect': E_interaction,
+                # NEW: E_interaction < 0 时为 ref_greater
                 'True_Direction': 'other_greater' if E_interaction > 0 else (
                     'ref_greater' if E_interaction < 0 else 'None'),
                 'True_Significant': True if E_interaction != 0 else False
             })
     
     return disease_main_effects_dict, tissue_effect_vec, interaction_effects_dict, pd.DataFrame(true_effects)
-
 
 # 生成模拟数据：Logistic-Normal Multinomial 模拟
 # 有利于 LMM/CLR
@@ -1337,7 +1348,7 @@ def simulate_LogisticNormal_hierarchical(
         random_state=1234
 ):
     """
-    Logit-Normal 层次化模拟器，现在支持每个疾病 (如 CD, UC) 具有独立的效应向量。
+    Logit-Normal 层次化模拟器，现在支持每个疾病 (如 CD, UC) 具有独立的双向效应向量。
     返回 (模拟数据, 真实效应查找表)。
     """
     rng = np.random.default_rng(random_state)
@@ -1350,11 +1361,9 @@ def simulate_LogisticNormal_hierarchical(
     # ------------------------------------------------------------------
     donors = [f"D{i + 1}" for i in range(n_donors)]
     records = []
-    # 确保疾病状态是均匀随机分配的，以确保每个疾病组都有样本
     disease_choices = disease_levels
     
     for donor in donors:
-        # 假设 donor-level disease 随机分配
         disease = rng.choice(disease_choices)
         for sample_id in range(n_samples_per_donor):
             tissue = rng.choice(tissue_levels)
@@ -1369,7 +1378,7 @@ def simulate_LogisticNormal_hierarchical(
     cell_types = [f"CT{i + 1}" for i in range(n_celltypes)]
     
     # ------------------------------------------------------------------
-    # 步骤 2-5: 定义独立的效应向量
+    # 步骤 2-5: 定义独立的效应向量 (关键修改：引入双向随机符号)
     # ------------------------------------------------------------------
     
     # 2) baseline mu
@@ -1378,29 +1387,36 @@ def simulate_LogisticNormal_hierarchical(
     # --- 3) donor-level disease effects (字典存储) ---
     disease_effects = {}
     
-    # 遍历所有非参照疾病组 (CD, UC, ...)
+    # 确定受疾病主效应影响的细胞集和随机符号
+    n_disease_main_cts = max(1, int(n_celltypes * 0.1))
+    disease_main_cts_indices = rng.choice(n_celltypes, size=n_disease_main_cts, replace=False)
+    # NEW: 疾病效应随机方向 (+1 或 -1)
+    disease_signs = rng.choice([-1, 1], size=n_disease_main_cts)
+    
     for other_disease in disease_levels[1:]:
         effect_vec = np.zeros(n_celltypes)
-        # 随机选择受影响的细胞类型 (为每个疾病独立选择，或基于原设计)
-        disease_cts = rng.choice(
-            n_celltypes,
-            size=max(1, int(n_celltypes * 0.1)),
-            replace=False
-        )
-        # 为了创造不同的分布，我们为不同疾病的效应大小添加一个随机乘数
-        random_multiplier = rng.uniform(0.8, 1.2)
         
-        effect_vec[disease_cts] = disease_effect_size * random_multiplier
+        # 乘上随机乘数 (0.8 ~ 1.2) 和随机符号
+        random_multiplier = rng.uniform(0.8, 1.2)
+        effect_values = disease_effect_size * random_multiplier * disease_signs
+        
+        effect_vec[disease_main_cts_indices] = effect_values
         disease_effects[other_disease] = effect_vec
     
     # --- 4) sample-level tissue effect (不变) ---
     tissue_effect = np.zeros(n_celltypes)
-    inflamed_cts = rng.choice(
-        n_celltypes,
-        size=max(1, int(n_celltypes * inflamed_cell_frac)),
-        replace=False
-    )
-    tissue_effect[inflamed_cts] = tissue_effect_size
+    
+    # 确定受组织效应/交互作用影响的细胞集和随机符号
+    n_inflamed_cts = max(1, int(n_celltypes * inflamed_cell_frac))
+    inflamed_cts_indices = rng.choice(n_celltypes, size=n_inflamed_cts, replace=False)
+    # NEW: 组织效应随机方向 (+1 或 -1)
+    tissue_signs = rng.choice([-1, 1], size=n_inflamed_cts)
+    
+    # 组织效应的赋值 (使用 tissue_signs)
+    random_multiplier = rng.uniform(0.8, 1.2)
+    tissue_effect_values = tissue_effect_size * random_multiplier * tissue_signs
+    
+    tissue_effect[inflamed_cts_indices] = tissue_effect_values
     
     # --- 5) disease × tissue interaction effects (字典存储) ---
     interaction_effects = {}
@@ -1408,20 +1424,62 @@ def simulate_LogisticNormal_hierarchical(
     # 交互作用也应该针对每个疾病和 tissue 组合独立定义
     for other_disease in disease_levels[1:]:
         effect_vec = np.zeros(n_celltypes)
-        interaction_cts = rng.choice(
-            n_celltypes,
-            size=max(1, int(n_celltypes * inflamed_cell_frac)),
-            replace=False
-        )
-        # 为了区分，交互作用大小也随机变化
-        random_multiplier = rng.uniform(0.5, 1.5)
         
-        effect_vec[interaction_cts] = interaction_effect_size * random_multiplier
+        # 乘上随机乘数 (0.5 ~ 1.5) 和随机符号 (使用 tissue_signs)
+        random_multiplier = rng.uniform(0.5, 1.5)
+        interaction_effect_values = interaction_effect_size * random_multiplier * tissue_signs
+        
+        effect_vec[inflamed_cts_indices] = interaction_effect_values
         interaction_effects[other_disease] = effect_vec
     
     # ------------------------------------------------------------------
-    # 步骤 5.5: 构建真实效应查找表 (关键修改：从字典中读取效应)
+    # 步骤 5.5: 构建真实效应查找表 (需要确保 build_true_effect_table 能够处理双向变化)
     # ------------------------------------------------------------------
+    
+    # 假设 build_true_effect_table 能够根据效应值的符号正确设置 True_Direction
+    
+    # NOTE: Since the user did not provide the implementation of build_true_effect_table
+    # within this function, we assume a correct version is defined elsewhere.
+    # For a self-contained answer, I will provide a minimal mock-up here
+    # to show the correct data structure and direction logic.
+    
+    def build_true_effect_table(cell_types, ref_disease, ref_tissue, disease_effects, tissue_effect,
+                                interaction_effects, other_tissue):
+        true_effects = []
+        # 1. Disease Main Effect
+        for other_disease, E_vec in disease_effects.items():
+            for i, ct_name in enumerate(cell_types):
+                E_disease = E_vec[i]
+                true_effects.append({
+                    'cell_type': ct_name, 'contrast_factor': 'disease', 'contrast_group': other_disease,
+                    'contrast_ref': ref_disease,
+                    'True_Effect': E_disease, 'True_Direction': 'other_greater' if E_disease > 0 else (
+                        'ref_greater' if E_disease < 0 else 'None'),
+                    'True_Significant': True if E_disease != 0 else False
+                })
+        # 2. Tissue Main Effect
+        for i, ct_name in enumerate(cell_types):
+            E_tissue = tissue_effect[i]
+            true_effects.append({
+                'cell_type': ct_name, 'contrast_factor': 'tissue', 'contrast_group': other_tissue,
+                'contrast_ref': ref_tissue,
+                'True_Effect': E_tissue,
+                'True_Direction': 'other_greater' if E_tissue > 0 else ('ref_greater' if E_tissue < 0 else 'None'),
+                'True_Significant': True if E_tissue != 0 else False
+            })
+        # 3. Disease x Tissue Interaction
+        for other_disease, E_inter_vec in interaction_effects.items():
+            for i, ct_name in enumerate(cell_types):
+                E_interaction = E_inter_vec[i]
+                true_effects.append({
+                    'cell_type': ct_name, 'contrast_factor': 'interaction',
+                    'contrast_group': f'{other_disease} x {other_tissue}',
+                    'contrast_ref': f'{ref_disease} x {ref_tissue}',
+                    'True_Effect': E_interaction, 'True_Direction': 'other_greater' if E_interaction > 0 else (
+                        'ref_greater' if E_interaction < 0 else 'None'),
+                    'True_Significant': True if E_interaction != 0 else False
+                })
+        return pd.DataFrame(true_effects)
     
     df_true_effect = build_true_effect_table(
         cell_types, ref_disease, ref_tissue,
@@ -1429,7 +1487,7 @@ def simulate_LogisticNormal_hierarchical(
     )
     
     # ------------------------------------------------------------------
-    # 步骤 6: 构建 logits (关键修改：根据 row["disease"] 查找对应的效应向量)
+    # 步骤 6: 构建 logits (保持不变)
     # ------------------------------------------------------------------
     
     logits = np.zeros((n_samples, n_celltypes))
@@ -1441,7 +1499,7 @@ def simulate_LogisticNormal_hierarchical(
         
         # 查找 donor-level disease effect
         if current_disease != ref_disease:
-            mu += disease_effects[current_disease]  # **使用对应疾病的效应向量**
+            mu += disease_effects[current_disease]
         
         # sample-level tissue effect
         if current_tissue != ref_tissue:
@@ -1449,12 +1507,14 @@ def simulate_LogisticNormal_hierarchical(
         
         # disease × tissue interaction
         if current_disease != ref_disease and current_tissue != ref_tissue:
-            mu += interaction_effects[current_disease]  # **使用对应疾病的交互作用向量**
+            mu += interaction_effects[current_disease]
         
         # latent sample-level variation
         mu += rng.normal(0, latent_sd, n_celltypes)
         
         # logistic-normal sample
+        # Note: The original code uses rng.multivariate_normal with cov=I*0.5,
+        # which is correct for Logit-Normal
         logits[i] = rng.multivariate_normal(mean=mu, cov=np.eye(n_celltypes) * 0.5)
     
     # ------------------------------------------------------------------
@@ -1715,53 +1775,66 @@ def build_CLR_effects_and_table(
         inflamed_cell_frac, rng
 ):
     """
-    CLR 模型的效应生成函数，现在支持每个疾病具有独立效应。
+    CLR 模型的效应生成函数，现在支持每个疾病具有独立效应和双向变化（增加或减少）。
     """
     n_celltypes = len(cell_types)
     ref_disease = disease_levels[0]  # HC
     ref_tissue = tissue_levels[0]  # nif
     other_tissue = tissue_levels[1]  # if
     
+    # ------------------------------------
+    # Step 1: 确定受疾病主效应影响的细胞集和方向
+    # ------------------------------------
+    n_disease_main_cts = max(1, int(n_celltypes * 0.1))
+    disease_main_cts_indices = rng.choice(n_celltypes, size=n_disease_main_cts, replace=False)
+    # NEW: 疾病效应随机方向 (+1 或 -1)
+    disease_signs = rng.choice([-1, 1], size=n_disease_main_cts)
+    
     # --- 1. 疾病效应 (Donor-level Logit Effects, 字典存储) ---
     disease_main_effects_dict = {}
     
     for other_disease in disease_levels[1:]:
         effect_vec = np.zeros(n_celltypes)
-        # 随机选择受影响的细胞类型 (为每个疾病独立选择)
-        disease_cts = rng.choice(
-            n_celltypes,
-            size=max(1, int(n_celltypes * 0.1)),
-            replace=False
-        )
-        # 为了创造不同的分布，添加一个随机乘数
+        
+        # 乘上随机乘数 (0.8 ~ 1.2) 和随机符号
         random_multiplier = rng.uniform(0.8, 1.2)
+        effect_values = disease_effect_size * random_multiplier * disease_signs
         
-        effect_vec[disease_cts] = disease_effect_size * random_multiplier
+        effect_vec[disease_main_cts_indices] = effect_values
         disease_main_effects_dict[other_disease] = effect_vec
-        
-        # --- 2. 组织效应 (Sample-level Logit Effect, 向量存储) ---
-    inflamed_cts = rng.choice(n_celltypes, size=max(1, int(n_celltypes * inflamed_cell_frac)), replace=False)
+    
+    # ------------------------------------
+    # Step 2: 确定受组织/交互作用影响的细胞集和方向
+    # ------------------------------------
+    n_inflamed_cts = max(1, int(n_celltypes * inflamed_cell_frac))
+    inflamed_cts_indices = rng.choice(n_celltypes, size=n_inflamed_cts, replace=False)
+    # NEW: 组织/交互作用效应随机方向 (+1 或 -1)
+    inflamed_signs = rng.choice([-1, 1], size=n_inflamed_cts)
+    
+    # --- 2. 组织效应 (Sample-level Logit Effect, 向量存储) ---
     tissue_effect = np.zeros(n_celltypes)
-    tissue_effect[inflamed_cts] = tissue_effect_size
+    
+    # 组织效应的赋值 (使用 inflamed_signs)
+    random_multiplier = rng.uniform(0.8, 1.2)
+    tissue_effect_values = tissue_effect_size * random_multiplier * inflamed_signs
+    
+    tissue_effect[inflamed_cts_indices] = tissue_effect_values
     
     # --- 3. 交互作用效应 (Sample-level Logit Effects, 字典存储) ---
     interaction_effects_dict = {}
     
     for other_disease in disease_levels[1:]:
         effect_vec = np.zeros(n_celltypes)
-        # 交互作用影响的细胞集和大小也可以独立
-        interaction_cts = rng.choice(
-            n_celltypes,
-            size=max(1, int(n_celltypes * inflamed_cell_frac)),
-            replace=False
-        )
-        random_multiplier = rng.uniform(0.5, 1.5)
         
-        effect_vec[interaction_cts] = interaction_effect_size * random_multiplier
+        # 乘上随机乘数 (0.5 ~ 1.5) 和随机符号 (使用 inflamed_signs)
+        random_multiplier = rng.uniform(0.5, 1.5)
+        interaction_effect_values = interaction_effect_size * random_multiplier * inflamed_signs
+        
+        effect_vec[inflamed_cts_indices] = interaction_effect_values
         interaction_effects_dict[other_disease] = effect_vec
     
     # --------------------
-    # 构建 True Effect Table (保持先前修正的参照组逻辑)
+    # 构建 True Effect Table (保持先前修正的参照组和方向判断逻辑)
     # --------------------
     true_effects = []
     
@@ -1775,6 +1848,7 @@ def build_CLR_effects_and_table(
                 'contrast_group': other_disease,
                 'contrast_ref': ref_disease,
                 'True_Effect': E_disease,  # Logit Coef
+                # NEW: E_disease < 0 时为 ref_greater
                 'True_Direction': 'other_greater' if E_disease > 0 else ('ref_greater' if E_disease < 0 else 'None'),
                 'True_Significant': True if E_disease != 0 else False
             })
@@ -1788,6 +1862,7 @@ def build_CLR_effects_and_table(
             'contrast_group': other_tissue,
             'contrast_ref': ref_tissue,
             'True_Effect': E_tissue,
+            # NEW: E_tissue < 0 时为 ref_greater
             'True_Direction': 'other_greater' if E_tissue > 0 else ('ref_greater' if E_tissue < 0 else 'None'),
             'True_Significant': True if E_tissue != 0 else False
         })
@@ -1803,9 +1878,182 @@ def build_CLR_effects_and_table(
                 'contrast_group': f'{other_disease} x {other_tissue}',
                 'contrast_ref': f'{ref_disease} x {ref_tissue}',
                 'True_Effect': E_interaction,
+                # NEW: E_interaction < 0 时为 ref_greater
                 'True_Direction': 'other_greater' if E_interaction > 0 else (
                     'ref_greater' if E_interaction < 0 else 'None'),
                 'True_Significant': True if E_interaction != 0 else False
             })
     
     return disease_main_effects_dict, tissue_effect, interaction_effects_dict, pd.DataFrame(true_effects)
+
+# -----------------------
+# 数据的批量处理
+# -----------------------
+
+
+def extract_contrast_results(contrast_table: pd.DataFrame, target_other: str, alpha: float = 0.05) -> dict:
+    """
+    从统计模型的 contrast_table 中提取特定对比的结果 (Coef, PValue, direction, significant)。
+    已修正索引查找逻辑，并增加了 P 值列名的 fallback 机制 (P>|z| -> p_adj -> pval)。
+    """
+    
+    # 1. 重置索引以便按列名访问 'other'
+    df_reset = contrast_table.reset_index()
+    
+    # 2. 使用布尔索引查找目标行
+    result_rows = df_reset[df_reset['other'] == target_other]
+    
+    if result_rows.empty:
+        # 如果找不到匹配的对比，返回默认值
+        return {
+            'Est_Coef': np.nan,
+            'Est_PValue': np.nan,
+            'Est_Direction': 'None',
+            'Est_Significant': False
+        }
+    
+    # 3. 提取结果 (只取第一行匹配项)
+    result_row = result_rows.iloc[0]
+    
+    # 4. 确定 P 值列名 (Fallback 逻辑)
+    pval_colname = None
+    # 定义优先级：P>|z| > p_adj > pval
+    pval_candidates = ['P>|z|', 'p_adj', 'pval']
+    
+    # 检查哪些候选列存在于当前的 DataFrame 中
+    existing_cols = result_rows.columns  # 在 DataFrame (result_rows) 上检查 .columns 是正确的
+    
+    for col in pval_candidates:
+        if col in existing_cols:
+            pval_colname = col
+            break
+    
+    # 5. 提取 P 值和显著性
+    est_pval = result_row[pval_colname] if pval_colname else np.nan
+    
+    # 由于您的统计输出中已经有了 'significant' 列，我们优先使用它。
+    # 如果没有 'significant' 列，则基于 P 值和 alpha 重新计算。
+    if 'significant' in existing_cols:
+        est_significant = result_row['significant']
+    elif not np.isnan(est_pval):
+        est_significant = (est_pval <= alpha)
+    else:
+        est_significant = False
+    
+    # Coef 列和 direction 列通常存在
+    est_coef = result_row['Coef'] if 'Coef' in existing_cols else np.nan
+    est_direction = result_row['direction'] if 'direction' in existing_cols else 'None'
+    
+    return {
+        'Est_Coef': est_coef,
+        'Est_PValue': est_pval,
+        'Est_Direction': est_direction,
+        'Est_Significant': est_significant
+    }
+
+
+def collect_simulation_results(
+        df_sim: pd.DataFrame,
+        df_true_effect: pd.DataFrame,
+        run_stats_func,  # 传入的统计运行函数，例如 run_Dirichlet_Wald
+        formula: str,
+        **kwargs
+) -> pd.DataFrame:
+    """
+    收集单个模拟数据集的统计结果，并与真实效应表合并。
+
+    Args:
+        df_sim: 模拟的计数数据 (长格式)。
+        df_true_effect: 模拟的真实效应查找表。
+        run_stats_func: 实际运行统计分析的函数 (如 run_Dirichlet_Wald)。
+        formula: 传递给统计函数的模型公式 (e.g., "disease + C(tissue, ...)")。
+
+    Returns:
+        DataFrame, 包含所有细胞类型、所有对比的真实效应和统计估计值。
+    """
+    
+    # 获取唯一的细胞类型列表
+    cell_types = df_sim['cell_type'].unique().tolist()
+    
+    # 真实效应表预处理: 确保 True_Significant 基于 alpha
+    df_true_effect['True_Significant'] = (df_true_effect['True_Effect'] != 0)
+    
+    # 存储所有对比结果
+    all_results = []
+    
+    for ct_name in cell_types:
+        try:
+            # 1. 运行统计模型
+            # 假设 run_stats_func(df_all, cell_type, formula) 返回结构化的结果
+            stats_res = run_stats_func(df_all=df_sim, cell_type=ct_name, formula=formula, **kwargs)
+            contrast_table = stats_res["extra"]["contrast_table"]
+        
+        except Exception as e:
+            # 如果统计分析失败，记录错误并跳过该细胞类型
+            print(f"Warning: Stats failed for {ct_name}. Error: {e}")
+            continue
+        
+        # 2. 提取该细胞类型的真实效应行
+        df_true_ct = df_true_effect[df_true_effect['cell_type'] == ct_name].copy()
+        
+        # 3. 匹配真实效应和统计估计值
+        for _, true_row in df_true_ct.iterrows():
+            contrast_factor = true_row['contrast_factor']
+            
+            # 根据 Fallback 规则确定要查找的 'other' 组名称
+            if contrast_factor == 'tissue':
+                # Rule: contrast_factor=tissue 对应 other='if'
+                target_other = true_row['contrast_group']  # 'if'
+            elif contrast_factor in ('disease', 'interaction'):
+                # Rule: disease/interaction 对应 other=疾病名称
+                # 从 'UC x if' 或 'CD x if' 中提取疾病名称 'UC' 或 'CD'
+                target_other_full = true_row['contrast_group']
+                target_other = target_other_full.split(' ')[0]  # 'CD' 或 'UC'
+            
+            # 提取统计结果
+            est_results = extract_contrast_results(contrast_table, target_other)
+            
+            # 组合结果
+            result_record = {
+                'cell_type': ct_name,
+                'contrast_factor': contrast_factor,
+                'contrast_group': true_row['contrast_group'],
+                'contrast_ref': true_row['contrast_ref'],
+                'True_Effect': true_row['True_Effect'],
+                'True_Direction': true_row['True_Direction'],
+                'True_Significant': true_row['True_Significant'],
+                **est_results
+            }
+            all_results.append(result_record)
+    
+    return pd.DataFrame(all_results)
+
+
+def calculate_performance_metrics(df_all_sims: pd.DataFrame, alpha: float = 0.05) -> pd.DataFrame:
+    """
+    计算基于多次模拟结果的性能指标 (Power, FDR)。
+    """
+    # 确保显著性判断是基于 alpha 的 (以防 Est_Significant 列未完全使用 alpha=0.05)
+    df_all_sims['Est_Significant_Alpha'] = (df_all_sims['Est_PValue'] <= alpha)
+    
+    # 分类为 TP, FP, TN, FN
+    # TP = (df_all_sims['True_Significant']) & (df_all_sims['Est_Significant_Alpha']).sum()
+    # FP = (~df_all_sims['True_Significant']) & (df_all_sims['Est_Significant_Alpha']).sum()
+    # TN = (~df_all_sims['True_Significant']) & (~df_all_sims['Est_Significant_Alpha']).sum()
+    # FN = (df_all_sims['True_Significant']) & (~df_all_sims['Est_Significant_Alpha']).sum()
+    
+    # 按对比因素计算指标
+    metrics = df_all_sims.groupby('contrast_factor').apply(lambda g: pd.Series({
+        'TP': ((g['True_Significant']) & (g['Est_Significant_Alpha'])).sum(),
+        'FP': ((~g['True_Significant']) & (g['Est_Significant_Alpha'])).sum(),
+        'FN': ((g['True_Significant']) & (~g['Est_Significant_Alpha'])).sum(),
+    })).reset_index()
+    
+    metrics['Power'] = metrics['TP'] / (metrics['TP'] + metrics['FN'])
+    metrics['FDR'] = metrics['FP'] / (metrics['TP'] + metrics['FP'])
+    
+    # 处理除以零的情况
+    metrics['Power'] = metrics['Power'].fillna(0)
+    metrics['FDR'] = metrics['FDR'].fillna(0)
+    
+    return metrics

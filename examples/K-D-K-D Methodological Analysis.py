@@ -166,7 +166,9 @@ df_sim,df_true_effect = simulate_DM_data(
     n_donors=8,
     n_samples_per_donor=4,
     disease_levels=["HC", "CD","UC"],
-    sampling_bias_strength=2
+    tissue_levels=("nif", "if"),
+    sampling_bias_strength=2,
+    random_state=710
 )
 
 df_sim.head()
@@ -180,17 +182,17 @@ Dir_res["extra"]["contrast_table"]
 
 
 
-
-
 df_sim,df_true_effect = simulate_LogisticNormal_hierarchical(
-    N_samples=12,
-    N_cell_types=50,
-    # disease_levels=("HC", "CD","UC","BD")
+    n_donors=8,
+    n_samples_per_donor=4,
+    disease_levels=["HC", "CD","UC"],
+    tissue_levels=("nif", "if"),
+    random_state=710
 )
 df_sim.head()
 df_true_effect[df_true_effect.True_Significant==True]
 # 测试
-Dir_res = run_Dirichlet_Wald(df_sim, "CT1",
+Dir_res = run_Dirichlet_Wald(df_all = df_sim, cell_type = "CT1",
                              formula="disease + C(tissue, Treatment(reference=\"nif\"))")
 # Dir_res["extra"]["fixed_effect"]
 Dir_res["extra"]["contrast_table"]
@@ -202,8 +204,96 @@ df_sim.head()
 df_true_effect[df_true_effect.True_Significant==True]
 
 # 测试
-Dir_res = run_Dirichlet_Wald(df_sim, "CT1",
+Dir_res = run_Dirichlet_Wald(df_sim, "CT33",
                              formula="disease + C(tissue, Treatment(reference=\"nif\"))")
 # Dir_res["extra"]["fixed_effect"]
 Dir_res["extra"]["contrast_table"]
 
+
+
+
+################################################
+
+# 测试一下不同方法、不同数据集的效应
+# 方法1：DM 模拟数据
+df_sim,df_true_effect = simulate_DM_data(
+    n_donors=8,
+    n_samples_per_donor=4,
+    cell_types=50,
+    disease_levels=["HC", "BD", "CD", "Colitis", "UC"],
+    tissue_levels=("nif", "if"),
+    sampling_bias_strength=0.3,
+    donor_noise_sd=0.3,
+    random_state=710
+)
+
+results_df = collect_simulation_results(
+    df_sim=df_sim,
+    df_true_effect=df_true_effect,
+    run_stats_func=run_Dirichlet_Wald,
+    formula="disease + C(tissue, Treatment(reference=\"nif\"))"
+)
+
+perform_df = calculate_performance_metrics(results_df,0.05)
+#   contrast_factor  TP  FP  FN     Power       FDR
+# 0         disease   3  16  17  0.150000  0.842105
+# 1     interaction   9  10  19  0.321429  0.526316
+# 2          tissue   5   3   2  0.714286  0.375000
+
+results_df = collect_simulation_results(
+    df_sim=df_sim,
+    df_true_effect=df_true_effect,
+    run_stats_func=run_DKD,
+    formula="disease + C(tissue, Treatment(reference=\"nif\"))",
+    main_variable = "disease"
+)
+
+perform_df = calculate_performance_metrics(results_df,0.05)
+#   contrast_factor  TP  FP  FN     Power   FDR
+# 0         disease   0   4  20  0.000000  1.00
+# 1     interaction   1   3  27  0.035714  0.75
+# 2          tissue   0   0   7  0.000000  0.00
+
+results_df = collect_simulation_results(
+    df_sim=df_sim,
+    df_true_effect=df_true_effect,
+    run_stats_func=run_CLR_LMM,
+    formula="disease + C(tissue, Treatment(reference=\"nif\"))",
+    main_variable = "disease"
+)
+
+perform_df = calculate_performance_metrics(results_df,0.05)
+#   contrast_factor  TP  FP  FN     Power       FDR
+# 0         disease   3  15  17  0.150000  0.833333
+# 1     interaction   6  12  22  0.214286  0.666667
+# 2          tissue   5   4   2  0.714286  0.444444
+
+results_df = collect_simulation_results(
+    df_sim=df_sim,
+    df_true_effect=df_true_effect,
+    run_stats_func=run_LMM,
+    formula="disease + C(tissue, Treatment(reference=\"nif\"))",
+    main_variable = "disease"
+)
+
+perform_df = calculate_performance_metrics(results_df,0.05)
+#   contrast_factor  TP  FP  FN  Power  FDR
+# 0         disease   0   0  20    0.0  0.0
+# 1     interaction   0   0  28    0.0  0.0
+# 2          tissue   0   0   7    0.0  0.0
+
+
+results_df = collect_simulation_results(
+    df_sim=df_sim,
+    df_true_effect=df_true_effect,
+    run_stats_func=run_Perm_Mixed,
+    formula="disease + C(tissue, Treatment(reference=\"nif\"))",
+    main_variable = "disease",
+    pairwise_level="donor_id"
+)
+
+perform_df = calculate_performance_metrics(results_df,0.05)
+#   contrast_factor  TP  FP  FN  Power  FDR
+# 0         disease   0   0  20    0.0  0.0
+# 1     interaction   0   0  28    0.0  0.0
+# 2          tissue   0   0   7    0.0  0.0
