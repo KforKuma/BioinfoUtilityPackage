@@ -17,39 +17,29 @@ logger = logging.getLogger(__name__)
 
 ######################################
 @logged
-def _make_palette(cell_identity_list, seed=42):
+def _make_palette(
+        cell_identity_list,
+        *,
+        seed=42,
+):
     """
-    自动根据细胞类型数量选择合适的调色板：
-      - <10：使用 Seaborn "Set2"（柔和可区分）
-      - 10–30：使用 HLS 色环，色差大且均匀
-      - >30：使用 Glasbey（最大化颜色区分度）
-
-    Parameters
-    ----------
-    cell_identity_list : pandas.Series or list-like
-        包含细胞类型名
-    seed : int
-        随机数种子，确保颜色可复现
-
-    Returns
-    -------
-    palette_dict : dict
-        {cell_type: RGB_color_tuple}
+    Automatically choose a color palette based on the number of identities.
     """
-    unique_idents = pd.Series(cell_identity_list).unique()
+    unique_idents = pd.Series(cell_identity_list).astype(str).unique()
     n = len(unique_idents)
-    np.random.seed(seed)
-
+    
+    if seed is not None:
+        if not isinstance(seed, (int, np.integer)):
+            raise TypeError(f"seed must be int or None, got {type(seed)}")
+        np.random.seed(seed)
+    
     if n <= 10:
-        # 柔和可区分
         palette_idents = sns.color_palette("Set2", n)
         mode = "Set2"
     elif n <= 30:
-        # 色相均匀分布
         palette_idents = sns.color_palette("hls", n)
         mode = "hls"
     else:
-        # 尝试使用 glasbey，若版本不支持则退化到随机HSV
         try:
             palette_idents = sns.color_palette("glasbey", n)
             mode = "glasbey"
@@ -57,12 +47,15 @@ def _make_palette(cell_identity_list, seed=42):
             hues = np.linspace(0, 1, n, endpoint=False)
             np.random.shuffle(hues)
             palette_idents = [
-                mcolors.hsv_to_rgb((h, 0.6 + np.random.rand() * 0.3,
-                                       0.8 + np.random.rand() * 0.2))
+                mcolors.hsv_to_rgb((
+                    h,
+                    0.6 + np.random.rand() * 0.3,
+                    0.8 + np.random.rand() * 0.2,
+                ))
                 for h in hues
             ]
             mode = "HSV-random"
-
+    
     logger.info(f"{n} unique identities → using '{mode}' palette.")
     return dict(zip(unique_idents, palette_idents))
 
@@ -71,65 +64,37 @@ def pyscenic_pheatmap(tf_data: pd.DataFrame,
                       metadata: pd.DataFrame,
                       plt_savedir: str,
                       plt_name: str,
-                      obs_key: str | list = "Cell_Identity",
-                      **kwargs: object) -> None:
+                      obs_key="Cell_Identity",
+                      **kwargs):
     """
     绘制pySCENIC转录因子活性热图，并根据metadata信息上色。
-    支持单个或多个obs_key上色。
-
-    Examples
-    --------
-    # 对标准化的全部转录因子 AUC
-    pyscenic_pheatmap(tf_all_scaled,
-                      meta,
-                      plt_savedir=f"{output_dir}/{file}",
-                      plt_name=f"{file}_by_disease_tf_all_heatmap",
-                      obs_key=["disease","Cell_Identity"])
-
-
-    Parameters
-    ----------
-    tf_data : pd.DataFrame
-        行为TF或基因，列为细胞（列名必须与metadata中Barcodes匹配）
-    metadata : pd.DataFrame
-        包含细胞注释信息，需有 'Barcodes' 列
-    plt_savedir : str
-        输出目录
-    plt_name : str
-        输出文件名前缀
-    obs_key : str or list
-        metadata中用于着色的列名，可以是单个或多个
-    **kwargs :
-        传递给 sns.clustermap 的其他参数
+    支持单个或多个obs_key上色，保证legend颜色正确。
     """
-
+    import os
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    from matplotlib.colors import LinearSegmentedColormap
+    
     # --- 安全检查 ---
     if "Barcodes" not in metadata.columns:
         raise ValueError("metadata 必须包含 'Barcodes' 列。")
     if not isinstance(tf_data, pd.DataFrame):
         raise TypeError("tf_data 必须是 pandas.DataFrame。")
-
+    
     os.makedirs(plt_savedir, exist_ok=True)
-
+    
     # --- 处理obs_key ---
-    if isinstance(obs_key, list) and len(obs_key) > 1:
-        set_flag = True
-        col_colors_dict = {}
-        palette_list = ["Set1", "Set2", "Set3", "Spectral", "Pastel1", "Paired"]
-        for i, key in enumerate(obs_key):
-            color_idents = metadata.set_index("Barcodes").loc[tf_data.columns, key]
-            palette_name = palette_list[i % len(palette_list)]
-            lut = _make_palette(color_idents, palette_name)
-            col_colors_dict[key] = color_idents.map(lut)
-        col_colors = pd.DataFrame(col_colors_dict)
-    else:
-        set_flag = False
-        if isinstance(obs_key, list):
-            obs_key = obs_key[0]
-        color_idents = metadata.set_index("Barcodes").loc[tf_data.columns, obs_key]
-        lut = _make_palette(color_idents)
-        col_colors = color_idents.map(lut).to_frame(name=obs_key)
-
+    if isinstance(obs_key, str):
+        obs_key = [obs_key]
+    
+    col_colors_dict = {}
+    for key in obs_key:
+        color_idents = metadata.set_index("Barcodes").loc[tf_data.columns, key]
+        lut = _make_palette(color_idents)  # 调用之前定义的 palette 函数
+        col_colors_dict[key] = color_idents.map(lut)
+    
+    col_colors = pd.DataFrame(col_colors_dict)
+    
     # --- 默认参数 ---
     bl_yel_red = LinearSegmentedColormap.from_list(
         "bl_yel_red", ["navy", "lightyellow", "maroon"]
@@ -144,49 +109,43 @@ def pyscenic_pheatmap(tf_data: pd.DataFrame,
         "yticklabels": True
     }
     default_pars.update(kwargs)
-
+    
     # --- 按 obs_key 排序列顺序（如果不聚类列） ---
     if not default_pars["col_cluster"]:
-        if set_flag:
-            # ⚠️ 原来这里的 obs_key 不能直接用于 sort_values(by=obs_key)
-            # 因为 obs_key 是列表
-            sorted_idx = col_colors.sort_values(by=obs_key).index
-            tf_data = tf_data[sorted_idx]
-            col_colors = col_colors.loc[sorted_idx]
-        else:
-            sorted_idx = col_colors.sort_values(by=obs_key).index
-            tf_data = tf_data[sorted_idx]
-            col_colors = col_colors.loc[sorted_idx]
-
+        col_colors["sort"] = col_colors.apply(lambda row: tuple(row), axis=1)
+        sorted_idx = col_colors.sort_values("sort").index
+        tf_data = tf_data[sorted_idx]
+        col_colors = col_colors.loc[sorted_idx]
+        col_colors.drop(columns="sort", inplace=True)
+    
     # --- 绘图 ---
     g = sns.clustermap(
         tf_data,
-        col_colors=col_colors if set_flag else col_colors[obs_key],
+        col_colors=col_colors if len(obs_key) > 1 else col_colors[obs_key[0]],
         **default_pars
     )
-
+    
     # --- 添加图例 ---
-    if set_flag:
-        for i, key in enumerate(obs_key):
-            color_idents = metadata.set_index("Barcodes").loc[tf_data.columns, key]
-            palette_name = palette_list[i % len(palette_list)]
-            lut = _make_palette(color_idents, palette_name)
-            for label in color_idents.unique():
-                g.ax_col_dendrogram.bar(0, 0, color=lut[label], label=label, linewidth=0)
-    else:
-        for label in color_idents.unique():
-            g.ax_col_dendrogram.bar(0, 0, color=lut[label], label=label, linewidth=0)
-
+    for key in obs_key:
+        lut = {label: col_colors[key][col_colors[key].index == idx].iloc[0]
+               for idx, label in zip(col_colors.index, metadata.set_index("Barcodes").loc[tf_data.columns, key])}
+        # 去重
+        used = set()
+        for label, color in lut.items():
+            if label not in used:
+                g.ax_col_dendrogram.bar(0, 0, color=color, label=label, linewidth=0)
+                used.add(label)
+    
     g.ax_col_dendrogram.legend(
-        title=", ".join(obs_key) if set_flag else obs_key,
+        title=", ".join(obs_key),
         loc="center", ncol=3
     )
-
+    
     # --- 保存 ---
     outpath = os.path.join(plt_savedir, f"{plt_name}.png")
     plt.savefig(outpath, dpi=300, bbox_inches="tight")
     plt.close()
-    logger.info(f"Saved figure: {outpath}")
+    print(f"Saved figure: {outpath}")
 
 @logged
 def plot_regulon_variability(
@@ -194,8 +153,8 @@ def plot_regulon_variability(
     cv2: pd.Series,
     fit_model: pd.Series,
     fit_thr: float = 1.5,
-    hv_regulons: list | None = None,
-    plt_savedir: str | None = None,
+    hv_regulons = None,
+    plt_savedir = None,
     plt_name: str = "CV2_summary"
 ):
     """

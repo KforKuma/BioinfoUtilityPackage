@@ -1,22 +1,30 @@
-import warnings
-from typing import Dict, Any
 import re
+import warnings
+from typing import Dict, List, Tuple
+
+from tqdm import tqdm
 
 import numpy as np
 import pandas as pd
 
-import statsmodels.api as sm
-import statsmodels.formula.api as smf
-from patsy import dmatrix
 from scipy import stats
 from scipy.optimize import minimize
-from scipy.special import gammaln
-from scipy.special import gammaln, psi  # psi = digamma
-from scipy.stats import norm
-import scipy.stats as sps
+from scipy.special import gammaln, psi, softmax   # psi = digamma
+from scipy.stats import (
+    norm,
+    median_abs_deviation,
+    dirichlet,
+    multinomial,
+)
 
+
+import statsmodels.api as sm
+import statsmodels.formula.api as smf
 from statsmodels.stats.multitest import multipletests
 from statsmodels.stats.multicomp import pairwise_tukeyhsd
+from statsmodels.tools.sm_exceptions import ConvergenceWarning
+
+from patsy import dmatrix
 
 from src.core.kdk_support import *
 
@@ -286,7 +294,6 @@ def run_CLR_LMM(df_all: pd.DataFrame,
     else:
         formula = f"clr_value ~ C({main_variable}, Treatment(reference=\"{ref_label}\"))"
     
-    parse_formula_columns("clr_value ~ disease + tissue")
     
     # pivot：长表转宽表
     pivot = df_all.pivot_table(index=parse_formula_columns(formula) + [group_label],
@@ -340,7 +347,7 @@ def run_CLR_LMM(df_all: pd.DataFrame,
         if len(output) == 3:
             extra["mixedlm_random_effect"] = output[2]
         
-        print("CLR-LMM function run successfully.")
+        # print("CLR-LMM function run successfully.")
         
         return make_result("CLR_LMM", cell_type,
                             pval if pval is not None else np.nan,
@@ -352,6 +359,27 @@ def run_CLR_LMM(df_all: pd.DataFrame,
         return make_result("CLR_LMM", cell_type, np.nan, effect_size=None, extra=extra, alpha=alpha)
 
 
+def run_CLR_LMM_with_LFC(
+        df_all: pd.DataFrame,
+        cell_type: str,
+        formula: str = "disease + tissue",
+        main_variable: str = None,
+        coef_threshold: float = 0.2,
+        **kwargs
+) -> Dict[str, Any]:
+    """
+    运行 CLR LMM 检验并应用 LFC 过滤。
+    """
+    res = run_CLR_LMM(df_all, cell_type, formula=formula,main_variable=main_variable, **kwargs)
+    
+    if res['extra'] and res['extra'].get('contrast_table') is not None:
+        ct = res['extra']['contrast_table']
+        ct['significant'] = (ct['P>|z|'] < 0.05) & (ct['Coef.'].abs() > coef_threshold)
+        
+        res['significant'] = any(ct['significant'])
+        res['P>|z|'] = ct.loc[ct['significant'], 'P>|z|'].min() if res['significant'] else 1.0
+    
+    return res
 # -----------------------
 # Method 4: Dirichlet regression (placeholder)
 # -----------------------
@@ -380,70 +408,88 @@ def _dirichlet_loglik(params, Y, X):
 
 def _neg_loglik_and_grad(flat_params, Y, X, K, P):
     """
-    flat_params: (K-1)*P
-    Y: n x K proportions (no zeros ideally; small epsilon added)
-    X: n x P design matrix
-    returns: (neg_loglik, grad_flat)
+    纯 Dirichlet 模型的负对数似然和梯度 (激进版核心)。
+    假设数据完全符合 Dirichlet 分布，不考虑过度离散。
     """
     n = Y.shape[0]
-    # flat_params 是一维向量，长度是 (K−1)×P
-    # 通过 reshap 重构成一个矩阵，理解为 P 个 （K-1) 向量
-    # 即 每一类细胞（共 P 类）一个 β 向量
-    B = flat_params.reshape((K - 1, P))  # (K-1) x P
+    B = flat_params.reshape((K - 1, P))
     
-    # 线性预测模型： η=XB⊤
-    # 对每个元素，有 eta(i,k) = X(i) × β(k)
-    # 因此将 B 转置为 P × (K-1)，和 n × P 的 X 矩阵对齐
-    eta = X @ B.T  # n x (K-1)
-    # 加入额外的一列，即第 K 列，代表被前面 K-1 个自由度决定的 reference cell_type
-    # 显然其回归系数向量（一竖列）都是 0
-    eta_full = np.hstack([eta, np.zeros((n, 1))])  # n x K
-    # 取完整的矩阵，因为 α 参数必须为正，因此直接取对数
-    alpha = np.exp(eta_full)  # n x K
-    # 对每个样本的 Dirichlet 参数 α0(i) 为其一列上 α 参数的和
-    # 即：α0(i) = α(i,1) + ... + α(i,K)
-    alpha0 = alpha.sum(axis=1)  # n
+    eta = X @ B.T
+    eta_full = np.hstack([eta, np.zeros((n, 1))])
+    alpha = np.exp(eta_full)
+    alpha0 = alpha.sum(axis=1)
     
-    # 边缘处理，避免 log(0)
     Y_safe = np.clip(Y, 1e-12, None)
     
-    # 这是 Dirichlet 的核心部分
-    # 我们首先假设了数据符合 Dirichlet 分布，因此通过对数似然法来得到这一假设 Dirichlet 分布的参数 α
-    # 根据 Dirichlet 函数的概率密度得到对数似然（ℓ）公式如下：
     ll_terms = gammaln(alpha0) - np.sum(gammaln(alpha), axis=1) + np.sum((alpha - 1) * np.log(Y_safe), axis=1)
-    # 通过取负值，以方便地使用 minimize() 函数最大化似然 → 最大化似然的“点”就是我们最有可能获取到真实参数的点
     neg_ll = -ll_terms.sum()
     
-    # 计算梯度：
-    # 我们的最终目的是用似然函数（ℓ）对某个特定细胞的回归系数（β）求导
-    # 根据链式法则，有：∂ℓ/∂β = sum_i [ ∂ℓ/∂α_i · ∂α_i/∂β ]
-    # 对于等式右边的左边部分，缩放系数 F 或 ∂ℓ/∂α(i)，相当于求解 似然函数对每个参数的偏导，或每个参数的贡献度、在每个参数上的敏感度
-    # F(ik) = digamma( sum_j [ alpha_ij ] ) - digamma( alpha_ik ) + log( y_ik )
-    # digamma（双伽玛）函数是 gammaln（伽玛函数对数）的导数，用 psi 表示
-    digamma_alpha0 = psi(alpha0)  # n
-    digamma_alpha = psi(alpha)  # n x K
-    F = (digamma_alpha0[:, None] - digamma_alpha + np.log(Y_safe)) * alpha  # n x K
+    # Gradient
+    digamma_alpha0 = psi(alpha0)
+    digamma_alpha = psi(alpha)
+    F = (digamma_alpha0[:, None] - digamma_alpha + np.log(Y_safe)) * alpha
     
-    # 对于右边部分，∂α(i)/∂β = ∂[exp(Xi · β)]/∂β
-    
-    # 取任意 k，令 f(β_k) = exp(Xi · β_k), g(u) = exp(u), h(v) = Xi·v, f(β_k) = g(h(β_k))
-    # 而 g'(u) = (e^u)' = e^u, h'(v) = Xi
-    # 显然 f'(β_k) = ∂[exp(Xi · β_k)] / ∂β = exp(Xi · β_k) · Xi = alpha_ik * X_i
-    
-    # 对这个 Dirichlet 分布的整体，少不了将这个偏导数组合成一个向量（共 K 列），如下
-    # ∂α_i/∂β = [(X_i)^T alpha_i1, (X_i)^T alpha_i2, ..., (X_i)^T * alpha_iK]
-    # 等效为乘 alpha 的对角矩阵（其余元素都是 0），即 (X_i)^T * diag(alpha)
-    
-    # 梯度实际上也是 N 元函数在 N 个变量上的偏导的向量，在本例中是 K-1 维向量，取值从 0 到 K-2
-    # ∇ B_k = - sum_i( X_i * F_ik ) （因为使用 minimize 函数而取负值）
     grad = np.zeros((K - 1, P))
     for k in range(K - 1):
-        # F[:, k] 为 n 行 × 1 列；乘以 X 的每一行（X 经过转置），即 P 行 × n 列，最终结果为一 1 行 × P 列
         grad[k, :] = - (X.T @ F[:, k])
-    # 将之扁平化并返回
-    grad_flat = grad.ravel()
+    
+    return neg_ll, grad.ravel()
+
+
+def _neg_loglik_and_grad_DM(flat_params: np.ndarray, Y: np.ndarray, X: np.ndarray, K: int, P: int, C: np.ndarray,
+                            N: np.ndarray) -> Tuple[float, np.ndarray]:
+    """
+    Dirichlet-Multinomial (DM) 模型的负对数似然和梯度 (稳健版核心)。
+    引入 alpha_sum 参数来模拟数据的过度离散 (Overdispersion)。
+    """
+    n = Y.shape[0]
+    
+    # 1. 提取参数
+    B = flat_params[:-1].reshape((K - 1, P))
+    log_alpha_sum = flat_params[-1]
+    alpha_sum = np.exp(log_alpha_sum)
+    
+    # 2. 估计 Dirichlet 均值 E[P]
+    eta = X @ B.T
+    eta_full = np.hstack([eta, np.zeros((n, 1))])
+    exp_eta_full = np.exp(eta_full)
+    P_hat = exp_eta_full / exp_eta_full.sum(axis=1)[:, None]
+    
+    # 3. 计算 alpha 向量 (Mean * Precision)
+    alpha = P_hat * alpha_sum
+    
+    # 4. DM 负对数似然
+    ll_terms = (
+            gammaln(alpha_sum)
+            - gammaln(alpha_sum + N)
+            + np.sum(gammaln(alpha + C), axis=1)
+            - np.sum(gammaln(alpha), axis=1)
+    )
+    neg_ll = -ll_terms.sum()
+    
+    # 5. 梯度计算
+    digamma_diff = psi(alpha + C) - psi(alpha)
+    digamma_alpha_sum_diff = psi(alpha_sum + N) - psi(alpha_sum)
+    
+    G = digamma_diff - digamma_alpha_sum_diff[:, None]
+    H = G - np.sum(P_hat * G, axis=1)[:, None]
+    
+    # Grad Beta
+    grad_beta = np.zeros((K - 1, P))
+    for k in range(K - 1):
+        grad_beta[k, :] = - (X.T @ H[:, k])
+    
+    # Grad Log(alpha_sum)
+    term_alpha_sum = (psi(alpha_sum) - psi(alpha_sum + N)) + np.sum(P_hat * digamma_diff, axis=1)
+    grad_log_alpha_sum = - alpha_sum * term_alpha_sum.sum()
+    
+    grad_flat = np.concatenate([grad_beta.ravel(), np.array([grad_log_alpha_sum])])
     return neg_ll, grad_flat
 
+
+# ==============================================================================
+# 2. 激进版主函数: run_Dirichlet_Wald
+# ==============================================================================
 
 def run_Dirichlet_Wald(df_all: pd.DataFrame,
                        cell_type: str,
@@ -453,28 +499,44 @@ def run_Dirichlet_Wald(df_all: pd.DataFrame,
                        maxiter: int = 1000,
                        alpha: float = 0.05,
                        verbose: bool = False) -> Dict[str, Any]:
-    method_name = "Dirichlet_FixedEffect"
-
-    # 1) pivot counts to wide format
+    """
+    激进版：假设无过度离散。通常会产生更显著的 P 值。
+    """
+    method_name = "Dirichlet_Standard_Wald"  # 更新名称以示区别
+    
+    # 1) Pivot Data
     wide = df_all.pivot_table(index=group_label, columns="cell_type", values="count",
                               aggfunc="sum", fill_value=0)
     celltypes = list(wide.columns)
     n_samples, K = wide.shape
-
+    
     if cell_type not in celltypes:
         return make_result(method_name, cell_type, None, effect_size=None,
-                            extra={"error": f"target cell_type '{cell_type}' not found"})
-
-    # ensure reference celltype is last (so params shape is (K-1, P))
+                           extra={"error": f"target cell_type '{cell_type}' not found"})
+    
+    # Ensure reference celltype is last
     if celltypes[-1] == cell_type:
         if K < 2:
             return make_result(method_name, cell_type, None, effect_size=None,
-                                extra={"error": "Need >=2 cell types"})
+                               extra={"error": "Need >=2 cell types"})
         cols = celltypes[:-2] + [celltypes[-1], celltypes[-2]]
         wide = wide[cols]
         celltypes = list(wide.columns)
-
-    # 2) proportions Y
+    
+    # 2) Metadata & Design Matrix (CRITICAL: Run BEFORE defining 'counts'/'C')
+    #    这样做是为了防止局部变量 C 覆盖 patsy.C
+    meta = df_all.drop_duplicates(subset=[group_label]).set_index(group_label)
+    meta = meta.reindex(wide.index)
+    try:
+        X_df = dmatrix("1 + " + formula, meta, return_type="dataframe")
+    except Exception as e:
+        return make_result(method_name, cell_type, None, effect_size=None,
+                           extra={"error": f"patsy dmatrix error: {e}"})
+    X = np.asarray(X_df)
+    colnames = X_df.design_info.column_names
+    P = X.shape[1]
+    
+    # 3) Proportions Y (Run AFTER dmatrix)
     counts = wide.values.astype(float)
     row_sums = counts.sum(axis=1)
     zero_rows = row_sums == 0
@@ -482,246 +544,340 @@ def run_Dirichlet_Wald(df_all: pd.DataFrame,
         counts[zero_rows, :] = 1.0 / K
         row_sums = counts.sum(axis=1)
     Y = counts / row_sums[:, None]
+    
+    # 4) Init Params & Fit (Standard Dirichlet)
+    init = np.zeros((K - 1) * P, dtype=float)
+    try:
+        def fun_and_jac(params):
+            val, grad = _neg_loglik_and_grad(params, Y, X, K, P)
+            return val, grad
+        
+        res = minimize(fun_and_jac, x0=init, method="BFGS", jac=True,
+                       options={"maxiter": maxiter, "disp": verbose})
+    except Exception as e:
+        return make_result(method_name, cell_type, None, effect_size=None,
+                           extra={"error": f"optimizer error: {e}"})
+    
+    extra = {"message": res.message} if res.success else {"warning": "optimizer did not converge",
+                                                          "message": res.message}
+    params = res.x.reshape((K - 1, P))
+    
+    k_index = celltypes.index(cell_type)
+    if k_index == K - 1:
+        return make_result(method_name, cell_type, None, effect_size=None,
+                           extra={"error": "target cell_type became reference"})
+    
+    # 5) Post-hoc Analysis
+    if "disease" not in meta.columns:
+        return make_result(method_name, cell_type, None, effect_size=None, extra={"error": "missing 'disease' column"})
+    
+    all_groups = list(meta["disease"].astype(str).unique())
+    groups = [ref_label] + [g for g in all_groups if g != ref_label] if ref_label in all_groups else all_groups
+    meta["disease"] = pd.Categorical(meta["disease"].astype(str), categories=groups, ordered=True)
+    disease_series = meta["disease"].astype(str)
+    
+    mean_X_by_group = {}
+    for g in groups:
+        idx = np.where(disease_series.values == g)[0]
+        mean_X_by_group[g] = X[idx, :].mean(axis=0) if len(idx) > 0 else np.zeros((P,))
+    
+    mean_props = {}
+    for g in groups:
+        eta_kminus1 = mean_X_by_group[g] @ params.T
+        eta_full = np.concatenate([eta_kminus1, [0.0]])
+        alpha_dir = np.exp(eta_full)
+        mean_props[g] = float(alpha_dir[k_index] / alpha_dir.sum())
+    
+    # Wald Tests
+    nparam = (K - 1) * P
+    try:
+        hess_inv = res.hess_inv
+        if hasattr(hess_inv, "todense"): hess_inv = np.asarray(hess_inv.todense())
+        
+        # Fixed Effects
+        fe_rows = []
+        for j, term in enumerate(colnames):
+            coef = float(params[k_index, j])
+            idx = int(k_index * P + j)
+            var_j = float(hess_inv[idx, idx])
+            se_j = float(np.sqrt(abs(var_j)))
+            z_j = coef / (se_j + 1e-12)
+            p_j = float(2.0 * (1.0 - norm.cdf(abs(z_j))))
+            fe_rows.append({"term": term, "Coef": coef, "Std.Err": se_j, "z": z_j, "P>|z|": p_j,
+                            "2.5%": coef - 1.96 * se_j, "97.5%": coef + 1.96 * se_j})
+        fixed_effect_df = pd.DataFrame(fe_rows).set_index("term")
+        
+        # Contrasts
+        mean_X_ref = mean_X_by_group.get(ref_label, np.zeros(P))
+        contrast_rows = []
+        for g in groups:
+            if g == ref_label:
+                contrast_rows.append({"ref": ref_label, "other": g, "mean_ref": mean_props[ref_label],
+                                      "mean_other": mean_props[ref_label], "P>|z|": np.nan, "significant": False})
+                continue
+            
+            mean_X_g = mean_X_by_group[g]
+            delta = float((mean_X_g - mean_X_ref) @ params[k_index, :])
+            
+            c = np.zeros((nparam,), dtype=float)
+            c[k_index * P: (k_index + 1) * P] = (mean_X_g - mean_X_ref)
+            
+            var = float(c @ (hess_inv @ c))
+            se = float(np.sqrt(abs(var)))
+            z = delta / (se + 1e-12)
+            pval = float(2.0 * (1.0 - norm.cdf(abs(z))))
+            
+            # Prop Diff Calculation
+            eta_ref = np.zeros(K);
+            eta_g = np.zeros(K)
+            for kk in range(K - 1):
+                eta_ref[kk] = mean_X_ref @ params[kk, :];
+                eta_g[kk] = mean_X_g @ params[kk, :]
+            
+            pred_prop_ref = np.exp(eta_ref)[k_index] / np.exp(eta_ref).sum()
+            pred_prop_g = np.exp(eta_g)[k_index] / np.exp(eta_g).sum()
+            
+            contrast_rows.append({
+                "ref": ref_label, "other": g, "mean_ref": mean_props[ref_label], "mean_other": mean_props[g],
+                "prop_diff": pred_prop_g - pred_prop_ref, "Coef": delta, "Std.Err": se, "z": z, "P>|z|": pval,
+                "direction": "ref_greater" if (pred_prop_g - pred_prop_ref) < 0 else "other_greater",
+                "significant": bool(pval < alpha)
+            })
+        
+        # Append fixed effects (tissue etc) to contrasts
+        for term, row in fixed_effect_df.iterrows():
+            if term.startswith('C('):
+                name_split = split_C_terms(pd.Series(term))  # Dependency check
+                contrast_rows.append({
+                    "ref": name_split.iloc[0, 0], "other": name_split.iloc[0, 1],
+                    "Coef": row["Coef"], "Std.Err": row["Std.Err"], "z": row["z"], "P>|z|": row["P>|z|"],
+                    "direction": "ref_greater" if row["Coef"] < 0 else "other_greater",
+                    "significant": row["P>|z|"] < 0.05
+                })
+        
+        extra.update({"contrast_table": pd.DataFrame(contrast_rows).set_index("other"),
+                      "fixed_effect": fixed_effect_df, "groups": groups})
+    
+    except Exception as e:
+        extra.update({"hess_inv_error": str(e), "groups": groups})
+    
+    return make_result(method_name, cell_type, None, effect_size=None, extra=extra)
 
-    # 3) metadata and design matrix
+
+def run_Dirichlet_Wald_with_LFC(
+        df_all: pd.DataFrame,
+        cell_type: str,
+        formula: str = "disease",
+        coef_threshold: float = 0.2,  # 新增 LFC 阈值参数
+        **kwargs
+) -> Dict[str, Any]:
+    """
+    运行 Dirichlet Wald 检验并应用 LFC 过滤。
+    """
+    # 假设 run_Dirichlet_Wald 是你现有的原始函数
+    res = run_Dirichlet_Wald(df_all, cell_type, formula=formula, **kwargs)
+    
+    # 获取 contrast_table 进行二次加工
+    if res['extra'] and res['extra'].get('contrast_table') is not None:
+        ct = res['extra']['contrast_table']
+        # 重新定义显著性：P值达标且效应量足够大
+        # 注意：这里的 Coef 在 CLR/Dirichlet 空间通常对应 Log 尺度的变化
+        ct['significant'] = (ct['P>|z|'] < 0.05) & (ct['Coef'].abs() > coef_threshold)
+        
+        # 同步更新顶级指标
+        res['significant'] = any(ct['significant'])
+        res['P>|z|'] = ct.loc[ct['significant'], 'P>|z|'].min() if res['significant'] else 1.0
+    
+    return res
+# ==============================================================================
+# 3. 稳健版主函数: run_Dirichlet_Multinomial_Wald
+# ==============================================================================
+
+def run_Dirichlet_Multinomial_Wald(df_all: pd.DataFrame,
+                                   cell_type: str,
+                                   formula: str = "disease",
+                                   ref_label: str = "HC",
+                                   group_label: str = "sample_id",
+                                   maxiter: int = 1000,
+                                   alpha: float = 0.05,
+                                   verbose: bool = False) -> Dict[str, Any]:
+    """
+    稳健版：估计 alpha_sum (Overdispersion)。通常 P 值较保守，但更真实。
+    """
+    method_name = "Dirichlet_Multinomial_Wald"  # 更新名称
+    
+    # 1) Pivot Data
+    wide = df_all.pivot_table(index=group_label, columns="cell_type", values="count",
+                              aggfunc="sum", fill_value=0)
+    celltypes = list(wide.columns)
+    n_samples, K = wide.shape
+    
+    if cell_type not in celltypes:
+        return make_result(method_name, cell_type, None, effect_size=None,
+                           extra={"error": f"target cell_type '{cell_type}' not found"})
+    
+    # Target Swap Logic
+    target_idx = celltypes.index(cell_type)
+    if target_idx == K - 1:
+        cols_to_swap = celltypes.copy()
+        cols_to_swap[target_idx], cols_to_swap[-2] = cols_to_swap[-2], cols_to_swap[target_idx]
+        wide = wide[cols_to_swap]
+        celltypes = list(wide.columns)
+        target_idx = celltypes.index(cell_type)
+    
+    # 2) Metadata & Design Matrix (CRITICAL: Run BEFORE defining 'C')
     meta = df_all.drop_duplicates(subset=[group_label]).set_index(group_label)
     meta = meta.reindex(wide.index)
     try:
         X_df = dmatrix("1 + " + formula, meta, return_type="dataframe")
     except Exception as e:
         return make_result(method_name, cell_type, None, effect_size=None,
-                            extra={"error": f"patsy dmatrix error: {e}"})
+                           extra={"error": f"patsy dmatrix error: {e}"})
     X = np.asarray(X_df)
     colnames = X_df.design_info.column_names
     P = X.shape[1]
-
-    # 4) init params & fit
-    init = np.zeros((K - 1) * P, dtype=float)
+    
+    # 3) Counts C, Total N, Props Y (Run AFTER dmatrix)
+    counts = wide.values.astype(float)
+    row_sums = counts.sum(axis=1)
+    if (row_sums == 0).any():
+        counts[row_sums == 0, :] = 1.0 / K
+        row_sums = counts.sum(axis=1)
+    
+    C = counts
+    N = row_sums
+    Y = C / N[:, None]
+    
+    # 4) Init Params & Fit (DM with alpha_sum)
+    init_beta = np.zeros((K - 1) * P, dtype=float)
+    init_alpha_sum_log = np.log(160.0)  # Empirical Init
+    init = np.concatenate([init_beta, [init_alpha_sum_log]])
+    nparam_total = (K - 1) * P + 1
+    
     try:
-        def fun_and_jac(params):
-            val, grad = _neg_loglik_and_grad(params, Y, X, K, P)
+        def fun_and_jac_DM(params):
+            val, grad = _neg_loglik_and_grad_DM(params, Y, X, K, P, C, N)
             return val, grad
-
-        res = minimize(fun_and_jac,
-                       x0=init,
-                       method="BFGS",
-                       jac=True,
+        
+        res = minimize(fun_and_jac_DM, x0=init, method="BFGS", jac=True,
                        options={"maxiter": maxiter, "disp": verbose})
     except Exception as e:
         return make_result(method_name, cell_type, None, effect_size=None,
-                            extra={"error": f"optimizer error: {e}"})
-
-    extra = {"message": res.message} if res.success else {"warning": "optimizer did not converge", "message": res.message}
-
-    params = res.x.reshape((K - 1, P))  # shape (K-1, P)
-    # check k_index w.r.t current celltypes ordering
+                           extra={"error": f"optimizer error: {e}"})
+    
+    extra = {"message": res.message} if res.success else {"warning": "optimizer did not converge",
+                                                          "message": res.message}
+    
+    # Extract Params
+    params_full = res.x
+    params = params_full[:-1].reshape((K - 1, P))
+    alpha_sum_est = np.exp(params_full[-1])
+    
     k_index = celltypes.index(cell_type)
-    if k_index == K - 1:
-        return make_result(method_name, cell_type, None, effect_size=None,
-                            extra={"error": "target cell_type became reference; cannot compute direct coef"})
-
-    # ---- compute mean design-row per disease group ----
+    
+    # 5) Post-hoc Analysis
     if "disease" not in meta.columns:
-        return make_result(method_name, cell_type, None, effect_size=None,
-                            extra={"error": "metadata missing 'disease' column"})
-
-    # prepare ordered groups with ref_label first (but do NOT change celltypes)
+        return make_result(method_name, cell_type, None, effect_size=None, extra={"error": "missing 'disease' column"})
+    
     all_groups = list(meta["disease"].astype(str).unique())
-    # preserve observed order but ensure ref_label is first if present
-    if ref_label in all_groups:
-        groups = [ref_label] + [g for g in all_groups if g != ref_label]
-    else:
-        groups = all_groups
-
+    groups = [ref_label] + [g for g in all_groups if g != ref_label] if ref_label in all_groups else all_groups
     meta["disease"] = pd.Categorical(meta["disease"].astype(str), categories=groups, ordered=True)
     disease_series = meta["disease"].astype(str)
-
-    # mean X per group
+    
     mean_X_by_group = {}
     for g in groups:
         idx = np.where(disease_series.values == g)[0]
-        if len(idx) == 0:
-            mean_X_by_group[g] = np.zeros((P,))
-        else:
-            mean_X_by_group[g] = X[idx, :].mean(axis=0)
-
-    # predicted mean proportions per group (via alpha = exp(eta))
+        mean_X_by_group[g] = X[idx, :].mean(axis=0) if len(idx) > 0 else np.zeros((P,))
+    
     mean_props = {}
     for g in groups:
-        mean_X = mean_X_by_group[g]
-        # eta for K-1 categories
-        eta_kminus1 = mean_X @ params.T  # shape (K-1,)
-        # append zero for reference celltype
-        eta_full = np.concatenate([eta_kminus1, np.array([0.0])])
+        eta_kminus1 = mean_X_by_group[g] @ params.T
+        eta_full = np.concatenate([eta_kminus1, [0.0]])
         alpha_dir = np.exp(eta_full)
         mean_props[g] = float(alpha_dir[k_index] / alpha_dir.sum())
-
-    # ---- prepare for Wald tests: get hess_inv if possible ----
-    nparam = (K - 1) * P
-    group_pvals = {g: None for g in groups}
-    group_z = {g: None for g in groups}
-    group_se = {g: None for g in groups}
-    fixed_effect_df = None  # will fill below if we can
-
-    # try obtain dense hess_inv
+    
+    # Wald Tests
     try:
         hess_inv = res.hess_inv
-        if hasattr(hess_inv, "todense"):
-            hess_inv = np.asarray(hess_inv.todense())
-        else:
-            hess_inv = np.asarray(hess_inv)
-        if hess_inv.shape != (nparam, nparam):
-            raise ValueError("hess_inv has unexpected shape")
-
-        # ---- 1) Build LMM-style fixed effect table for all design columns ----
+        if hasattr(hess_inv, "todense"): hess_inv = np.asarray(hess_inv.todense())
+        
+        # Fixed Effects
         fe_rows = []
         for j, term in enumerate(colnames):
-            # coef for this design column for the target celltype
             coef = float(params[k_index, j])
-            idx = int(k_index * P + j)  # parameter index in flat vector
+            idx = int(k_index * P + j)
             var_j = float(hess_inv[idx, idx])
             se_j = float(np.sqrt(abs(var_j)))
             z_j = coef / (se_j + 1e-12)
             p_j = float(2.0 * (1.0 - norm.cdf(abs(z_j))))
-            ci_low = coef - 1.96 * se_j
-            ci_high = coef + 1.96 * se_j
-            fe_rows.append({
-                "term": term,
-                "Coef": coef,
-                "Std.Err": se_j,
-                "z": z_j,
-                "P>|z|": p_j,
-                "2.5%": ci_low,
-                "97.5%": ci_high
-            })
+            fe_rows.append({"term": term, "Coef": coef, "Std.Err": se_j, "z": z_j, "P>|z|": p_j,
+                            "2.5%": coef - 1.96 * se_j, "97.5%": coef + 1.96 * se_j})
+        
+        # Append Alpha Sum Stats
+        idx_alpha = nparam_total - 1
+        se_alpha = float(np.sqrt(abs(hess_inv[idx_alpha, idx_alpha])))
+        fe_rows.append({"term": "Log_Alpha_Sum", "Coef": params_full[-1], "Std.Err": se_alpha,
+                        "z": np.nan, "P>|z|": np.nan})
         fixed_effect_df = pd.DataFrame(fe_rows).set_index("term")
-
-        # ---- 2) group contrasts (mean-based delta vs ref_label) ----
-        mean_X_ref = mean_X_by_group[ref_label] if ref_label in mean_X_by_group else np.zeros(P)
+        
+        # Contrasts
+        mean_X_ref = mean_X_by_group.get(ref_label, np.zeros(P))
         contrast_rows = []
         for g in groups:
-            mean_props_g = mean_props[g]
             if g == ref_label:
-                contrast_rows.append({
-                    "ref": ref_label,
-                    "other": g,
-                    "mean_ref": mean_props[ref_label],
-                    "mean_other": mean_props_g,
-                    "prop_diff": np.nan,
-                    "Coef": np.nan,
-                    "Std.Err": np.nan,
-                    "z": np.nan,
-                    "P>|z|": np.nan,
-                    "direction": None,
-                    "significant": False
-                })
+                contrast_rows.append({"ref": ref_label, "other": g, "mean_ref": mean_props[ref_label],
+                                      "mean_other": mean_props[ref_label], "P>|z|": np.nan, "significant": False})
                 continue
-
+            
             mean_X_g = mean_X_by_group[g]
-            # delta on linear predictor for this target celltype
             delta = float((mean_X_g - mean_X_ref) @ params[k_index, :])
-
-            # contrast vector c (length nparam) with entries only in block for k_index
-            c = np.zeros((nparam,), dtype=float)
-            start = k_index * P
-            end = start + P
-            c[start:end] = (mean_X_g - mean_X_ref)
-
+            
+            # Contrast vector (Last element for alpha_sum is 0)
+            c = np.zeros((nparam_total,), dtype=float)
+            c[k_index * P: (k_index + 1) * P] = (mean_X_g - mean_X_ref)
+            
             var = float(c @ (hess_inv @ c))
             se = float(np.sqrt(abs(var)))
             z = delta / (se + 1e-12)
             pval = float(2.0 * (1.0 - norm.cdf(abs(z))))
-
-            # predict proportions via softmax (handle K-1 params)
-            eta_ref = np.zeros(K)
+            
+            # Prop Diff
+            eta_ref = np.zeros(K);
             eta_g = np.zeros(K)
             for kk in range(K - 1):
-                eta_ref[kk] = mean_X_ref @ params[kk, :]
+                eta_ref[kk] = mean_X_ref @ params[kk, :];
                 eta_g[kk] = mean_X_g @ params[kk, :]
-            # last reference category has eta = 0
-            eta_ref[K - 1] = 0.0
-            eta_g[K - 1] = 0.0
-            alpha_ref = np.exp(eta_ref)
-            alpha_g = np.exp(eta_g)
-            pred_prop_ref = float(alpha_ref[k_index] / alpha_ref.sum())
-            pred_prop_g = float(alpha_g[k_index] / alpha_g.sum())
-            prop_diff = pred_prop_g - pred_prop_ref
-
-            direction = "ref_greater" if prop_diff < 0 else "other_greater"
-            significant = bool(pval < alpha)
-
+            
+            pred_prop_ref = np.exp(eta_ref)[k_index] / np.exp(eta_ref).sum()
+            pred_prop_g = np.exp(eta_g)[k_index] / np.exp(eta_g).sum()
+            
             contrast_rows.append({
-                "ref": ref_label,
-                "other": g,
-                "mean_ref": mean_props[ref_label],
-                "mean_other": mean_props_g,
-                "prop_diff": float(prop_diff),
-                "Coef": float(delta),
-                "Std.Err": float(se),
-                "z": float(z),
-                "P>|z|": float(pval),
-                "direction": direction,
-                "significant": significant
+                "ref": ref_label, "other": g, "mean_ref": mean_props[ref_label], "mean_other": mean_props[g],
+                "prop_diff": pred_prop_g - pred_prop_ref, "Coef": delta, "Std.Err": se, "z": z, "P>|z|": pval,
+                "direction": "ref_greater" if (pred_prop_g - pred_prop_ref) < 0 else "other_greater",
+                "significant": bool(pval < alpha)
             })
         
+        # Append fixed effects
         for term, row in fixed_effect_df.iterrows():
-            if term == "Intercept":
-                continue
-            
-            # disease contrast 已经独立输出，不重复
-            if term.startswith("disease["):
-                continue
-            
-            # 处理 C(tissue, Treatment(reference="nif"))[T.if] 这样的项
             if term.startswith('C('):
-                # 解析 tissue 对比
-                # term 例子: C(tissue, Treatment(reference="nif"))[T.if]
                 name_split = split_C_terms(pd.Series(term))
-                other = name_split.iloc[0,1]
-                ref = name_split.iloc[0,0]
-                
-                coef = row["Coef"]
-                direction = "ref_greater" if coef < 0 else "other_greater"
-                significant = row["P>|z|"] < 0.05  # 或 bool() 按你逻辑
-                # group_means = df_fit.groupby("disease")["prop"].mean()
-                
                 contrast_rows.append({
-                    "ref": ref,
-                    "other": other,
-                    "mean_ref": None,
-                    "mean_other": None,
-                    "prop_diff": None,
-                    "Coef": coef,
-                    "Std.Err": row["Std.Err"],
-                    "z": row["z"],
-                    "P>|z|": row["P>|z|"],
-                    "direction": direction,
-                    "significant": significant
+                    "ref": name_split.iloc[0, 0], "other": name_split.iloc[0, 1],
+                    "Coef": row["Coef"], "Std.Err": row["Std.Err"], "z": row["z"], "P>|z|": row["P>|z|"],
+                    "direction": "ref_greater" if row["Coef"] < 0 else "other_greater",
+                    "significant": row["P>|z|"] < 0.05
                 })
         
-        contrast_df = pd.DataFrame(contrast_rows).set_index("other")
-
-        extra.update({
-            "baseline_disease": ref_label,
-            "groups": groups,
-            "contrast_table": contrast_df,
-            "fixed_effect": fixed_effect_df,
-            "design_colnames": colnames
-        })
-
+        extra.update({"contrast_table": pd.DataFrame(contrast_rows).set_index("other"),
+                      "fixed_effect": fixed_effect_df, "groups": groups,
+                      "estimated_alpha_sum": float(alpha_sum_est)})
+    
     except Exception as e:
-        # fallback: return means and note that Hessian-based stats failed
-        extra.update({
-            "hess_inv_error": str(e),
-            "baseline_disease": ref_label,
-            "groups": groups,
-            "mean_props": mean_props,
-            "design_colnames": colnames
-        })
-
+        extra.update({"hess_inv_error": str(e), "groups": groups, "estimated_alpha_sum": float(alpha_sum_est)})
+    
     return make_result(method_name, cell_type, None, effect_size=None, extra=extra)
-
-
+    
 # -----------------------
 # Method 5: Permutation-based mixed test (block-permutation by donor)
 # -----------------------
@@ -964,9 +1120,9 @@ def run_Perm_Mixed(df_all: pd.DataFrame,
     )
 
 def run_ANOVA_naive(
-    df,
+    df_all,
     cell_type,
-    formula="prop ~ disease",
+    formula="disease",
     ref_label="HC",
     alpha=0.05
 ):
@@ -974,9 +1130,10 @@ def run_ANOVA_naive(
     Naive ANOVA: 直接对 prop 做 ANOVA，不考虑成分性或随机效应。
     在显著时执行 TukeyHSD 并提取 ref vs other 的对比。
     """
-
+    if '~' not in formula:
+        formula = f"prop ~ {formula}"
     # 过滤 cell_type
-    df_sub = df[df["cell_type"] == cell_type].copy()
+    df_sub = df_all[df_all["cell_type"] == cell_type].copy()
     if df_sub.empty:
         return {"error": f"No rows for {cell_type}"}
 
@@ -992,15 +1149,12 @@ def run_ANOVA_naive(
     means = df_sub.groupby(factor_name)["prop"].mean().to_dict()
 
     # ---- Post-hoc: Tukey ----
-    if p_main < alpha:
-        tukey = pairwise_tukeyhsd(
-            endog=df_sub["prop"],
-            groups=df_sub[factor_name],
-            alpha=alpha
-        )
-        contrast_rows = extract_contrast(ref_label, means, tukey)
-    else:
-        contrast_rows = []
+    tukey = pairwise_tukeyhsd(
+        endog=df_sub["prop"],
+        groups=df_sub[factor_name],
+        alpha=alpha
+    )
+    contrast_rows = extract_contrast(ref_label, means, tukey)
 
     # ---- 输出 ----
     return {
@@ -1017,17 +1171,19 @@ def run_ANOVA_naive(
 
 
 def run_ANOVA_transformed(
-    df,
+    df_all,
     cell_type,
-    formula="prop_trans ~ disease",
+    formula="disease",
     ref_label="HC",
     alpha=0.05
 ):
     """
     arcsin-sqrt transform 后再做 ANOVA，兼容多因素。
     """
-
-    df_sub = df[df["cell_type"] == cell_type].copy()
+    if '~' not in formula:
+        formula = f"prop_trans ~ {formula}"
+        
+    df_sub = df_all[df_all["cell_type"] == cell_type].copy()
     if df_sub.empty:
         return {"error": f"No rows for {cell_type}"}
 
@@ -1043,16 +1199,12 @@ def run_ANOVA_transformed(
     # ---- 均值 (原 scale) ----
     means = df_sub.groupby(main_factor)["prop"].mean().to_dict()
 
-    # ---- Tukey ----
-    if p_main < alpha:
-        tukey = pairwise_tukeyhsd(
-            endog=df_sub["prop_trans"],
-            groups=df_sub[main_factor],
-            alpha=alpha
-        )
-        contrast_rows = extract_contrast(ref_label, means, tukey)
-    else:
-        contrast_rows = []
+    tukey = pairwise_tukeyhsd(
+        endog=df_sub["prop_trans"],
+        groups=df_sub[main_factor],
+        alpha=alpha
+    )
+    contrast_rows = extract_contrast(ref_label, means, tukey)
 
     return {
         "method": "ANOVA_transformed",
@@ -1066,12 +1218,133 @@ def run_ANOVA_transformed(
         }
     }
 
+
+def run_pCLR_LMM(
+        df_all: pd.DataFrame,
+        cell_type: str,
+        formula: str = "disease * C(tissue, Treatment(reference='nif'))",
+        random_effect: str = "1 | donor_id",
+        n_samples: int = 32,
+        alpha: float = 0.05,
+        random_state: int = 42,
+        disease_ref: str = "HC",
+        tissue_ref: str = "nif"
+) -> Dict[str, Any]:
+    rng = np.random.default_rng(random_state)
+    extra = {"mixedlm_error": None, "contrast_table": None}
+    
+    warnings.filterwarnings('ignore', message=".*Maximum Likelihood optimization failed.*")
+    warnings.filterwarnings('ignore', message=".*Random effects covariance is singular.*")
+    
+    try:
+        # 1. 准备宽表和均值计算 (用于 mean_ref, mean_other)
+        metadata_cols = ['sample_id', 'donor_id', 'disease', 'tissue']
+        df_wide = df_all.pivot_table(index=metadata_cols, columns='cell_type', values='count', fill_value=0)
+        df_prop_wide = df_all.pivot_table(index=metadata_cols, columns='cell_type', values='prop', fill_value=0)
+        
+        cell_types = df_wide.columns.tolist()
+        target_idx = cell_types.index(cell_type)
+        counts_matrix = df_wide.values.astype(float)
+        re_group = random_effect.split('|')[1].strip()
+        all_coefs_storage = []
+        
+        # 2. 蒙特卡洛采样循环
+        for s in range(n_samples):
+            prob_samples = np.array([rng.dirichlet(row + 0.5) for row in counts_matrix])
+            log_p = np.log(prob_samples)
+            clr_matrix = log_p - np.mean(log_p, axis=1, keepdims=True)
+            
+            df_iter = df_wide.index.to_frame().reset_index(drop=True)
+            df_iter['target_clr'] = clr_matrix[:, target_idx]
+            
+            try:
+                model = smf.mixedlm(f"target_clr ~ {formula}", df_iter, groups=df_iter[re_group])
+                result = model.fit(method=['lbfgs'], maxiter=1000, ignore_constrained_optim_warnings=True)
+                if result.converged:
+                    all_coefs_storage.append(result.summary().tables[1].copy())
+            except:
+                continue
+        
+        if not all_coefs_storage:
+            return make_result("pCLR_LMM", cell_type, None, extra={"error": "Convergence failed"})
+        
+        # 3. 汇总中位数
+        df_all = pd.concat(all_coefs_storage).reset_index().rename(columns={'index': 'term'})
+        for col in ['Coef.', 'Std.Err.', 'z', 'P>|z|']:
+            df_all[col] = pd.to_numeric(df_all[col], errors='coerce')
+        
+        summary = df_all.groupby('term').agg(
+            {'Coef.': 'median', 'Std.Err.': 'median', 'z': 'median', 'P>|z|': 'median'})
+        
+        # 4. 解析 Term 并构建 contrast_table
+        rows = []
+        
+        # A. 插入参考组占位行 (HC-HC)
+        mean_hc_nif = df_prop_wide.xs((disease_ref, tissue_ref), level=('disease', 'tissue'))[cell_type].mean()
+        rows.append({
+            'other': disease_ref, 'ref': disease_ref, 'mean_ref': mean_hc_nif, 'mean_other': mean_hc_nif,
+            'pval': np.nan, 'significant': False, 'prop_diff': np.nan, 'Coef': np.nan, 'Std.Err': np.nan, 'z': np.nan,
+            'direction': np.nan
+        })
+        
+        # B. 解析模型项
+        for term, res in summary.iterrows():
+            if term == 'Intercept': continue
+            
+            # 解析 disease (如 "disease[T.BD]") 或 tissue (如 "C(tissue...)[T.if]")
+            other_val = disease_ref
+            ref_val = disease_ref
+            
+            if 'disease' in term and ':' not in term:
+                other_val = re.findall(r"\[T\.(.*?)\]", term)[0]
+                ref_val = disease_ref
+            elif 'tissue' in term and ':' not in term:
+                other_val = re.findall(r"\[T\.(.*?)\]", term)[0]
+                ref_val = tissue_ref
+            else:  # 忽略交互项或特殊项用于此表格对齐，或根据需要扩展
+                continue
+            
+            # 计算原始比例均值
+            m_ref = df_prop_wide.xs(ref_val, level=('disease' if ref_val == disease_ref else 'tissue'))[
+                cell_type].mean()
+            m_other = df_prop_wide.xs(other_val, level=('disease' if ref_val == disease_ref else 'tissue'))[
+                cell_type].mean()
+            
+            rows.append({
+                'other': other_val, 'ref': ref_val, 'mean_ref': m_ref, 'mean_other': m_other,
+                'pval': res['P>|z|'], 'significant': res['P>|z|'] < alpha,
+                'prop_diff': m_other - m_ref, 'Coef': res['Coef.'], 'Std.Err': res['Std.Err.'], 'z': res['z'],
+                'direction': 'other_greater' if res['Coef.'] > 0 else 'ref_greater'
+            })
+        
+        ct_df = pd.DataFrame(rows)
+        
+        # 5. 排序逻辑: 疾病在前(字母序)，组织在后
+        ct_df['_is_if_nif'] = ct_df['ref'] == tissue_ref
+        ct_df["_is_HC_HC"] = (ct_df["ref"] == "HC") & (ct_df["other"] == "HC")
+        
+        ct_df = ct_df.sort_values(
+            by=["_is_HC_HC", "_is_if_nif", "other"],
+            ascending=[False, True, True]
+        )
+        ct_df = (
+            ct_df.drop(columns=["_is_HC_HC", "_is_if_nif"])
+            .set_index("other")
+        )
+        
+        extra["contrast_table"] = ct_df
+        return make_result("pCLR_LMM", cell_type, ct_df['pval'].min(), effect_size=ct_df['Coef'].abs().mean(),
+                           extra=extra)
+    
+    except Exception as e:
+        extra["mixedlm_error"] = str(e)
+        return make_result("pCLR_LMM", cell_type, None, extra=extra)
+
+
 # -----------------------
 # 生成模拟数据：Dirichlet-Multinomial 模拟
 # 有利于 Dirichlet 回归
 # -----------------------
-from scipy.stats import dirichlet_multinomial
-from scipy.stats import dirichlet, multinomial
 
 
 def simulate_DM_data(
@@ -1328,8 +1601,6 @@ def build_DM_effects_with_main_effect(
 # 有利于 LMM/CLR
 # -----------------------
 
-from scipy.special import softmax
-
 
 def simulate_LogisticNormal_hierarchical(
         n_donors=8,
@@ -1343,6 +1614,7 @@ def simulate_LogisticNormal_hierarchical(
         latent_sd=0.5,
         total_count_mean=5e4,
         total_count_sd=2e4,
+        min_count=1000,
         disease_levels=("HC", "CD", "UC"),  # 假设多疾病状态，例如：HC, CD, UC
         tissue_levels=("nif", "if"),
         random_state=1234
@@ -1524,7 +1796,7 @@ def simulate_LogisticNormal_hierarchical(
     proportions = softmax(logits, axis=1)
     
     total_counts = np.maximum(
-        rng.normal(total_count_mean, total_count_sd, n_samples).astype(int), 1000
+        rng.normal(total_count_mean, total_count_sd, n_samples).astype(int), min_count
     )
     
     epsilon = 1e-12
@@ -1552,94 +1824,34 @@ def simulate_LogisticNormal_hierarchical(
     return df_long, df_true_effect
 
 
-# ------------------------------------------------------------------
-# 辅助函数: 构建真实效应查找表 (分离出来，便于清晰度)
-# ------------------------------------------------------------------
-
-def build_true_effect_table(
-        cell_types, ref_disease, ref_tissue,
-        disease_effects, tissue_effect, interaction_effects, other_tissue
-):
-    """
-    根据效应字典和向量构建真实效应查找表。
-    已修正：根据 HC ≡ nif 的约束，修正了交互作用的参照组 (contrast_ref)。
-    """
-    
-    true_effects = []
-    n_celltypes = len(cell_types)
-    
-    # 1. 疾病效应 (Disease vs Ref_Disease)
-    for other_disease, E_vec in disease_effects.items():
-        for i, ct_name in enumerate(cell_types):
-            E_disease = E_vec[i]
-            true_effects.append({
-                'cell_type': ct_name,
-                'contrast_factor': 'disease',
-                'contrast_group': other_disease,
-                'contrast_ref': ref_disease,
-                'True_Effect': E_disease,
-                'True_Direction': 'other_greater' if E_disease > 0 else ('ref_greater' if E_disease < 0 else 'None'),
-                'True_Significant': True if E_disease != 0 else False
-            })
-    
-    # 2. 组织效应 (Tissue vs Ref_Tissue)
-    for i, ct_name in enumerate(cell_types):
-        E_tissue = tissue_effect[i]
-        true_effects.append({
-            'cell_type': ct_name,
-            'contrast_factor': 'tissue',
-            'contrast_group': other_tissue,
-            'contrast_ref': ref_tissue,
-            'True_Effect': E_tissue,
-            'True_Direction': 'other_greater' if E_tissue > 0 else ('ref_greater' if E_tissue < 0 else 'None'),
-            'True_Significant': True if E_tissue != 0 else False
-        })
-    
-    # 3. 交互作用效应 (Disease_Group * Tissue_Group)
-    for other_disease, E_inter_vec in interaction_effects.items():
-        for i, ct_name in enumerate(cell_types):
-            E_interaction = E_inter_vec[i]
-            true_effects.append({
-                'cell_type': ct_name,
-                'contrast_factor': 'interaction',
-                'contrast_group': f'{other_disease} x {other_tissue}',
-                # *** 修正点 ***: 简化交互作用的参照组为唯一的全局基线 HC x nif
-                'contrast_ref': f'{ref_disease} x {ref_tissue}',
-                'True_Effect': E_interaction,
-                'True_Direction': 'other_greater' if E_interaction > 0 else (
-                    'ref_greater' if E_interaction < 0 else 'None'),
-                'True_Significant': True if E_interaction != 0 else False
-            })
-    
-    return pd.DataFrame(true_effects)
-
-
 # -----------------------
 # 生成模拟数据：“真实数据 resampling” 模拟
 # 相对最公正
 # -----------------------
-from scipy.special import softmax  # 用于 Logit 到 Proportion 的转换
-
-
 def simulate_CLR_resample_data(
         count_df,
-        n_sim_samples=100,
+        n_donors=20,  # 新增：供体数量
+        n_samples_per_donor=4,  # 新增：每个供体的样本数
         disease_effect_size=0.5,
         tissue_effect_size=0.8,
         interaction_effect_size=0.5,
         inflamed_cell_frac=0.1,
-        latent_axis_sd=0.5,
-        disease_levels=("HC", "CD", "UC"),  # 适配多疾病
+        donor_noise_sd=0.2,  # 新增：供体随机效应 (Logit 空间)
+        sample_noise_sd=0.1,  # 对应原 latent_axis_sd，建议设小一点
+        disease_levels=("HC", "CD", "UC"),
         tissue_levels=("nif", "if"),
         pseudocount=1.0,
         random_state=1234
 ):
     rng = np.random.default_rng(random_state)
+    n_sim_samples = n_donors * n_samples_per_donor
     
     # ---------------------------
     # Step 1 & 2: 数据准备、宽化和 CLR 转换 (保持不变)
     # ---------------------------
     metadata_cols = ['sample_id', 'donor_id', 'disease', 'tissue']
+    # 确保原始 count_df 有总计数
+    count_df = count_df.copy()
     count_df['total_count'] = count_df.groupby('sample_id')['count'].transform('sum')
     
     df_wide = count_df.pivot_table(
@@ -1650,24 +1862,21 @@ def simulate_CLR_resample_data(
     n_celltypes = len(cell_types_original)
     ct_map = {original_name: f"CT{i + 1}" for i, original_name in enumerate(cell_types_original)}
     
-    baseline_level = (disease_levels[0], tissue_levels[0])
-    df_baseline = df_wide[(df_wide['disease'] == baseline_level[0]) & (df_wide['tissue'] == baseline_level[1])].copy()
+    # 获取基线样本池 (HC + nif)
+    ref_disease = disease_levels[0]
+    ref_tissue = tissue_levels[0]
+    df_baseline = df_wide[(df_wide['disease'] == ref_disease) & (df_wide['tissue'] == ref_tissue)].copy()
     
     if df_baseline.empty:
-        raise ValueError(
-            f"基线样本池为空。请确保数据中存在 {baseline_level[0]} (disease) 和 {baseline_level[1]} (tissue) 的样本组合。")
+        raise ValueError(f"基线样本池为空。请确保数据中包含 {ref_disease} & {ref_tissue}。")
     
     counts_baseline = df_baseline[cell_types_original].values + pseudocount
     log_counts = np.log(counts_baseline)
-    log_g_mean = np.mean(log_counts, axis=1, keepdims=True)
-    clr_logits_baseline = log_counts - log_g_mean
+    clr_logits_baseline = log_counts - np.mean(log_counts, axis=1, keepdims=True)
     
     # ---------------------------
-    # Step 3: 设计效应向量和 True Effect Table (使用辅助函数)
+    # Step 3: 设计效应向量 (使用你的辅助函数)
     # ---------------------------
-    ref_disease = disease_levels[0]
-    ref_tissue = tissue_levels[0]
-    
     disease_main_effects_dict, tissue_effect, interaction_effects_dict, df_true_effect = build_CLR_effects_and_table(
         cell_types=[f"CT{i + 1}" for i in range(n_celltypes)],
         disease_levels=disease_levels,
@@ -1680,91 +1889,90 @@ def simulate_CLR_resample_data(
     )
     
     # ---------------------------
-    # Step 4: 模拟元数据和 Logit 注入 (关键修改：动态查找效应向量)
+    # Step 4: 层次化模拟 (Donor -> Sample)
     # ---------------------------
-    
     sim_records = []
-    donors = [f"D{i // n_sim_samples}" for i in range(n_sim_samples)]
     
-    for i in range(n_sim_samples):
+    for d_idx in range(n_donors):
+        donor_id = f"D{d_idx + 1:02d}"
+        # 疾病状态通常固定在 Donor 级别
         disease = rng.choice(disease_levels)
-        tissue = rng.choice(tissue_levels)
+        # 供体随机效应：模拟该 Donor 整体比例的偏好偏移
+        donor_shift = rng.normal(0, donor_noise_sd, n_celltypes)
         
-        idx_resample = rng.integers(0, len(clr_logits_baseline))
-        clr_logit_base = clr_logits_baseline[idx_resample].copy()
-        
-        clr_logit_sim = clr_logit_base
-        
-        # 注入疾病主效应
-        if disease != ref_disease:
-            # *** 修正点: 查找当前疾病对应的独立效应向量 ***
-            E_disease = disease_main_effects_dict[disease]
-            clr_logit_sim += E_disease
+        for s_idx in range(n_samples_per_donor):
+            sample_id = f"{donor_id}_S{s_idx + 1}"
+            # 组织状态（if/nif）通常在同一 Donor 的不同样本间变化
+            tissue = rng.choice(tissue_levels)
             
-            # 注入组织主效应 (tissue_effect 是一个单一向量)
-        if tissue != ref_tissue:
-            clr_logit_sim += tissue_effect
-        
-        # 注入交互作用效应
-        if disease != ref_disease and tissue != ref_tissue:
-            # *** 修正点: 查找当前疾病对应的独立交互作用向量 ***
-            E_interaction = interaction_effects_dict[disease]
-            clr_logit_sim += E_interaction
+            # 从真实基线池中重采样一个 Logit 背景
+            idx_resample = rng.integers(0, len(clr_logits_baseline))
+            clr_logit_sim = clr_logits_baseline[idx_resample].copy()
             
-            # 施加潜在扰动
-        clr_logit_sim += rng.normal(0, latent_axis_sd, n_celltypes)
-        
-        sim_records.append({
-            "donor_id": donors[i],
-            "sample_id": f"{donors[i]}_S{i}",
-            "disease": disease,
-            "tissue": tissue,
-            "clr_logit_sim": clr_logit_sim
-        })
+            # 1. 注入供体随机效应
+            clr_logit_sim += donor_shift
+            
+            # 2. 注入疾病主效应
+            if disease != ref_disease:
+                clr_logit_sim += disease_main_effects_dict[disease]
+            
+            # 3. 注入组织主效应
+            if tissue != ref_tissue:
+                clr_logit_sim += tissue_effect
+            
+            # 4. 注入交互作用
+            if disease != ref_disease and tissue != ref_tissue:
+                clr_logit_sim += interaction_effects_dict[disease]
+            
+            # 5. 注入样本级残差噪声
+            clr_logit_sim += rng.normal(0, sample_noise_sd, n_celltypes)
+            
+            sim_records.append({
+                "donor_id": donor_id,
+                "sample_id": sample_id,
+                "disease": disease,
+                "tissue": tissue,
+                "clr_logit_sim": clr_logit_sim
+            })
     
     df_sim_meta = pd.DataFrame(sim_records)
     
     # ---------------------------
-    # Step 5 & 6: 反向转换和最终输出 (不变，但确保使用映射后的 cell_type)
+    # Step 5 & 6: 生成 Count (反向转换)
     # ---------------------------
-    
     logits_matrix = np.vstack(df_sim_meta['clr_logit_sim'].values)
+    # 限制 logit 范围防止溢出
+    logits_matrix = np.clip(logits_matrix, -700, 700)
     
-    # ... (安全检查和 softmax/归一化代码, 与原函数一致) ...
-    MAX_LOGIT = 700
-    logits_matrix = np.clip(logits_matrix, -MAX_LOGIT, MAX_LOGIT)
+    # Softmax 转换为比例
+    exp_logits = np.exp(logits_matrix)
+    proportions = exp_logits / np.sum(exp_logits, axis=1, keepdims=True)
     
-    proportions = softmax(logits_matrix, axis=1)
-    epsilon = 1e-12
-    proportions = np.clip(proportions, epsilon, 1 - epsilon)
-    row_sums = proportions.sum(axis=1, keepdims=True)
-    proportions = proportions / row_sums
+    # 采样真实数据的总深度分布
+    N_real_pool = df_wide['total_count'].values
+    total_counts = rng.choice(N_real_pool, size=n_sim_samples, replace=True)
     
-    N_real = count_df['total_count'].unique()
-    total_counts = rng.choice(N_real, size=n_sim_samples, replace=True)
-    
-    counts = np.vstack([
+    # 多项分布采样
+    counts_matrix = np.vstack([
         rng.multinomial(n=total_counts[i], pvals=proportions[i])
         for i in range(n_sim_samples)
     ])
     
+    # 构建最终表格
     df_sim = df_sim_meta[['donor_id', 'sample_id', 'disease', 'tissue']].copy()
-    
     for ct_idx, ct_name in enumerate(cell_types_original):
-        # 注意: 这里使用原始 cell_type 名称作为列名
-        df_sim[ct_name] = counts[:, ct_idx]
+        df_sim[ct_name] = counts_matrix[:, ct_idx]
     
+    # 转长表并映射 CT 编号
     df_sim_long = df_sim.melt(
         id_vars=['donor_id', 'sample_id', 'disease', 'tissue'],
-        var_name='cell_type',
-        value_name='count'
+        var_name='cell_type', value_name='count'
     )
+    df_sim_long['cell_type'] = df_sim_long['cell_type'].map(ct_map)
     
+    # 补充辅助列
     df_sim_long['total_count'] = df_sim_long.groupby('sample_id')['count'].transform('sum')
     df_sim_long['prop'] = df_sim_long['count'] / df_sim_long['total_count']
-    
-    # *** 关键点: 将 cell_type 列的值映射为 CT1, CT2... 编号 ***
-    df_sim_long['cell_type'] = df_sim_long['cell_type'].map(ct_map)
     
     return df_sim_long, df_true_effect
 
@@ -1886,174 +2094,556 @@ def build_CLR_effects_and_table(
     
     return disease_main_effects_dict, tissue_effect, interaction_effects_dict, pd.DataFrame(true_effects)
 
-# -----------------------
-# 数据的批量处理
-# -----------------------
 
 
-def extract_contrast_results(contrast_table: pd.DataFrame, target_other: str, alpha: float = 0.05) -> dict:
+
+###############################
+# 辅助函数，用于获取真实数据对于拟合数据函数的相关参数
+###############################
+def collect_DM_results(
+        df_count: pd.DataFrame,
+        cell_types_list: List[str],
+        run_DM_func,
+        formula: str = "disease + C(tissue, Treatment(reference=\"nif\"))",
+        tissue_levels: Tuple[str, str] = ("nif", "if")
+) -> Dict[str, pd.DataFrame]:
     """
-    从统计模型的 contrast_table 中提取特定对比的结果 (Coef, PValue, direction, significant)。
-    已修正索引查找逻辑，并增加了 P 值列名的 fallback 机制 (P>|z| -> p_adj -> pval)。
+    遍历所有细胞类型，运行 DM-Wald 检验，并收集 LogFC 系数和 alpha_sum。
+
+    Args:
+        df_count: 原始的细胞计数长格式 DataFrame。
+        cell_types_list: 要处理的细胞类型列表。
+        run_DM_func: 您的 run_Dirichlet_Wald 函数。
+        formula: DM 模型公式。
+        tissue_levels: 组织水平，用于识别 tissue 对比的 reference 和 other。
+
+    Returns:
+        一个包含 'all_coefs' DataFrame 和 'alpha_sum_df' DataFrame 的字典。
     """
     
-    # 1. 重置索引以便按列名访问 'other'
-    df_reset = contrast_table.reset_index()
+    all_coefs = []
+    alpha_sum_estimates = []
     
-    # 2. 使用布尔索引查找目标行
-    result_rows = df_reset[df_reset['other'] == target_other]
+    ref_tissue, other_tissue = tissue_levels
     
-    if result_rows.empty:
-        # 如果找不到匹配的对比，返回默认值
-        return {
-            'Est_Coef': np.nan,
-            'Est_PValue': np.nan,
-            'Est_Direction': 'None',
-            'Est_Significant': False
-        }
+    for cell_type in cell_types_list:
+        try:
+            # 运行 DM-Wald 拟合
+            res = run_DM_func(df_all=df_count, cell_type=cell_type, formula=formula, verbose=False)
+            
+            # 检查是否有错误
+            if 'error' in res['extra']:
+                print(f"Skipping {cell_type} due to error: {res['extra']['error']}")
+                continue
+            
+            extra = res['extra']
+            
+            # --- 1. 提取对比表 (Contrast Table) ---
+            contrast_df: pd.DataFrame = extra["contrast_table"]
+            
+            # --- 2. 提取 LogFC 系数 ---
+            
+            # 遍历 contrast_df 中的每一行
+            for other, row in contrast_df.iterrows():
+                # 忽略参考行 (如 HC vs HC)
+                if other == row['ref']:
+                    continue
+                
+                # Coef 是 LogFC 估计值
+                coef = row["Coef"]
+                pval = row["P>|z|"]
+                
+                if pd.isna(coef):
+                    continue
+                
+                # 确定效应类型 (Factor)
+                factor_type = ""
+                if other in extra['groups']:  # 其他 disease 组
+                    factor_type = 'disease'
+                elif other == other_tissue and row['ref'] == ref_tissue:  # 组织对比
+                    factor_type = 'tissue'
+                # NOTE: interaction 项通常在 fixed_effect_df 中，但我们在 contrast_table 中已覆盖 main effects。
+                
+                # 如果无法识别 factor_type，则跳过
+                if not factor_type:
+                    continue
+                
+                all_coefs.append({
+                    'cell_type': cell_type,
+                    'factor': factor_type,
+                    'contrast_other': other,
+                    'contrast_ref': row['ref'],
+                    'LogFC_Coef': coef,
+                    'PValue': pval
+                })
+            
+            # --- 3. 提取 alpha_sum ---
+            alpha_sum = extra.get("estimated_alpha_sum")
+            if alpha_sum is not None:
+                alpha_sum_estimates.append({
+                    'cell_type': cell_type,
+                    'alpha_sum': alpha_sum
+                })
+        
+        except Exception as e:
+            print(f"Failed to process {cell_type}: {e}")
+            continue
     
-    # 3. 提取结果 (只取第一行匹配项)
-    result_row = result_rows.iloc[0]
-    
-    # 4. 确定 P 值列名 (Fallback 逻辑)
-    pval_colname = None
-    # 定义优先级：P>|z| > p_adj > pval
-    pval_candidates = ['P>|z|', 'p_adj', 'pval']
-    
-    # 检查哪些候选列存在于当前的 DataFrame 中
-    existing_cols = result_rows.columns  # 在 DataFrame (result_rows) 上检查 .columns 是正确的
-    
-    for col in pval_candidates:
-        if col in existing_cols:
-            pval_colname = col
-            break
-    
-    # 5. 提取 P 值和显著性
-    est_pval = result_row[pval_colname] if pval_colname else np.nan
-    
-    # 由于您的统计输出中已经有了 'significant' 列，我们优先使用它。
-    # 如果没有 'significant' 列，则基于 P 值和 alpha 重新计算。
-    if 'significant' in existing_cols:
-        est_significant = result_row['significant']
-    elif not np.isnan(est_pval):
-        est_significant = (est_pval <= alpha)
-    else:
-        est_significant = False
-    
-    # Coef 列和 direction 列通常存在
-    est_coef = result_row['Coef'] if 'Coef' in existing_cols else np.nan
-    est_direction = result_row['direction'] if 'direction' in existing_cols else 'None'
+    df_coefs = pd.DataFrame(all_coefs)
+    df_alpha_sum = pd.DataFrame(alpha_sum_estimates)
     
     return {
-        'Est_Coef': est_coef,
-        'Est_PValue': est_pval,
-        'Est_Direction': est_direction,
-        'Est_Significant': est_significant
+        'all_coefs': df_coefs,
+        'alpha_sum_df': df_alpha_sum
     }
 
 
-def collect_simulation_results(
-        df_sim: pd.DataFrame,
-        df_true_effect: pd.DataFrame,
-        run_stats_func,  # 传入的统计运行函数，例如 run_Dirichlet_Wald
-        formula: str,
-        **kwargs
-) -> pd.DataFrame:
+def summarize_DM_parameters(collected_results: Dict[str, pd.DataFrame],
+                            alpha=0.05) -> Dict[str, float]:
     """
-    收集单个模拟数据集的统计结果，并与真实效应表合并。
+    从收集的结果中计算最终的模拟参数值。
+    """
+    df_coefs = collected_results['all_coefs']
+    df_alpha_sum = collected_results['alpha_sum_df']
+    
+    if df_alpha_sum.empty:
+        raise ValueError("No alpha_sum estimates available.")
+    
+    # 1. baseline_alpha_scale (alpha_sum)
+    # 使用所有细胞类型估计值的**中位数**作为基线
+    baseline_alpha_scale = df_alpha_sum['alpha_sum'].median()
+    
+    # 2. Effect Sizes (LogFC_Coef)
+    # 仅使用 PValue < 0.05 的显著效应，并计算其绝对值的中位数作为典型幅度。
+    df_signal = df_coefs[df_coefs['PValue'] < alpha].copy()
+    df_signal['Abs_LogFC'] = df_signal['LogFC_Coef'].abs()
+    
+    # 如果显著信号太少，可以使用一个更宽的 PValue 阈值，或仅使用 LogFC > 0.1
+    if df_signal.empty and not df_coefs.empty:
+        df_signal = df_coefs[df_coefs['LogFC_Coef'].abs() > 0.1].copy()
+        df_signal['Abs_LogFC'] = df_signal['LogFC_Coef'].abs()
+    
+    effect_params = {}
+    total_cell_types = df_coefs['cell_type'].nunique()
+    
+    for factor in ['disease', 'tissue']:
+        df_factor = df_signal[df_signal['factor'] == factor]
+        
+        # 效应大小：显著效应的绝对中位数
+        median_effect = df_factor['Abs_LogFC'].median()
+        effect_params[f'{factor}_effect_size'] = median_effect if not pd.isna(median_effect) else 0.0
+        
+        # 受影响比例：用于 inflamed_cell_frac
+        if factor == 'tissue':
+            unique_affected_cts = df_factor['cell_type'].nunique()
+            # 针对 tissue effect，计算受影响细胞类型占总数的比例
+            inflamed_cell_frac = unique_affected_cts / total_cell_types
+            effect_params['inflamed_cell_frac'] = inflamed_cell_frac
+        
+        # NOTE: 交互作用效应 (interaction_effect_size) 需要额外运行 formula="disease * tissue" 并提取交互项。
+        # 由于您的公式是 "disease + C(tissue, ...)"，我们在这里只估计主效应。
+        effect_params['interaction_effect_size'] = 0.0  # 默认为 0，除非您运行包含交互项的模型
+    
+    return {
+        'baseline_alpha_scale': baseline_alpha_scale,
+        **effect_params
+    }
+
+
+def estimate_simulation_parameters(
+        df_real: pd.DataFrame,
+        dm_results: Dict[str, pd.DataFrame],
+        ref_disease: str = "HC",
+        ref_tissue: str = "nif",
+        group_label: str = "sample_id",
+        alpha: float = 0.05,
+        min_effect_size: float = 0.1  # 设定一个最小效应值，避免估计出0
+) -> Dict[str, Any]:
+    """
+    从真实数据和 DM 统计结果中估计模拟所需的参数。
 
     Args:
-        df_sim: 模拟的计数数据 (长格式)。
-        df_true_effect: 模拟的真实效应查找表。
-        run_stats_func: 实际运行统计分析的函数 (如 run_Dirichlet_Wald)。
-        formula: 传递给统计函数的模型公式 (e.g., "disease + C(tissue, ...)")。
+        df_real: 原始的长格式计数数据 (columns: sample_id, cell_type, count, disease, tissue)。
+        dm_results: 由 collect_DM_results 函数返回的字典 (包含 'all_coefs' 和 'alpha_sum_df')。
+        ref_disease: 参考疾病组 (用于计算 baseline_mu)。
+        ref_tissue: 参考组织 (用于计算 baseline_mu)。
+        group_label: 样本ID列名。
+        min_effect_size: 如果计算出的中位数为0或不存在显著结果，使用的默认最小效应值。
 
     Returns:
-        DataFrame, 包含所有细胞类型、所有对比的真实效应和统计估计值。
+        Dict: 包含 simulate_LogisticNormal_hierarchical 所需参数的字典。
     """
     
-    # 获取唯一的细胞类型列表
-    cell_types = df_sim['cell_type'].unique().tolist()
+    print("--- Estimating Simulation Parameters from Real Data ---")
+    params = {}
     
-    # 真实效应表预处理: 确保 True_Significant 基于 alpha
-    df_true_effect['True_Significant'] = (df_true_effect['True_Effect'] != 0)
+    # ==========================================================================
+    # 1. 估计测序深度 (Sequencing Depth)
+    # ==========================================================================
+    # 计算每个样本的总 count
+    sample_depths = df_real.groupby(group_label)['count'].sum()
+    params['total_count_mean'] = int(sample_depths.mean())
+    params['total_count_sd'] = int(sample_depths.std())
+    print(f"Depth: Mean={params['total_count_mean']}, SD={params['total_count_sd']}")
     
-    # 存储所有对比结果
-    all_results = []
+    # ==========================================================================
+    # 2. 估计 Baseline Mu Scale (细胞类型间丰度的差异)
+    # ==========================================================================
+    # 逻辑：
+    # 1. 筛选出参考组样本 (Reference Condition)
+    # 2. 计算各细胞类型的平均比例
+    # 3. 进行 CLR (Centered Log-Ratio) 变换以转换到 Logit 空间
+    # 4. 计算这些值的标准差 (Standard Deviation)
     
-    for ct_name in cell_types:
-        try:
-            # 1. 运行统计模型
-            # 假设 run_stats_func(df_all, cell_type, formula) 返回结构化的结果
-            stats_res = run_stats_func(df_all=df_sim, cell_type=ct_name, formula=formula, **kwargs)
-            contrast_table = stats_res["extra"]["contrast_table"]
+    ref_df = df_real[(df_real['disease'] == ref_disease) & (df_real['tissue'] == ref_tissue)]
+    if ref_df.empty:
+        print(
+            f"Warning: No samples found for Ref Disease '{ref_disease}' and Ref Tissue '{ref_tissue}'. Using all data.")
+        ref_df = df_real
+    
+    # 聚合得到每个细胞类型的总计数
+    ct_counts = ref_df.groupby('cell_type')['count'].sum()
+    # 添加伪计数防止 log(0)
+    ct_counts += 1
+    ct_props = ct_counts / ct_counts.sum()
+    
+    # CLR 变换: log(p) - mean(log(p))
+    log_props = np.log(ct_props)
+    clr_values = log_props - log_props.mean()
+    
+    # 估计 scale
+    params['baseline_mu_scale'] = float(clr_values.std())
+    print(f"Baseline Mu Scale: {params['baseline_mu_scale']:.4f}")
+    
+    # ==========================================================================
+    # 3. 估计 Effect Sizes (从统计结果中)
+    # ==========================================================================
+    df_coefs = dm_results['all_coefs']
+    
+    # 辅助函数：计算显著效应的绝对值中位数
+    def get_median_effect(factor_name, interaction=False):
+        if df_coefs.empty:
+            return 0.0
         
-        except Exception as e:
-            # 如果统计分析失败，记录错误并跳过该细胞类型
-            print(f"Warning: Stats failed for {ct_name}. Error: {e}")
-            continue
+        if interaction:
+            # 简单的关键词匹配来寻找交互项 (假设 row['factor'] 或 contrast_other 中包含交互标识)
+            # 注意：之前的 collect_DM_results 可能需要微调才能明确标记 'interaction'
+            # 这里假设如果 contrast_other 包含 ":" 或 "interaction" 字样
+            subset = df_coefs[df_coefs['factor'] == 'interaction']
+        else:
+            subset = df_coefs[df_coefs['factor'] == factor_name]
         
-        # 2. 提取该细胞类型的真实效应行
-        df_true_ct = df_true_effect[df_true_effect['cell_type'] == ct_name].copy()
+        # 筛选显著结果 (P < 0.05)
+        sig_subset = subset[subset['PValue'] < alpha]
         
-        # 3. 匹配真实效应和统计估计值
-        for _, true_row in df_true_ct.iterrows():
-            contrast_factor = true_row['contrast_factor']
-            
-            # 根据 Fallback 规则确定要查找的 'other' 组名称
-            if contrast_factor == 'tissue':
-                # Rule: contrast_factor=tissue 对应 other='if'
-                target_other = true_row['contrast_group']  # 'if'
-            elif contrast_factor in ('disease', 'interaction'):
-                # Rule: disease/interaction 对应 other=疾病名称
-                # 从 'UC x if' 或 'CD x if' 中提取疾病名称 'UC' 或 'CD'
-                target_other_full = true_row['contrast_group']
-                target_other = target_other_full.split(' ')[0]  # 'CD' 或 'UC'
-            
-            # 提取统计结果
-            est_results = extract_contrast_results(contrast_table, target_other)
-            
-            # 组合结果
-            result_record = {
-                'cell_type': ct_name,
-                'contrast_factor': contrast_factor,
-                'contrast_group': true_row['contrast_group'],
-                'contrast_ref': true_row['contrast_ref'],
-                'True_Effect': true_row['True_Effect'],
-                'True_Direction': true_row['True_Direction'],
-                'True_Significant': true_row['True_Significant'],
-                **est_results
-            }
-            all_results.append(result_record)
+        if sig_subset.empty:
+            print(f"  Note: No significant effects found for {factor_name}. Using default 0.0.")
+            return 0.0
+        
+        median_val = sig_subset['LogFC_Coef'].abs().median()
+        return float(median_val) if not np.isnan(median_val) else 0.0
     
-    return pd.DataFrame(all_results)
+    # 3.1 Disease Effect Size
+    disease_eff = get_median_effect('disease')
+    params['disease_effect_size'] = max(disease_eff, min_effect_size) if disease_eff > 0 else 0.0
+    
+    # 3.2 Tissue Effect Size
+    tissue_eff = get_median_effect('tissue')
+    params['tissue_effect_size'] = max(tissue_eff, min_effect_size) if tissue_eff > 0 else 0.0
+    
+    # 3.3 Interaction Effect Size
+    # 只有当统计模型包含交互项时才能估计，否则默认为 0
+    # 检查 collect_DM_results 是否捕获了交互项
+    interaction_eff = get_median_effect('interaction', interaction=True)
+    if interaction_eff == 0.0:
+        # 如果没检测到显著交互，或者没运行交互模型，这里可以给一个较小的值或者0
+        # 为了模拟真实性，通常交互作用比主效应弱，这里设为0或保留提取值
+        params['interaction_effect_size'] = 0.0
+    else:
+        params['interaction_effect_size'] = interaction_eff
+    
+    # 3.4 Inflamed Cell Fraction (受组织炎症影响的细胞比例)
+    # 计算有多少比例的细胞类型在 Tissue 对比中显著
+    total_cells = df_real['cell_type'].nunique()
+    if not df_coefs.empty:
+        sig_tissue_cells = df_coefs[
+            (df_coefs['factor'] == 'tissue') & (df_coefs['PValue'] < alpha)
+            ]['cell_type'].nunique()
+        params['inflamed_cell_frac'] = sig_tissue_cells / total_cells
+    else:
+        params['inflamed_cell_frac'] = 0.1  # Default
+    
+    print(
+        f"Effects: Disease={params['disease_effect_size']:.3f}, Tissue={params['tissue_effect_size']:.3f}, Interaction={params['interaction_effect_size']:.3f}")
+    print(f"Inflamed Fraction: {params['inflamed_cell_frac']:.2%}")
+    
+    return params
 
 
-def calculate_performance_metrics(df_all_sims: pd.DataFrame, alpha: float = 0.05) -> pd.DataFrame:
+def estimate_CLR_params_hierarchical(
+        df_real: pd.DataFrame,
+        collected_results: dict,
+        disease_ref: str = "HC",
+        tissue_ref: str = "nif",
+        alpha: float = 0.05,
+        min_abundance: float = 0.01,  # 过滤掉占比小于 1% 的细胞，减少采样噪声干扰
+        min_effect_floor: float = 0.1,
+        pseudocount: float = 1.0
+) -> dict:
     """
-    计算基于多次模拟结果的性能指标 (Power, FDR)。
+    从真实数据和分析结果中层级化地估计仿真参数。
+    将噪声分解为 donor_noise_sd 和 sample_noise_sd。
     """
-    # 确保显著性判断是基于 alpha 的 (以防 Est_Significant 列未完全使用 alpha=0.05)
-    df_all_sims['Est_Significant_Alpha'] = (df_all_sims['Est_PValue'] <= alpha)
+    params = {}
+    df_coefs = collected_results.get('all_coefs', pd.DataFrame())
     
-    # 分类为 TP, FP, TN, FN
-    # TP = (df_all_sims['True_Significant']) & (df_all_sims['Est_Significant_Alpha']).sum()
-    # FP = (~df_all_sims['True_Significant']) & (df_all_sims['Est_Significant_Alpha']).sum()
-    # TN = (~df_all_sims['True_Significant']) & (~df_all_sims['Est_Significant_Alpha']).sum()
-    # FN = (df_all_sims['True_Significant']) & (~df_all_sims['Est_Significant_Alpha']).sum()
+    # ==========================================================================
+    # 1. 准备数据与丰度过滤
+    # ==========================================================================
+    # 仅使用高丰度细胞类型来估计噪声，因为低丰度细胞的波动主要是由多项分布采样（Shot Noise）引起的
+    total_counts_per_ct = df_real.groupby('cell_type')['count'].sum()
+    rel_abundance = total_counts_per_ct / total_counts_per_ct.sum()
+    reliable_cts = rel_abundance[rel_abundance > min_abundance].index.tolist()
     
-    # 按对比因素计算指标
-    metrics = df_all_sims.groupby('contrast_factor').apply(lambda g: pd.Series({
-        'TP': ((g['True_Significant']) & (g['Est_Significant_Alpha'])).sum(),
-        'FP': ((~g['True_Significant']) & (g['Est_Significant_Alpha'])).sum(),
-        'FN': ((g['True_Significant']) & (~g['Est_Significant_Alpha'])).sum(),
-    })).reset_index()
+    if len(reliable_cts) < 3:
+        reliable_cts = rel_abundance.nlargest(5).index.tolist()
     
-    metrics['Power'] = metrics['TP'] / (metrics['TP'] + metrics['FN'])
-    metrics['FDR'] = metrics['FP'] / (metrics['TP'] + metrics['FP'])
+    # 提取基线样本 (Baseline: HC + nif)
+    df_baseline = df_real[
+        (df_real['disease'] == disease_ref) & (df_real['tissue'] == tissue_ref)
+        ].copy()
     
-    # 处理除以零的情况
-    metrics['Power'] = metrics['Power'].fillna(0)
-    metrics['FDR'] = metrics['FDR'].fillna(0)
+    # 如果基线样本太少，则使用全体样本进行方差分解（虽然会包含疾病效应，但作为噪声估计仍比随机给值好）
+    use_full_for_noise = len(df_baseline['sample_id'].unique()) < 10
+    df_noise_source = df_real.copy() if use_full_for_noise else df_baseline
     
-    return metrics
+    # 宽表化
+    wide_noise = df_noise_source.pivot_table(
+        index=['donor_id', 'sample_id'],
+        columns='cell_type',
+        values='count',
+        fill_value=0
+    )[reliable_cts]
+    
+    # CLR 转换
+    clr_data = np.log(wide_noise.values + pseudocount)
+    clr_data -= clr_data.mean(axis=1, keepdims=True)
+    df_clr = pd.DataFrame(clr_data, index=wide_noise.index, columns=reliable_cts)
+    
+    # ==========================================================================
+    # 2. 噪声分解 (Variance Component Analysis 简化版)
+    # ==========================================================================
+    # A. 计算供体内方差 (Within-donor variance -> sample_noise)
+    # 计算每个 Donor 内部各样本间的标准差，然后取中位数
+    within_donor_sd = df_clr.groupby('donor_id').std(ddof=1)
+    # 过滤掉只有一个样本的 donor (std 为 NaN)
+    valid_within_sd = within_donor_sd.dropna()
+    
+    if not valid_within_sd.empty:
+        # 使用中位数以抵抗异常值，乘以 0.8 修正系数（去除残余采样噪声）
+        params['sample_noise_sd'] = float(valid_within_sd.median().median()) * 0.8
+    else:
+        params['sample_noise_sd'] = 0.1  # 默认保底
+    
+    # B. 计算供体间方差 (Between-donor variance -> donor_noise)
+    # 先计算每个 Donor 的平均 Logit 表现
+    donor_means = df_clr.groupby('donor_id').mean()
+    if len(donor_means) > 1:
+        # Donor 均值的标准差反映了供体间的系统性偏移
+        params['donor_noise_sd'] = float(donor_means.std().median()) * 0.9
+    else:
+        params['donor_noise_sd'] = 0.2  # 默认保底
+    
+    # ==========================================================================
+    # 3. 估计效应量 (Effect Sizes)
+    # ==========================================================================
+    def get_stat_summary(factor_name):
+        if df_coefs.empty or factor_name not in df_coefs['factor'].values:
+            return min_effect_floor, 0.1
+        
+        subset = df_coefs[df_coefs['factor'] == factor_name]
+        sig_subset = subset[subset['PValue'] < alpha]
+        
+        if sig_subset.empty:
+            return min_effect_floor, 0.05
+        
+        # 效应强度 = 显著项 LogFC 绝对值的中位数 (CLR 空间)
+        effect_size = float(sig_subset['LogFC_Coef'].abs().median())
+        # 影响比例 = 显著细胞类型数 / 总细胞类型数
+        frac = len(sig_subset) / len(subset)
+        
+        return max(effect_size, min_effect_floor), frac
+    
+    params['disease_effect_size'], _ = get_stat_summary('disease')
+    params['tissue_effect_size'], t_frac = get_stat_summary('tissue')
+    params['inflamed_cell_frac'] = max(t_frac, 0.05)
+    
+    # 交互作用估计
+    i_eff, _ = get_stat_summary('interaction')
+    params['interaction_effect_size'] = i_eff if i_eff > min_effect_floor else 0.0
+    
+    # 打印结果供参考
+    print("\n" + "=" * 40)
+    print("   ESTIMATED HIERARCHICAL PARAMETERS")
+    print("=" * 40)
+    for k, v in params.items():
+        print(f"{k:25s}: {v:.4f}")
+    print("=" * 40)
+    
+    return params
+
+###############################################################
+import hashlib
+from pydeseq2.dds import DeseqDataSet
+from pydeseq2.ds import DeseqStats
+
+
+class PyDESeq2Manager:
+    def __init__(self):
+        self.last_data_hash = None
+        self.cached_results = {}  # 存储 {other_label: results_df}
+        self.current_cell_type = None
+        self.ref_label = "HC"
+        self.method_name = "PyDESeq2"
+    
+    def _get_data_hash(self, df_all, formula):
+        # 结合数据特征和公式生成唯一标识
+        # 注意：df_all.values 的哈希可能较慢，这里用 shape 和采样
+        content_hash = hashlib.md5(pd.util.hash_pandas_object(df_all).values).hexdigest()
+        return f"{content_hash}_{formula}"
+    
+    def __call__(self, df_all: pd.DataFrame, cell_type: str, formula: str = "disease",
+                 main_variable: str = None, ref_label: str = "HC",
+                 group_label: str = "sample_id", alpha: float = 0.05, **kwargs) -> Dict[str, Any]:
+        
+        self.ref_label = ref_label
+        current_hash = self._get_data_hash(df_all, formula)
+        
+        # 如果是新数据，触发全量计算
+        if current_hash != self.last_data_hash:
+            self.cached_results = self._run_full_deseq2(
+                df_all, formula, main_variable or formula, ref_label, group_label, alpha
+            )
+            self.last_data_hash = current_hash
+        
+        return self._extract_result(cell_type, alpha)
+    
+    def _run_full_deseq2(self, df_all, formula, main_variable, ref_label, group_label, alpha):
+        # 1. 准备数据
+        design_cols = parse_formula_columns(f"y ~ {formula}")
+        
+        # 聚合数据，确保每个 sample_id 只有一行（避免 MultiIndex 冲突）
+        # 先提取元数据映射表 (sample_id -> disease/tissue 等)
+        meta_map = df_all[[group_label] + design_cols].drop_duplicates().set_index(group_label)
+        
+        # 生成 Count 宽表：只用 group_label 做 index，避免产生 MultiIndex
+        pivot = df_all.pivot_table(
+            index=group_label,
+            columns="cell_type",
+            values="count",
+            aggfunc="sum",
+            fill_value=0
+        )
+        
+        # 严格对齐 Metadata 和 Counts
+        counts_df = pivot.astype(int)  # DESeq2 需要整数
+        metadata = meta_map.loc[counts_df.index].copy()
+        
+        # --- 关键修复：确保 metadata 的所有列都是简单的 object 或 category 类型 ---
+        for col in metadata.columns:
+            metadata[col] = metadata[col].astype(str)
+        
+        # 2. 全量拟合
+        # quiet=True 停止打印所有细胞类型的进度
+        design_factors = design_cols
+        dds = DeseqDataSet(
+            counts=counts_df,
+            metadata=metadata,
+            design_factors=design_factors,
+            refit_cooks=True,
+            quiet=True
+        )
+        dds.deseq2()
+        print(dds.varm["LFC"].columns)
+        
+        # 3. 提取所有对比组
+        # full_cache = {k: {} for k in design_cols} # TODO: 改的兼容一点
+        full_cache = {"disease": {}, "tissue": {}}
+        
+        # --- 提取 Disease 对比 (对比各 labels vs HC) ---
+        clean_main = main_variable  # 假设传入的是干净的 "disease"
+        unique_disease = [l for l in metadata[clean_main].unique() if l != ref_label]
+        for other_label in unique_disease:
+            stat_res = DeseqStats(dds, contrast=[clean_main, other_label, ref_label], quiet=True)
+            stat_res.summary()
+            full_cache["disease"][other_label] = stat_res.results_df
+        
+        # --- 提取 Tissue 对比 (if vs nif) ---
+        # 假设你的 tissue 列名叫 'tissue'，对照组叫 'nif'
+        if 'tissue' in metadata.columns:
+            # 自动寻找非 nif 的 label (通常是 'if')
+            tissue_labels = [l for l in metadata['tissue'].unique() if l != 'nif']
+            for t_label in tissue_labels:
+                stat_res_t = DeseqStats(dds, contrast=['tissue', t_label, 'nif'], quiet=True)
+                stat_res_t.summary()
+                full_cache["tissue"][t_label] = stat_res_t.results_df
+        
+        return full_cache
+    
+    def _extract_result(self, cell_type: str, alpha: float) -> Dict[str, Any]:
+        contrast_rows = []
+        
+        # 遍历所有已缓存的对比组结果
+        for other_label, res_df in self.cached_results["disease"].items():
+            if cell_type in res_df.index:
+                row = res_df.loc[cell_type]
+                
+                # PyDESeq2 使用 log2，为了和 CLR (ln) 对应，建议转换：
+                # ln(x) = log2(x) * ln(2)
+                coef_ln = row["log2FoldChange"] * np.log(2)
+                
+                contrast_rows.append({
+                    "other": other_label,
+                    "ref": self.ref_label,
+                    "Coef.": coef_ln,
+                    "Std.Err.": row["lfcSE"] * np.log(2),
+                    "z": row["stat"],
+                    "P>|z|": row["pvalue"],
+                    "significant": row["pvalue"] < alpha,
+                    "direction": "other_greater" if coef_ln > 0 else "ref_greater"
+                })
+        
+        # 提取 Tissue 的表格 (新增)
+        tissue_rows = []
+        for t_label, res_df in self.cached_results.get("tissue", {}).items():
+            if cell_type in res_df.index:
+                row = res_df.loc[cell_type]
+                lfc_ln = row["log2FoldChange"] * np.log(2)
+                tissue_rows.append({
+                    "other": t_label, "ref": "nif", "Coef.": lfc_ln,
+                    "P>|z|": row["pvalue"], "significant": row["pvalue"] < alpha,
+                    "direction": "other_greater" if lfc_ln > 0 else "ref_greater"
+                })
+        
+        if not contrast_rows:
+            return make_result(self.method_name, cell_type, np.nan)
+        
+        # 构建最终的 contrast_table
+        df_contrast = pd.DataFrame(contrast_rows+tissue_rows).set_index("other")
+        
+        # 选出一个代表性的 P 值和效应值（通常是第一个对比组）
+        main_p = df_contrast["P>|z|"].iloc[0]
+        main_eff = df_contrast["Coef."].iloc[0]
+        
+        # 调用你定义的标准 make_result
+        return make_result(
+            method=self.method_name,
+            cell_type=cell_type,
+            p_value=main_p,
+            effect_size=main_eff,
+            extra={"contrast_table": df_contrast},
+            alpha=alpha
+        )
+
+
+#

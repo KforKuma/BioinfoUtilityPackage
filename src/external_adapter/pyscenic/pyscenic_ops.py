@@ -7,20 +7,26 @@ import os
 import re
 import sys
 from typing import Any, Dict, List
+from typing import Tuple
 
 # =====================
 # 第三方库
 # =====================
 import h5py
+
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
+import seaborn as sns
+
 import numpy as np
 import pandas as pd
-import seaborn as sns
+
 import scipy.spatial.distance as ssd
 import statsmodels.api as sm
 from adjustText import adjust_text
 
+import warnings
+from scipy.spatial.distance import jensenshannon
 # 如果需要，可以以后再启用
 # from MulticoreTSNE import MulticoreTSNE as TSNE
 
@@ -107,7 +113,7 @@ def get_most_var_regulon(
     fit_thr: float = 1.5,
     min_mean_for_fit: float = 0.05,
     return_names: bool = False
-) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd.Series]:
+):
     """
     Identify highly variable regulons using a CV² ~ 1/mean model.
 
@@ -180,21 +186,21 @@ def calc_rss_one_regulon(p_regulon,
     return 1 - np.sqrt(jsd)
 
 @logged
-def calc_rss(auc: pd.DataFrame,
-             cell_annotation: pd.Series,
-             cell_types: list = None) -> pd.DataFrame:
-    import warnings
+def calc_rss(
+    auc: pd.DataFrame,
+    cell_annotation: pd.Series,
+    cell_types: list = None,
+) -> pd.DataFrame:
+    
 
+    # 对齐 annotation 到 AUC 的列顺序
+    cell_annotation = cell_annotation.reindex(auc.columns)
 
     if cell_annotation.isna().any():
-        raise ValueError("NAs in annotation")
+        raise ValueError("cell_annotation index does not match auc columns")
 
-    auc = auc.copy()
-
-    # Remove regulons with all-zero AUC
     auc = auc.loc[auc.sum(axis=1) > 0]
 
-    # Normalize AUC by row
     norm_auc = auc.div(auc.sum(axis=1), axis=0)
 
     if cell_types is None:
@@ -203,8 +209,7 @@ def calc_rss(auc: pd.DataFrame,
     rss_dict = {}
 
     for this_type in cell_types:
-        # 找出该细胞类型的掩码
-        mask = (cell_annotation == this_type).values
+        mask = (cell_annotation.values == this_type)
         if mask.sum() == 0:
             warnings.warn(f"No cells found for cell type '{this_type}', skipping.")
             continue
@@ -216,18 +221,40 @@ def calc_rss(auc: pd.DataFrame,
 
         for reg_name, row in norm_auc.iterrows():
             p_regulon = row.values
-            if np.sum(p_regulon) == 0:
-                rss_scores.append(np.nan)
-                continue
+
             try:
-                jsd = jensenshannon(p_regulon, p_celltype, base=2) ** 2
-                rss = 1 - np.sqrt(jsd)
+                jsd = jensenshannon(p_regulon, p_celltype, base=2)
+                rss = 1 - jsd
                 rss_scores.append(rss)
             except Exception as e:
-                warnings.warn(f"JSD failed for regulon {reg_name}: {e}")
-                rss_scores.append(np.nan)
+                raise RuntimeError(
+                    f"JSD failed for regulon {reg_name}, cell type {this_type}"
+                ) from e
 
         rss_dict[this_type] = pd.Series(rss_scores, index=norm_auc.index)
 
-    rss_df = pd.DataFrame(rss_dict)
-    return rss_df
+    return pd.DataFrame(rss_dict)
+
+def write_scenic_input(adata_subset,save_addr,use_col, file_name):
+    import loompy as lp
+    import numpy as np
+    path = f"{save_addr}/{file_name}"
+    isExist = os.path.exists(path)
+    print(path)
+    print(isExist)
+    if isExist == False:
+        os.makedirs(path)
+        print("The new directory is created!")
+    row_attrs = {"Gene": np.array(adata_subset.var_names),}
+    col_attrs = {"CellID": np.array(adata_subset.obs_names),
+                 "nGene": np.array(np.sum(adata_subset.X.transpose() > 0, axis=0)).flatten(),
+                 "nUMI": np.array(np.sum(adata_subset.X.transpose(), axis=0)).flatten(),}
+    print("Writing into loom.")
+    lp.create(f"{path}/matrix.loom",
+              adata_subset.X.transpose(),
+              row_attrs,
+              col_attrs)
+    print("Writing meta data.")
+    Adata2Csv = adata_subset.obs[["orig.ident", use_col, 'disease']]
+    Adata2Csv.to_csv(f"{path}/meta_data.csv")
+    print("Finished.")
