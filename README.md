@@ -38,7 +38,11 @@ An integrated package mainly devoted for anndata/scanpy workflow, helps you:
 - Adaptors for your AnnData to external function, currently including pyscenic, cellphonedb v5, and xgboost.
 
 
- **Upcoming Plan**
+ **Recent Updates**
+ 
+ Major update in developing differential abundance testing method and data simulation tools with unit of cell tag (rather than neighbors/hypersphere structure).
+
+ CLR-LMM is recomended, but also welcome to test different methods on your (simulative) data.
 
 **Installation Instructions**
 
