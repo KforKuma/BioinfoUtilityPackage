@@ -18,17 +18,24 @@ import logging
 from src.utils.hier_logger import logged
 logger = logging.getLogger(__name__)
 
-def _matplotlib_savefig(fig, abs_file_path, close_after=False):
+
+def _matplotlib_savefig(fig, abs_file_path, close_after=True):
+    """
+    Save a Matplotlib figure safely:
+    - Automatically creates directory
+    - Supports common formats (png, pdf, svg, eps, jpg, tif)
+    - Cleans NaN/Inf in scatter/path collections to avoid PDF errors
+    - Optionally closes the figure after saving
+    """
+    
+    # 1️⃣ 创建目录
     os.makedirs(os.path.dirname(abs_file_path), exist_ok=True)
     
-    # 定义 Matplotlib 常见支持的格式
+    # 2️⃣ 检查文件扩展名
     valid_exts = {".png", ".pdf", ".svg", ".eps", ".jpg", ".jpeg", ".tif", ".tiff"}
-    
-    # 手动拆分文件名并识别扩展
     filename = os.path.basename(abs_file_path)
     dirname = os.path.dirname(abs_file_path)
-    name_parts = filename.rsplit('.', 1)  # 只从右边拆一次
-    
+    name_parts = filename.rsplit('.', 1)  # 只拆一次
     if len(name_parts) == 2 and f".{name_parts[1].lower()}" in valid_exts:
         base = os.path.join(dirname, name_parts[0])
         ext = f".{name_parts[1].lower()}"
@@ -36,17 +43,37 @@ def _matplotlib_savefig(fig, abs_file_path, close_after=False):
         base = os.path.join(dirname, filename)
         ext = ""
     
-    # 根据是否识别到扩展名决定保存方式
+    # 3️⃣ 清理 NaN / Inf（保证 PDF 保存不报错）
+    for coll in fig.findobj(matplotlib.collections.Collection):
+        offsets = coll.get_offsets()
+        if offsets.size > 0:
+            offsets = np.nan_to_num(offsets, nan=0.0, posinf=0.0, neginf=0.0)
+            coll.set_offsets(offsets)
+        # 颜色数组也可能有 NaN/Inf
+        if hasattr(coll, 'get_facecolors'):
+            fc = coll.get_facecolors()
+            if fc.size > 0:
+                fc = np.nan_to_num(fc, nan=0.0, posinf=0.0, neginf=0.0)
+                coll.set_facecolors(fc)
+        if hasattr(coll, 'get_edgecolors'):
+            ec = coll.get_edgecolors()
+            if ec.size > 0:
+                ec = np.nan_to_num(ec, nan=0.0, posinf=0.0, neginf=0.0)
+                coll.set_edgecolors(ec)
+    
+    # 4️⃣ 保存文件
     if ext == "":
-        # 未识别到文件类型 → 默认导出 png 和 pdf
+        # 未指定扩展名 → 默认保存 PNG + PDF
         fig.savefig(base + ".png", bbox_inches="tight", dpi=300)
         fig.savefig(base + ".pdf", bbox_inches="tight", dpi=300)
     else:
-        # 识别到合法扩展名 → 按原路径保存
         fig.savefig(base + ext, bbox_inches="tight", dpi=300)
     
+    # 5️⃣ 可选关闭 figure
     if close_after:
+        import matplotlib.pyplot as plt
         plt.close(fig)
+
 
 def _set_plot_style():
     """
