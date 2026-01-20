@@ -330,74 +330,68 @@ def evaluate_effect_size_scaling(
 
 
 def evaluate_effect_size_scaling_with_raw(
-        scale_factors=[0.1, 0.25, 0.5, 1.0, 1.5, 2.0, 5.0, 10.0],
-        sim_func=None,
-        run_stats_func=None,
-        formula="disease + C(tissue, Treatment(reference='nif'))",
-        base_params=None,
-        **kwargs
+        scale_factors,
+        sim_func,
+        run_stats_func,
+        sim_params,
+        stats_params,
+        formula,
 ):
     """
-    修改版：不仅返回汇总指标，还返回用于 PPV 计算的原始大表。
+    Evaluate statistical performance across effect size scaling factors.
+
+    Returns
+    -------
+    summary_df : pd.DataFrame
+        Power / FDR summary across scales
+    raw_df : pd.DataFrame
+        Per-gene / per-cell raw results for PPV analysis
     """
-    if sim_func is None:
-        raise ValueError("Please provide a simulation function (sim_func).")
     
-    # 1. 准备基础参数
-    if base_params is None:
-        base_params = {
-            "n_donors": 20,
-            "n_samples_per_donor": 4,
-            "inflamed_cell_frac": 0.1,
-            "random_state": 710
-            # 注意：其他参数如 count_df 将通过 kwargs 或外部闭合传递
-        }
+    all_summary_metrics = []
+    all_raw_results = []
     
-    all_summary_metrics = []  # 存储 Power/FDR
-    all_raw_results = []  # 存储 每一个细胞的 LFC 和 真值 (用于 PPV)
+    print(f"Starting Effect Size Scaling Evaluation: {sim_func.__name__}")
     
-    print(f"Starting Layer Evaluation: Sim[{sim_func.__name__}]")
+    if not any("effect_size" in key for key in sim_params.keys()):
+        raise ValueError("Base 'effect_size' must be provided.")
     
     for k in tqdm(scale_factors):
-        # 2. 整体缩放 effect_size
-        current_params = base_params.copy()
+        # 1. 显式缩放 effect sizes
+        current_params = sim_params.copy()
         for key in current_params:
             if "effect_size" in key:
                 current_params[key] *= k
         
-        # 3. 生成模拟数据 (根据函数签名过滤参数)
-        # 此时 kwargs 里应该包含特定的 count_df1
-        combined_params = {**current_params, **kwargs}
+        # 2. 生成模拟数据
+        df_sim, df_true_effect = sim_func(
+            **current_params,
+        )
         
-        sim_filtered_params = filter_kwargs_for_func(sim_func, combined_params)
-        df_sim, df_true_effect = sim_func(**sim_filtered_params)
-        
-        # 4. 运行统计检验并收集原始结果
-        stats_filtered_kwargs = filter_kwargs_for_func(run_stats_func, combined_params)
-        
-        # 这个函数已经返回了包含 True_Effect, coef (Observed LFC), p_val 的表
+        # 3. 运行统计模型
         results_df = collect_simulation_results(
             df_sim=df_sim,
             df_true_effect=df_true_effect,
             run_stats_func=run_stats_func,
             formula=formula,
-            **stats_filtered_kwargs
+            **stats_params
         )
         
-        # 注入当前的 scale 信息，方便后续分析
-        results_df['scale_factor'] = k
+        results_df["scale_factor"] = k
         all_raw_results.append(results_df)
         
-        # 5. 计算汇总性能指标 (Power/FDR)
-        metrics = calculate_performance_metrics(results_df, alpha=0.05)
-        metrics['scale_factor'] = k
+        # 4. 汇总性能指标
+        metrics = calculate_performance_metrics(
+            results_df, alpha=0.05
+        )
+        metrics["scale_factor"] = k
         all_summary_metrics.append(metrics)
     
-    # 6. 合并结果
     final_summary_df = pd.concat(all_summary_metrics, ignore_index=True)
     final_raw_df = pd.concat(all_raw_results, ignore_index=True)
     
     return final_summary_df, final_raw_df
+
 
 
 def filter_kwargs_for_func(func, params_dict):

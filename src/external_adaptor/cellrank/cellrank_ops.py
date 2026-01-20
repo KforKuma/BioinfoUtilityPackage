@@ -81,6 +81,15 @@ def select_cell_specific_genes(
     
     return selected.sort_values("specificity_score", ascending=False)
 
+def align_anndata(adata1,adata2,ident_col="orig.ident"):
+    adata1 = standardize_obs_names(adata1, ident_col)
+    adata2 = standardize_obs_names(adata2, ident_col)
+    common_cells = adata1.obs_names.intersection(adata2.obs_names)
+    print(f"adata1 细胞数: {adata1.n_obs}")
+    print(f"adata2 细胞数: {adata2.n_obs}")
+    print(f"成功对齐的共有细胞数: {len(common_cells)}")
+    return adata1, adata2
+
 
 def standardize_obs_names(adata, ident_col='orig.ident', prefix_mode=True):
     """

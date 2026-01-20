@@ -5,18 +5,22 @@ import os, gc, sys
 import numpy as np
 import pandas as pd
 import inspect
+import anndata
 
 sys.path.append('/public/home/xiongyuehan/data/BioinfoUtilityPackage')
 
 
 from src.core.kdk_methodology import *
-from src.core.kdk_vis import plot_simulation_benchmarks
+from src.core.kdk_vis import plot_simulation_benchmarks,plot_volcano_stratified_label,plot_significance_heatmap
+
 from src.core.kdk_method_utils import *
+from src.core.kdk_vis import plot_ppv_with_counts,plot_multi_layer_ppv
 
 save_addr = "/public/home/xiongyuehan/data/IBD_analysis/output/Step07/Step07c_KDKD_methodology"
 ###########################################################
 # 读取和准备数据
-adata = anndata.read_h5ad("/public/home/xiongyuehan/data/IBD_analysis/output/Step07/Step07_DR_clustered_clean.h5ad")
+# adata = anndata.read_h5ad("/public/home/xiongyuehan/data/IBD_analysis/output/Step06/Step06_final_identified.h5ad")
+adata = anndata.read_h5ad("/public/home/xiongyuehan/data/IBD_analysis/output/Step07/Step07a_Summary/Step07_DR_clustered_clean_20260108.h5ad")
 adata_obs = adata.obs
 del adata; gc.collect()
 ###########################################################
@@ -38,26 +42,30 @@ count_df.tissue[count_df.tissue=="mixed"] = "if"
 count_df.tissue[count_df.tissue=="normal"] = "nif"
 
 test = count_df.groupby("sample_id")['count'].sum()
-mask = test.index[test>1000]
+mask = test.index[test>500]
 count_df = count_df[count_df["sample_id"].isin(mask)]
 ###########################################################
-cell_type_inclusion = {"CD3+CD19-": ['CD4 Th17', 'CD4 Tmem', 'CD4 Tfh', 'CD4 Tmem GZMK+', 'CD4 Tnaive', 'CD4 Treg',
-                                     'CD8 NKT FCGR3A+', 'CD8 Tmem', 'CD8 Tmem GZMK+', 'CD8 Tnaive',
-                                     'CD8 Trm', 'CD8 Trm GZMA+', 'CD8aa IEL',
-                                     'g9d2T cytotoxic', 'gdTnaive', 'gdTrm', 'MAIT TRAV1-2+', 'ILC1'],
+cell_type_inclusion = {"CD3+CD19-": ['CD4 Tnaive', 'CD4 Tmem', 'CD4 Tmem GZMK+', 'CD4 Tfh', 'CD4 Treg', 'CD4 Th17',
+                                     'CD8 Tnaive', 'CD8 Tmem', 'CD8 Tmem GZMK+', 'CD8 Trm', 'CD8 Trm GZMA+',
+                                     'CD8 NKT FCGR3A+', 'CD8aa IEL',
+                                     'gdTnaive', 'g9d2T cytotoxic', 'gdTrm',
+                                      'MAIT TRAV1-2+',
+                                     'Mitotic T cell'],
                        "CD45+": ['B cell IL6+', 'B cell kappa', 'B cell lambda', 'Germinal center B cell',
-                                 'Plasma IgA+', 'Plasma IgG+',
-                                 'Natural killer cell FCGR3A+', 'Natural killer cell NCAM1+', 'ILC3',
+                                 'Plasma IgA+', 'Plasma IgG+', 'Mitotic plasma cell',
+                                 'Natural killer cell FCGR3A+', 'Natural killer cell NCAM1+', 'ILC1', 'ILC3',
                                  'Classical monocyte CD14+', 'Nonclassical monocyte CD16A+', 'cDC1 CLEC9A+',
                                  'cDC2 CD1C+', 'pDC GZMB+',
                                  'Macrophage', 'Macrophage M1', 'Macrophage M2', 'Neutrophil CD16B+',
                                  'Mast cell'],
-                       "CD45-": ['Absorptive colonocyte', 'Absorptive colonocyte Guanylins+', 'Enteroendocrine',
-                                 'Epithelial stem cell OLFM4+LGR5+', 'Goblet', 'Ion-sensing colonocyte BEST4+',
-                                 'Stressed epithelium', 'Tuft cell',
-                                 'Ion-transport colonocyte CFTR+', 'Paneth cell', 'Microfold cell',
-                                 'Mitotic epithelial stem cell',
-                                 'Endothelium', 'Fibroblast', 'Fibroblast ADAMDEC1+']
+                       "CD45-": ['Intestinal stem cell OLFM4+LGR5+',
+                                 'pre-TA cell', 'Transit amplifying cell', 'Quiescent stem cell LEFTY1+',
+                                 'CAAP epithelium HLA-DR+',
+                                 'Goblet', 'Paneth cell', 'Tuft cell', 'Enteroendocrine',
+                                 'Ion-sensing colonocyte BEST4+', 'Microfold cell',
+                                 'Early absorptive progenitor', 'Absorptive colonocyte',
+                                 'Absorptive colonocyte Guanylins+',
+                                 'Endothelium', 'Fibroblast', 'Fibroblast ADAMDEC1+'],
                        }
 
 count_df["presort"].unique()
@@ -165,7 +173,6 @@ est_params = estimate_CLR_params_hierarchical(
 )
 ##############################################################
 # 参数扫描过程
-
 run_PyDESeq2_cached = PyDESeq2Manager()
 run_PyDESeq2_cached.__name__ = "run_PyDESeq2_cached"
 
@@ -231,13 +238,32 @@ for i in count_df_sep_ls:
         coef_threshold=1.0
     )
     results_df_ls.append(results_df)
+    
+
 results_df = pd.concat(results_df_ls, ignore_index=False)
 
-results_df.to_csv(f"{save_addr}/1220_Realdata(separated)_Output.csv")
+results_df.to_csv(f"{save_addr}/0110_Realdata(separated)_Output.csv")
+results_df = pd.read_csv(f"{save_addr}/0110_Realdata(separated)_Output.csv", index_col=0)
 
-plot_volcano_stratified_label(results_df,save_path=f"{save_addr}/1220_Realdata(separated)_volcano_plot.png",
+plot_volcano_stratified_label(results_df,save_path=f"{save_addr}/0110_Realdata(separated)_volcano_plot.png",
                        p_threshold=0.05, coef_threshold=1.0)
-plot_significance_heatmap(results_df,save_path=f"{save_addr}/1220_Realdata(separated)_heatmap.png",
+
+# 1. 重置索引以便分析
+df_check = results_df.reset_index().rename(columns={'index': 'term', 'other': 'term'})
+
+# 2. 找出重复的 (cell_type, term) 组合
+# keep=False 表示标记所有重复行，方便对比差异
+duplicates = df_check[df_check.duplicated(subset=['cell_type', 'term'], keep=False)]
+
+if not duplicates.empty:
+    print(f"发现 {len(duplicates)} 行数据存在重复组合！")
+    # 按 cell_type 和 term 排序，方便肉眼对比到底是哪里不同（比如可能是 Coef 不同）
+    print(duplicates.sort_values(['cell_type', 'term']))
+else:
+    print("没有发现重复组合。")
+
+plot_significance_heatmap(results_df,term_order=['Colitis', 'BD', 'CD', 'UC', 'if'],
+                          save_path=f"{save_addr}/0110_Realdata(separated)_heatmap.png",
                           p_threshold=0.05)
 ##############################################################
 ##############################################################
@@ -255,7 +281,8 @@ for i in count_df_sep_ls:
     est_params = estimate_CLR_params_hierarchical(
         df_real=i,  # 原始计数表
         collected_results=collected_results,  # 统计结果
-        alpha=0.5
+        alpha=0.5,
+        min_abundance=0.02
     )
 
 
@@ -263,12 +290,12 @@ layer1_params = {
     "count_df": count_df_sep_ls[0][(count_df_sep_ls[0]['disease'] == 'HC') & (count_df_sep_ls[0]['tissue'] == 'nif')],
     "n_donors": 20,
     "n_samples_per_donor": 4,
-    "disease_effect_size": 1.1443,
-    "tissue_effect_size": 0.7429,
+    "disease_effect_size": 1.1164,
+    "tissue_effect_size": 0.7385,
     "interaction_effect_size": 0.0,
-    "inflamed_cell_frac": 0.3889,  # 按照我们之前的讨论，调低比例以获得更真实的 FDR
-    "donor_noise_sd": 0.05,  # 新增：供体随机效应 (Logit 空间)
-    "sample_noise_sd": 0.05,  # 对应原 latent_axis_sd，建议设小一点
+    "inflamed_cell_frac": 0.2778,  # 按照我们之前的讨论，调低比例以获得更真实的 FDR
+    "donor_noise_sd": 0.6912,  # 新增：供体随机效应 (Logit 空间)
+    "sample_noise_sd": 0.0801,  # 对应原 latent_axis_sd，建议设小一点
     "disease_levels": ["HC", "BD", "CD", "Colitis", "UC"],
     "tissue_levels": ("nif", "if"),
     "random_state": 710
@@ -278,12 +305,12 @@ layer2_params = {
     "count_df": count_df_sep_ls[0][(count_df_sep_ls[0]['disease'] == 'HC') & (count_df_sep_ls[0]['tissue'] == 'nif')],
     "n_donors": 20,
     "n_samples_per_donor": 4,
-    "disease_effect_size": 1.2800,
-    "tissue_effect_size": 1.0882,
+    "disease_effect_size": 1.4150,
+    "tissue_effect_size": 1.0680,
     "interaction_effect_size": 0.0,
-    "inflamed_cell_frac": 0.1579,  # 按照我们之前的讨论，调低比例以获得更真实的 FDR
-    "donor_noise_sd": 0.05,  # 新增：供体随机效应 (Logit 空间)
-    "sample_noise_sd": 0.05,  # 对应原 latent_axis_sd，建议设小一点
+    "inflamed_cell_frac": 0.7143,  # 按照我们之前的讨论，调低比例以获得更真实的 FDR
+    "donor_noise_sd": 1.0570,  # 新增：供体随机效应 (Logit 空间)
+    "sample_noise_sd": 0.1234,  # 对应原 latent_axis_sd，建议设小一点
     "disease_levels": ["HC", "BD", "CD", "Colitis", "UC"],
     "tissue_levels": ("nif", "if"),
     "random_state": 710
@@ -293,17 +320,20 @@ layer3_params = {
     "count_df": count_df_sep_ls[0][(count_df_sep_ls[0]['disease'] == 'HC') & (count_df_sep_ls[0]['tissue'] == 'nif')],
     "n_donors": 20,
     "n_samples_per_donor": 4,
-    "disease_effect_size": 0.1000,
-    "tissue_effect_size": 0.1000,
+    "disease_effect_size": 1.7299,
+    "tissue_effect_size": 0.7330,
     "interaction_effect_size": 0.0,
-    "inflamed_cell_frac": 0.05,  # 按照我们之前的讨论，调低比例以获得更真实的 FDR
-    "donor_noise_sd": 0.05,  # 新增：供体随机效应 (Logit 空间)
-    "sample_noise_sd": 0.05,  # 对应原 latent_axis_sd，建议设小一点
+    "inflamed_cell_frac": 0.2353,  # 按照我们之前的讨论，调低比例以获得更真实的 FDR
+    "donor_noise_sd": 0.7390,  # 新增：供体随机效应 (Logit 空间)
+    "sample_noise_sd": 0.0727,  # 对应原 latent_axis_sd，建议设小一点
     "disease_levels": ["HC", "BD", "CD", "Colitis", "UC"],
     "tissue_levels": ("nif", "if"),
     "random_state": 710
 }
 all_layer_dict = {"layer1":layer1_params,"layer2":layer2_params,"layer3":layer3_params}
+# all_layer_dict = {"layer2":layer2_params,"layer3":layer3_params}
+
+date="0110"
 for k, v in all_layer_dict.items():
     # 1. 设定主种子，确保实验可重复且无偏
     master_seed = 2025
@@ -331,9 +361,8 @@ for k, v in all_layer_dict.items():
             sim_func=simulate_CLR_resample_data,
             run_stats_func=run_CLR_LMM_with_LFC,
             formula="disease + C(tissue, Treatment(reference='nif'))",
-            base_params=temp_params,
-            main_variable='disease',
-            coef_threshold=0.0
+            sim_params=temp_params,
+            stats_params={"main_variable":'disease','coef_threshold':1.0,"alpha":0.05},
         )
         
         # 添加一个列记录这是第几次循环（可选）
@@ -350,15 +379,12 @@ for k, v in all_layer_dict.items():
     
     print("Combined PPV table generated.")
     print(ppv_table)
-    ppv_table.to_csv(f"{save_addr}/1221_ppv_table_{k}.csv")
-    plot_ppv_with_counts(ppv_table,save_path=f"{save_addr}/1221_{k}_ppv.png")
+    ppv_table.to_csv(f"{save_addr}/{date}_ppv_table_{k}.csv")
+    plot_ppv_with_counts(ppv_table,save_path=f"{save_addr}/{date}_{k}_ppv.png")
     
 pppvls = []
 for i in all_layer_dict.keys():
-    ppv_table = pd.read_csv(f"{save_addr}/1221_ppv_table_{i}.csv",index_col=0)
+    ppv_table = pd.read_csv(f"{save_addr}/{date}_ppv_table_{i}.csv",index_col=0)
     ppv_table["layer"] = i
     pppvls.append(ppv_table)
-
-ppv_combine = pd.concat(pppvls, ignore_index=True)
-
-plot_multi_layer_ppv(ppv_combine,f"{save_addr}/1221_ppv_combine.png",3.0)
+ 

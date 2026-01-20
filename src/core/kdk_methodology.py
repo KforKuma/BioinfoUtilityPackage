@@ -241,7 +241,7 @@ def run_LMM(df_all: pd.DataFrame,
 # Method 3: CLR + LMM √
 # -----------------------
 def run_CLR_LMM(df_all: pd.DataFrame,
-                cell_type: str,
+                cell_type: str | tuple,
                 formula: str = "disease",
                 main_variable: str = None,
                 ref_label: str = "HC",
@@ -254,7 +254,7 @@ def run_CLR_LMM(df_all: pd.DataFrame,
     CLR = ln (细胞比例 xi / 所有细胞比例的几何平均值 gm)
     
     :param df_all:
-    :param cell_type:
+    :param cell_type: 兼容两种输入。因为 CLR 方法对于细胞比例（log ratio diff）处理比较擅长，因此允许输入一个最多有两个值的元组。
     :param alpha:
     :param pseudocount:
     :return: 标准的 make_result 输出，需要详细介绍的是 extra 部分的格式，直接打印出来格式可能会崩掉；
@@ -280,7 +280,19 @@ def run_CLR_LMM(df_all: pd.DataFrame,
     # 输出准备
     extra = {}
     
-    # 参数处理
+    # 输入参数解析
+    if isinstance(cell_type, (tuple, list)):
+        if len(cell_type) != 2:
+            raise ValueError("cell_type as tuple/list must have length 2: (A, B)")
+        cell_A, cell_B = cell_type
+        mode = "log_ratio"
+        cell_type_label = f"{cell_A}_vs_{cell_B}"
+    else:
+        mode = "single"
+        cell_A = cell_type
+        cell_type_label = cell_type
+    
+    # 公式合法性判断
     if "+" in formula:
         if main_variable is None:
             raise KeyError("Main explanatory variable must be specified when formula contains more than one variable.")
@@ -301,6 +313,8 @@ def run_CLR_LMM(df_all: pd.DataFrame,
     # pivot columns are cell types
     counts = pivot.copy()
     
+    
+    
     try:
         # Step 1: CLR 变换
         # 加入 pseudocount
@@ -311,10 +325,16 @@ def run_CLR_LMM(df_all: pd.DataFrame,
         gm = log_counts.mean(axis=1)
         # CLR 转换
         clr = log_counts.subtract(gm, axis=0)
-        # 提取目的细胞亚群的 pd.Series
-        clr_target = clr[cell_type].reset_index()  # has sample_id, donor_id, disease
-        clr_target = clr_target.rename(columns={cell_type: "clr_value"})
         
+        # 提取目的细胞亚群的 pd.Series (response)
+        if mode == "single":
+            clr_target = clr[cell_A].reset_index()
+            clr_target = clr_target.rename(columns={cell_A: "clr_value"})
+        else:
+            # log(A / B) = CLR(A) - CLR(B)
+            clr_target = (clr[cell_A] - clr[cell_B]).reset_index()
+            clr_target = clr_target.rename(columns={0: "clr_value"})
+            
         # Step 2: 拟合线性混合模型 LMM
         # 构建模型
         group = clr_target[group_label]  # 指定随机效应
@@ -349,7 +369,7 @@ def run_CLR_LMM(df_all: pd.DataFrame,
         
         # print("CLR-LMM function run successfully.")
         
-        return make_result("CLR_LMM", cell_type,
+        return make_result("CLR_LMM", cell_type_label,
                             pval if pval is not None else np.nan,
                             effect_size=eff, extra=extra, alpha=alpha)
     

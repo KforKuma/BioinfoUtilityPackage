@@ -192,7 +192,7 @@ class Geneset():
             
             df_sheet_clean = []
             
-            for sig, group in df_s.groupby("signature_id"):
+            for sig, group in df_s.groupby("signature_id", sort=False):
                 if len(group) == 1:
                     # No duplicates
                     df_sheet_clean.append(group.iloc[0])
@@ -242,6 +242,7 @@ class Geneset():
         )
         
         return df_final
+    
     @logged
     def save(self,file_name=None):
         '''
@@ -364,6 +365,7 @@ class Geneset():
         df = self.data
 
         def build_gene_dict(dataframe):
+            dataframe = dataframe.sort_index()
             gene_dict = dict(zip(dataframe['signature_id'], dataframe['genes']))
             return gene_dict
 
@@ -383,7 +385,7 @@ class Geneset():
             df = df[df["signature_id"].isin(signature)]
             if facet_split:
                 # 按 'facet' 列进行分组，并对每组应用 build_gene_dict
-                gene_dicts = {facet: build_gene_dict(sub_df) for facet, sub_df in df.groupby('facet')}
+                gene_dicts = {facet: build_gene_dict(sub_df) for facet, sub_df in df.groupby('facet', sort=False)}
                 self.logger.info("Retrieved genes in signature id '%s'" % signature)
                 return gene_dicts
             else:
@@ -394,7 +396,7 @@ class Geneset():
             self.logger.info("No signature ids given.")
             if facet_split:
                 # 按 'facet' 列进行分组，并对每组应用 build_gene_dict
-                gene_dicts = {facet: build_gene_dict(sub_df) for facet, sub_df in df.groupby('facet')}
+                gene_dicts = {facet: build_gene_dict(sub_df) for facet, sub_df in df.groupby('facet', sort=False)}
                 self.logger.info("Retrieved genes, without signature assigned.")
                 return gene_dicts
             else:

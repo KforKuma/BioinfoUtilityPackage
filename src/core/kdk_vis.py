@@ -5,7 +5,7 @@ from matplotlib.colors import LinearSegmentedColormap
 import seaborn as sns
 
 import os
-
+import re
 from statsmodels.stats.multicomp import pairwise_tukeyhsd
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
@@ -732,4 +732,74 @@ def plot_multi_layer_ppv(df_combined, save_path, max_x=2.0):
     plt.savefig(save_path, dpi=300)
     plt.close()
     print(f"PPV plot saved to {save_path}")
+
+
+def plot_significance_heatmap(df, term_order=None, save_path="significance_heatmap.png", p_threshold=0.05):
+    """
+    图2：显著性热图。
+    - 移除了顶部的空白。
+    - 手动指定了 Term 的展示顺序。
+    - cbar 放在正右侧。
+    """
+    df = df.copy()
+    if "term" not in df.columns:
+        df["term"] = df.index
+    
+    terms = df['term'].unique().tolist()
+    term_set = set(terms)
+    
+    if term_order is not None:
+        existing_terms = [t for t in term_order if t in term_set]
+        remaining_terms = [t for t in terms if t not in existing_terms]
+        final_order = existing_terms + remaining_terms
+    else:
+        final_order = terms
+        
+    df['term'] = pd.Categorical(df['term'], categories=final_order, ordered=True)
+    
+    # 1. 转换数据格式 (pivot 会遵循 categorical 的顺序)
+    pivot_coef = df.pivot(index='cell_type', columns='term', values='Coef.')
+    pivot_pval = df.pivot(index='cell_type', columns='term', values='P>|z|')
+    
+    # 2. 预处理
+    pivot_coef_filled = pivot_coef.fillna(0)
+    pivot_pval_filled = pivot_pval.fillna(1.0)
+    annot_matrix = pivot_pval_filled.applymap(lambda x: "*" if x < p_threshold else "")
+    
+    # 3. 绘图
+    cmap = sns.diverging_palette(240, 10, as_cmap=True)
+    fig_height = len(pivot_coef) * 0.4 + 2
+    
+    # cbar 位置 [左, 下, 宽, 高]
+    custom_cbar_pos = (1.02, 0.2, 0.03, 0.4)
+    
+    g = sns.clustermap(pivot_coef_filled,
+                       annot=annot_matrix.values,
+                       fmt="",
+                       cmap=cmap,
+                       center=0,
+                       row_cluster=True,
+                       col_cluster=False,  # 依然不聚类列
+                       # --- 改进 1：挤掉顶部空白 ---
+                       # 第一个数是左侧行树状图占比，第二个数是上方列树状图占比
+                       dendrogram_ratio=(0.15, 0.02),
+                       linewidths=.5,
+                       figsize=(10, fig_height),
+                       cbar_pos=custom_cbar_pos,
+                       cbar_kws={'label': 'Coefficient (LFC)'},
+                       annot_kws={"size": 14, "va": 'center'})
+    
+    # 4. 细节调整
+    plt.setp(g.ax_heatmap.get_xticklabels(), rotation=45, ha='right')
+    
+    # 因为顶部变窄了，标题位置 y 需要稍微调低或手动控制
+    g.fig.suptitle(f"Cell Type Response (Sorted & Clustered)",
+                   fontsize=14, y=0.98, x=0.55)
+    
+    # 5. 保存
+    # 记得 bbox_inches='tight' 否则右侧 cbar 会看不见
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Significance heatmap saved to {save_path}")
+
 

@@ -15,7 +15,7 @@ import pandas as pd
 
 # 自定义函数
 from src.core.base_anndata_ops import subcluster
-from src.external_adapter.xgboost import xgb_analysis,xgb_vis,xgb_compute
+from src.external_adaptor.xgboost import xgb_analysis,xgb_vis,xgb_compute
 ###################################################
 # 为了清洗获得信息流，建议进行如下设置
 # 1） 确保刷新信息流

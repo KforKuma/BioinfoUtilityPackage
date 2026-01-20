@@ -574,5 +574,20 @@ def print_ref_tab(adata, obs_key, ref_key):
 
 
 
-
+def make_raw_adata(adata):
+    X_raw = adata.raw.X
+    var_raw = adata.raw.var.copy()
+    obs = adata.obs.copy()
+    obsm = adata.obsm.copy()
+    # 新建 AnnData
+    adata_full = anndata.AnnData(
+        X=X_raw.copy(),
+        var=var_raw.copy(),
+        obs=obs,
+        obsm=obsm,
+    )
+    
+    sc.pp.normalize_total(adata_full, target_sum=1e4)
+    sc.pp.log1p(adata_full)
+    return adata_full
 

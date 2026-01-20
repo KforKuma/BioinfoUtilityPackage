@@ -4,7 +4,7 @@ from scipy.cluster.hierarchy import leaves_list, linkage
 from scipy.spatial.distance import pdist
 
 
-from src.external_adapter.cellphonedb.settings import (
+from src.external_adaptor.cellphonedb.settings import (
     DEFAULT_V5_COL_START,
     DEFAULT_COL_START,
     DEFAULT_CLASS_COL,
@@ -15,7 +15,7 @@ from src.external_adapter.cellphonedb.settings import (
     DEFAULT_COLUMNS,
     DEFAULT_CPDB_SEP
 )
-from src.external_adapter.cellphonedb.support import (
+from src.external_adaptor.cellphonedb.support import (
     prep_query_group,split_kwargs
 )
 
@@ -295,33 +295,75 @@ class CellphoneInspector():
         -------
         celltype_pairs = ci.prepare_celltype_pairs(cell_type1="Th17", cell_type2="Epithelium", lock_celltype_direction=True)
 
-        :param cell_type1:
-        :param cell_type2:
-        :param lock_celltype_direction: 是否锁定 cell_type1 和 cell_type2 的左位和右位
-        :return:
+        :param cell_type1: 字符串或列表，支持正则 (e.g., "CD4" 匹配所有含CD4的细胞)
+        :param cell_type2: 字符串或列表，支持正则
+        :param lock_celltype_direction: 是否锁定 cell_type1 在左，cell_type2 在右
+        :return: 匹配到的 self.means.columns 中的列名列表
         '''
-        # 全部的细胞类别
-        labels = list(self.cell_metadata[self.celltype_key].cat.categories)
-        c_type1 = cell_type1 if cell_type1 != "." else labels
-        c_type2 = cell_type2 if cell_type2 != "." else labels
         
+        # --- 改进点 1: 输入类型标准化 (String -> List) ---
+        # 允许用户输入字符串，并在内部统一转为 list 处理
+        if isinstance(cell_type1, str):
+            cell_type1 = [cell_type1]
+        if isinstance(cell_type2, str):
+            cell_type2 = [cell_type2]
         
-        # 生成全部的细胞-细胞对组合
-        ctx = []
-        for i in range(0, len(c_type1)):
-            for cx2 in c_type2:
-                # 无论是否锁定，我们都有c_type1在左边，ctype_2在右边的情况
-                ctx.append("^" + c_type1[i] + DEFAULT_SEP + cx2 + "$")
+        # 获取所有存在的细胞类型的完整名称
+        all_labels = list(self.cell_metadata[self.celltype_key].cat.categories)
+        
+        # --- 改进点 2: 正则匹配展开 ---
+        # 定义一个内部函数，用于根据输入的 pattern 列表，从 all_labels 中找到所有匹配的真实细胞名
+        def resolve_celltypes(patterns, all_candidates):
+            # 如果包含 "."，则代表所有细胞类型
+            if "." in patterns:
+                return all_candidates
+            
+            resolved = set()
+            for pat in patterns:
+                # 使用 re.search 进行部分/正则匹配
+                # 例如输入 "Macrophage" 可以匹配 "Macrophage M1", "Macrophage M2"
+                matched = [lbl for lbl in all_candidates if re.search(pat, lbl)]
+                resolved.update(matched)
+            return sorted(list(resolved))
+        
+        # 解析出真实的细胞名称列表
+        # 例如：输入 "CD8" -> 解析为 ["CD8 Tmem", "CD8 Tnaive", "CD8 Trm", ...]
+        real_c1_list = resolve_celltypes(cell_type1, all_labels)
+        real_c2_list = resolve_celltypes(cell_type2, all_labels)
+        
+        # 如果解析后列表为空，直接返回空，避免后续报错
+        if not real_c1_list or not real_c2_list:
+            return []
+        
+        # --- 改进点 3: 构建配对正则，并保留 Lock 逻辑 ---
+        pair_patterns = []
+        
+        for c1 in real_c1_list:
+            for c2 in real_c2_list:
+                # 使用 re.escape 确保真实的细胞名中如果包含特殊字符（如 +, ., (, ) 等）不会破坏正则结构
+                # 模式 A: c1 在左，c2 在右
+                p1 = re.escape(c1)
+                p2 = re.escape(c2)
+                
+                # 始终添加 cell_type1 >@< cell_type2
+                pair_patterns.append(f"^{p1}{DEFAULT_SEP}{p2}$")
+                
+                # 如果没有锁定方向，则添加反向组合
                 if not lock_celltype_direction:
-                    # 当锁定的时候，不进行交换
-                    ctx.append("^" + cx2 + DEFAULT_SEP + c_type1[i] + "$")
+                    # 避免自我配对时添加两次 (A>@<A)
+                    if c1 != c2:
+                        pair_patterns.append(f"^{p2}{DEFAULT_SEP}{p1}$")
         
-        cq = "|".join(ctx)
+        if not pair_patterns:
+            return []
         
-        # keep cell types
-        # 有 bug，self.mean.columns的格式 "c1>@<c2"，但是 cell_type 是 "g1_c1>@<g1_c2"
+        # 将所有可能的配对组合用 OR (|) 连接
+        cq = "|".join(pair_patterns)
+        
+        # 在 self.means.columns 中查找匹配的列
+        # 这里的 match 是对最终的 'CellA>@<CellB' 字符串进行精确匹配
         ct_columns = [ct for ct in self.means.columns if re.search(cq, ct)]
-
+        
         return ct_columns
     
     
@@ -471,91 +513,131 @@ class CellphoneInspector():
         self.logger.info("filter_and_cluster finished: %d rows, %d cols", means_matx.shape[0], means_matx.shape[1])
     
     @logged
-    def format_outcome(self, exclude_interactions=None):
-        '''
-
-        :param exclude_interactions: list, 包含想要手动排除的作用对，不支持自动检索
-        :return: 返回一个包含主要输出的 pd.Dataframe， 对其进行手动修改也是容易的
-        '''
+    def format_outcome(self, cell_name_list=None, exclude_interactions=None):
         self.logger.info("Formatting output table...")
         colm = "scaled_means" if self.outcome["scale"] else "means"
-
-        df = self.outcome["means_matx"].melt(ignore_index=False).reset_index()  # 宽变长
-
+        alpha = self.outcome["alpha"]
+        
+        # ------------------------------------------------------------------
+        # 1. 宽 → 长
+        # ------------------------------------------------------------------
+        df = self.outcome["means_matx"].melt(ignore_index=False).reset_index()
         df.index = df["index"] + DEFAULT_SEP * 3 + df["variable"]
         df.columns = DEFAULT_COLUMNS + [colm]
-        df.celltype_group = [re.sub(DEFAULT_SEP, "-", c) for c in df.celltype_group]
-
+        
+        df["celltype_group"] = df["celltype_group"].str.replace(
+            DEFAULT_SEP, "-", regex=False
+        )
+        
+        # ------------------------------------------------------------------
+        # 2. pvals / scores（保持你原来的 index 对齐方式）
+        # ------------------------------------------------------------------
         df_pvals = self.outcome["pvals_matx"].melt(ignore_index=False).reset_index()
         df_pvals.index = df_pvals["index"] + DEFAULT_SEP * 3 + df_pvals["variable"]
         df_pvals.columns = DEFAULT_COLUMNS + ["pvals"]
-        # df["pvals"] = df_pvals["pvals"]
-        df["pvals"] = pd.to_numeric(df_pvals["pvals"], errors="coerce") # invalid parsing will be set as NaN
-
-        df_matrix = self.outcome["interact_matx"].melt(ignore_index=False).reset_index()
-        df_matrix.index = df_matrix["index"] + DEFAULT_SEP * 3 + df_matrix["variable"]
-        df_matrix.columns = DEFAULT_COLUMNS + ["scores"]
-        df["scores"] = pd.to_numeric(df_matrix["scores"], errors="coerce")  # invalid parsing will be set as NaN
+        df["pvals"] = pd.to_numeric(df_pvals["pvals"], errors="coerce")
         
-        # set factors
-        df.celltype_group = df.celltype_group.astype("category")
-        df["cell_left"] = [item.split("-")[0] for item in df["celltype_group"]]
-        df["cell_right"] = [item.split("-")[1] for item in df["celltype_group"]]
-
-        # 为了画图做一些设置
-        ## 平均值
-        for i in df.index:
-            if df.at[i, colm] == 0:
-                df.at[i, colm] = np.nan
-
+        df_scores = self.outcome["interact_matx"].melt(ignore_index=False).reset_index()
+        df_scores.index = df_scores["index"] + DEFAULT_SEP * 3 + df_scores["variable"]
+        df_scores.columns = DEFAULT_COLUMNS + ["scores"]
+        df["scores"] = pd.to_numeric(df_scores["scores"], errors="coerce")
+        
+        # ------------------------------------------------------------------
+        # 3. cell_left / cell_right
+        # ------------------------------------------------------------------
+        if cell_name_list is None:
+            df["celltype_group"] = df["celltype_group"].astype("category")
+            split_cells = df["celltype_group"].str.split("-", expand=True)
+            df["cell_left"] = split_cells[0]
+            df["cell_right"] = split_cells[1]
+        elif isinstance(cell_name_list, list) and len(cell_name_list) > 1:
+            df[["cell_left", "cell_right"]] = (
+                df["celltype_group"]
+                .apply(lambda s: split_cellpair(s, cell_name_list))
+                .apply(pd.Series)
+            )
+            # 检查
+            bad = df[df["cell_left"].isna()]
+            if len(bad) > 0:
+                print("Notice! cell_name_list might be incomplete.")
+                print(f"Unparsed rows: {len(bad)}")
+                print(bad["celltype_group"].unique().tolist())
+        
+        else:
+            raise ValueError("cell_name_list is not properply provided, please recheck.")
+        
+        # ------------------------------------------------------------------
+        # 4. 平均值与绘图用列（向量化替代 for-loop）
+        # ------------------------------------------------------------------
+        # colm == 0 → NaN
+        df.loc[df[colm] == 0, colm] = np.nan
+        
         df["x_means"] = df[colm]
         df["y_means"] = df[colm]
-
-        ## 对边缘值进行处理
-        for i in df.index:
-            if df.at[i, "pvals"] < self.outcome["alpha"]:
-                df.at[i, "x_means"] = np.nan
-                if df.at[i, "pvals"] == 0:
-                    df.at[i, "pvals"] = 0.001
-
-            if df.at[i, "pvals"] >= self.outcome["alpha"]:
-                if self.outcome["significance"]:
-                    df.at[i, "y_means"] = np.nan
-            
-            if self.mode == "interaction_scores":
-                if df.at[i, "scores"] < 1:
-                    df.at[i, "x_means"] = np.nan
-            elif self.mode == "cellsign":
-                if df.at[i, "cellsign"] < 1:
-                    df.at[i, "cellsign"] = DEFAULT_CELLSIGN_ALPHA
-
-        # 排除项
+        
+        # pvals == 0 → 0.001（与你原逻辑一致，只在显著时才会触发）
+        df.loc[df["pvals"] == 0, "pvals"] = 0.001
+        
+        # 显著性 mask
+        mask_sig = df["pvals"] < alpha
+        
+        # 显著：x_means = NaN
+        df.loc[mask_sig, "x_means"] = np.nan
+        
+        # 非显著 & significance=True：y_means = NaN
+        if self.outcome["significance"]:
+            df.loc[~mask_sig, "y_means"] = np.nan
+        
+        # mode 特殊逻辑
+        if self.mode == "interaction_scores":
+            df.loc[df["scores"] < 1, "x_means"] = np.nan
+        elif self.mode == "cellsign" and "cellsign" in df.columns:
+            df.loc[df["cellsign"] < 1, "cellsign"] = DEFAULT_CELLSIGN_ALPHA
+        
+        # ------------------------------------------------------------------
+        # 5. 排除 interaction
+        # ------------------------------------------------------------------
         if exclude_interactions is not None:
             if not isinstance(exclude_interactions, list):
                 exclude_interactions = [exclude_interactions]
-            df = df[~df.interaction_group.isin(exclude_interactions)]
+            df = df[~df["interaction_group"].isin(exclude_interactions)]
         else:
             self.logger.info("No outcome excluded.")
-
-        # 补充计算显著性
-        df.pvals = df.pvals.astype(np.float64)
-        df["neglog10p"] = abs(-1 * np.log10(df.pvals))
-        df["neglog10p"] = [0 if x >= 0.05 else j for x, j in zip(df["pvals"], df["neglog10p"])]
-        df["neglog10p"] = df["neglog10p"].astype(float)
-        df["significant"] = ["yes" if x < self.outcome["alpha"] else np.nan for x in df.pvals]
-
-        # 增添 meta 信息列
+        
+        # ------------------------------------------------------------------
+        # 6. 显著性统计（向量化）
+        # ------------------------------------------------------------------
+        df["pvals"] = df["pvals"].astype(float)
+        
+        df["neglog10p"] = -np.log10(df["pvals"])
+        df.loc[df["pvals"] >= 0.05, "neglog10p"] = 0.0
+        
+        df["significant"] = "yes"
+        df.loc[df["pvals"] >= alpha, "significant"] = np.nan
+        
+        # ------------------------------------------------------------------
+        # 7. meta 信息
+        # ------------------------------------------------------------------
         if self.meta is not None:
-            df["is_integrin"] = [self.meta["is_integrin"].get(i, np.nan) for i in df.index]
-            df["directionality"] = [self.meta["directionality"].get(i, np.nan) for i in df.index]
-            df["classification"] = [self.meta["classification"].get(i, np.nan) for i in df.index]
-
+            df["is_integrin"] = df.index.map(
+                lambda x: self.meta["is_integrin"].get(x, np.nan)
+            )
+            df["directionality"] = df.index.map(
+                lambda x: self.meta["directionality"].get(x, np.nan)
+            )
+            df["classification"] = df.index.map(
+                lambda x: self.meta["classification"].get(x, np.nan)
+            )
+        
+        # ------------------------------------------------------------------
+        # 8. log & return
+        # ------------------------------------------------------------------
         if df.shape[0] == 0:
             self.logger.info("The result is empty in this case.")
         else:
             self.logger.info(f"Formatted output: {df.shape} rows × {df.shape[1]} cols")
-
-        self.outcome.update({"final":df})
+        
+        self.outcome.update({"final": df})
 
 def aggregate_cpdb_results(cpdb_outfile_list, meta_list, name_list,gene_query,celltype_pairs,**kwargs):
     '''
@@ -1046,9 +1128,32 @@ def combine_outcome(dfs):
     return df_merge
 
 
+def split_cellpair(s, cell_type_set):
+    """
+    返回 (cell_left, cell_right)
+    如果无法唯一匹配，返回 (None, None)
+    """
+    if pd.isna(s):
+        return None, None
+    
+    # 1️⃣ 只有一个 '-'，直接 split
+    if s.count("-") == 1:
+        return tuple(part.strip() for part in s.split("-", 1))
+    
+    # 2️⃣ 多个 '-'：查表
+    for ct in cell_type_set:
+        if s.startswith(ct + "-"):
+            right = s[len(ct) + 1:]
+            if right in cell_type_set:
+                return ct, right
+    
+    # 兜底失败
+    return None, None
+
+
 def split_and_save(df_merge, save_addr, by_key="classification", zero_omit=True):
     from src.utils.env_utils import sanitize_filename
-    from src.external_adapter.cellphonedb.settings import DEFAULT_SEP
+    from src.external_adaptor.cellphonedb.settings import DEFAULT_SEP
     
     if df_merge[by_key].isna().any():
         raise ValueError(f"Please fix the missing value in column {by_key} before saving.")

@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import inspect
+import re
 
 import scipy.cluster.hierarchy as shc
 from scipy.spatial.distance import pdist
@@ -11,14 +12,14 @@ logger = logging.getLogger(__name__)
 
 @logged
 def prep_query_group(means: pd.DataFrame,
-                     custom_dict: dict[str, list[str]] | None = None) -> dict:
+                     custom_dict: dict[str, list[str]]) -> dict:
     """Return gene family query groups.
 
     Parameters
     ----------
     means : pd.DataFrame
         Means table.
-    custom_dict : dict[str, list[str]] | None, optional
+    custom_dict :
         If provided, will update the query groups with the custom list of genes.
 
     Returns
