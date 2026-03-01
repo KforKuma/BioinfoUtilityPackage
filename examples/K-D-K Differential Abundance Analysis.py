@@ -3,10 +3,8 @@ import numpy as np
 
 import anndata
 
-import os,gc,re
-
-from src.core.kdk_ops import *
-from src.core.kdk_vis import *
+from src.stats.legacy.legacy import *
+from src.stats.plot import *
 
 # 加载文件
 adata = anndata.read_h5ad("/data/HeLab/bio/IBD_analysis/output/Step07/Step07_finalversion_5.h5ad")

@@ -1,7 +1,7 @@
 import anndata
 import pandas as pd
 from src.utils import ObsEditor
-from src.core.base_anndata_ops import subcluster, easy_DEG
+from src.core.adata.ops import subcluster, easy_DEG
 
 adata = anndata.read_h5ad("/data/HeLab/bio/IBD_analysis/output/Step07/Step07_finalversion_5.h5ad")
 scRNA_filtered = ObsEditor(adata) # 起个 R 风格的名字以示区分

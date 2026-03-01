@@ -1,11 +1,10 @@
 # 系统库
-import os, gc, sys
+import sys
 
 # 第三方库
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')  # 将图输出到文件而不是屏幕
-import matplotlib.pyplot as plt
 
 import leidenalg
 import sklearn
@@ -14,8 +13,8 @@ import anndata
 import pandas as pd
 
 # 自定义函数
-from src.core.base_anndata_ops import subcluster
-from src.external_adaptor.xgboost import xgb_analysis,xgb_vis,xgb_compute
+from src.core.adata.ops import subcluster
+
 ###################################################
 # 为了清洗获得信息流，建议进行如下设置
 # 1） 确保刷新信息流
