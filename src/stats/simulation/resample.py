@@ -9,7 +9,7 @@ import pandas as pd
 
 
 from src.utils.hier_logger import logged
-
+from src.stats.simulation.truth_refine import refine_ground_truth_by_observation
 logger = logging.getLogger(__name__)
 
 # -----------------------
@@ -21,7 +21,7 @@ def simulate_CLR_resample_data(
         count_df,
         n_donors=20,
         n_samples_per_donor=4,
-        n_celltypes=100,  # 新增参数，默认设为你想要的 100
+        n_celltypes=30,  # 新增参数，默认设为你想要的 100
         disease_effect_size=0.5,
         tissue_effect_size=0.8,
         interaction_effect_size=0.5,
@@ -159,8 +159,9 @@ def simulate_CLR_resample_data(
     
     df_sim_long['total_count'] = df_sim_long.groupby('sample_id')['count'].transform('sum')
     df_sim_long['prop'] = df_sim_long['count'] / (df_sim_long['total_count'] + 1e-9)
-    
-    return df_sim_long.reset_index(drop=True), df_true_effect
+    df_long = df_sim_long.reset_index(drop=True)
+    df_true_refined = refine_ground_truth_by_observation(df_long, df_true_effect)
+    return df_long, df_true_refined
 
 @logged
 def build_CLR_effects_and_table(
@@ -248,16 +249,25 @@ def build_CLR_effects_and_table(
     
     # 3. Disease x Tissue Interaction
     for other_disease, E_inter_vec in interaction_effects_dict.items():
+        # 获取疾病主效应
+        E_disease_vec = disease_main_effects_dict[other_disease]
         for i, ct_name in enumerate(cell_types):
-            val = E_inter_vec[i]
+            val_disease = E_disease_vec[i]
+            val_tissue = tissue_effect[i]
+            val_inter = E_inter_vec[i]
+            
+            # 叠加
+            total_val = val_disease + val_tissue + val_inter
+            is_truly_sig = (val_disease != 0) or (val_tissue != 0) or (val_inter != 0)
+            
             true_effects.append({
                 'cell_type': ct_name,
                 'contrast_factor': 'interaction',
                 'contrast_group': f'{other_disease} x {other_tissue}',
                 'contrast_ref': f'{ref_disease} x {ref_tissue}',
-                'True_Effect': val,
-                'True_Direction': 'other_greater' if val > 0 else ('ref_greater' if val < 0 else 'None'),
-                'True_Significant': True if val != 0 else False
+                'True_Effect': total_val,
+                'True_Direction': 'other_greater' if total_val > 0 else ('ref_greater' if total_val < 0 else 'None'),
+                'True_Significant': is_truly_sig
             })
     
     return disease_main_effects_dict, tissue_effect, interaction_effects_dict, pd.DataFrame(true_effects)

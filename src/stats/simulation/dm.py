@@ -13,7 +13,7 @@ from scipy.stats import (
 
 
 from src.utils.hier_logger import logged
-
+from src.stats.simulation.truth_refine import refine_ground_truth_by_observation
 logger = logging.getLogger(__name__)
 
 
@@ -35,7 +35,7 @@ def simulate_DM_data(
         sampling_bias_strength: float = 0.0,
         disease_levels: Tuple[str, str, str] = ("HC", "CD", "UC"),
         tissue_levels: Tuple[str, str] = ("nif", "if"),
-        sample_size_range: Tuple[int, int] = (5000, 20000),
+        total_count_mean=2e4,total_count_sd=5e2,min_count=1000,
         donor_noise_sd: float = 0.3,
         random_state: int = 1234
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -91,7 +91,7 @@ def simulate_DM_data(
             alpha = np.maximum(alpha, 1e-6)
             
             # 采样
-            N = rng.integers(*sample_size_range)
+            N =  np.maximum(rng.normal(total_count_mean, total_count_sd), min_count)
             p = rng.dirichlet(alpha)
             counts = rng.multinomial(n=N, pvals=p)
             
@@ -116,7 +116,9 @@ def simulate_DM_data(
     df_long['total_count'] = df_long.groupby('sample_id')['count'].transform('sum')
     df_long['prop'] = df_long['count'] / (df_long['total_count'] + 1e-9)
     
-    return df_long.reset_index(drop=True), df_true_effect
+    df_long = df_long.reset_index(drop=True)
+    df_true_refined = refine_ground_truth_by_observation(df_long,df_true_effect)
+    return df_long, df_true_refined
 
 
 def build_DM_effects_with_main_effect(
@@ -140,7 +142,7 @@ def build_DM_effects_with_main_effect(
     # 疾病主效应细胞集 (Disease Main Effect Cells)
     n_disease_main_cts = max(1, int(n_celltypes * 0.1))
     disease_main_cts_indices = rng.choice(n_celltypes, size=n_disease_main_cts, replace=False)
-    # NEW: 随机分配方向 (+1 或 -1)
+    # 随机分配方向 (+1 或 -1)
     disease_signs = rng.choice([-1, 1], size=n_disease_main_cts)
     
     # 组织/交互作用效应细胞集 (Tissue/Interaction Effect Cells)
@@ -153,10 +155,9 @@ def build_DM_effects_with_main_effect(
     disease_main_effects_dict = {}
     for other_disease in disease_levels[1:]:
         effect_vec = np.zeros(n_celltypes)
-        # 清理逻辑：移除对 len(disease_levels) > 2 的判断
         random_multiplier = rng.uniform(0.8, 1.2)
         
-        # NEW: 应用双向效应
+        # 应用双向效应
         effect_values = disease_effect_size * random_multiplier * disease_signs
         effect_vec[disease_main_cts_indices] = effect_values
         
@@ -166,7 +167,7 @@ def build_DM_effects_with_main_effect(
     tissue_effect_vec = np.zeros(n_celltypes)
     random_multiplier = rng.uniform(0.8, 1.2)  # 同样增加随机性
     
-    # NEW: 应用双向效应
+    #  应用双向效应
     tissue_effect_values = tissue_effect_size * random_multiplier * inflamed_signs
     tissue_effect_vec[inflamed_cts_indices] = tissue_effect_values
     
@@ -176,7 +177,7 @@ def build_DM_effects_with_main_effect(
         effect_vec = np.zeros(n_celltypes)
         random_multiplier = rng.uniform(0.5, 1.5)
         
-        # NEW: 应用双向效应 (使用与 Tissue Main 效应相同的受影响细胞集和方向，但大小独立)
+        # 应用双向效应 (使用与 Tissue Main 效应相同的受影响细胞集和方向，但大小独立)
         interaction_effect_values = interaction_effect_size * random_multiplier * inflamed_signs
         effect_vec[inflamed_cts_indices] = interaction_effect_values
         
@@ -197,7 +198,7 @@ def build_DM_effects_with_main_effect(
                 'contrast_group': other_disease,
                 'contrast_ref': ref_disease,
                 'True_Effect': E_disease,
-                # NEW: E_disease < 0 时为 ref_greater
+                #  E_disease < 0 时为 ref_greater
                 'True_Direction': 'other_greater' if E_disease > 0 else ('ref_greater' if E_disease < 0 else 'None'),
                 'True_Significant': True if E_disease != 0 else False
             })
@@ -211,15 +212,22 @@ def build_DM_effects_with_main_effect(
             'contrast_group': other_tissue,
             'contrast_ref': ref_tissue,
             'True_Effect': E_tissue,
-            # NEW: E_tissue < 0 时为 ref_greater
+            # E_tissue < 0 时为 ref_greater
             'True_Direction': 'other_greater' if E_tissue > 0 else ('ref_greater' if E_tissue < 0 else 'None'),
             'True_Significant': True if E_tissue != 0 else False
         })
     
     # 3. Disease x Tissue Interaction
     for other_disease, E_inter_vec in interaction_effects_dict.items():
+        E_disease_vec = disease_main_effects_dict[other_disease]
         for i, ct_name in enumerate(cell_type_names):
+            E_disease = E_disease_vec[i]
+            E_tissue = tissue_effect_vec[i]
             E_interaction = E_inter_vec[i]
+            
+            # 计算总效应 (Addition 语义)
+            total_effect = E_disease + E_tissue + E_interaction
+            is_truly_sig = (E_disease != 0) or (E_tissue != 0) or (E_interaction != 0)
             
             true_effects.append({
                 'cell_type': ct_name,
@@ -228,9 +236,9 @@ def build_DM_effects_with_main_effect(
                 'contrast_ref': f'{ref_disease} x {ref_tissue}',
                 'True_Effect': E_interaction,
                 # NEW: E_interaction < 0 时为 ref_greater
-                'True_Direction': 'other_greater' if E_interaction > 0 else (
-                    'ref_greater' if E_interaction < 0 else 'None'),
-                'True_Significant': True if E_interaction != 0 else False
+                'True_Direction': 'other_greater' if total_effect > 0 else (
+                    'ref_greater' if total_effect < 0 else 'None'),
+                'True_Significant': is_truly_sig
             })
     
     return disease_main_effects_dict, tissue_effect_vec, interaction_effects_dict, pd.DataFrame(true_effects)

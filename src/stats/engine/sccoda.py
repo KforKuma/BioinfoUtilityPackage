@@ -153,7 +153,7 @@ class ScCodaEngine:
             data_ready = self._prepare_data(df_all, group_label)
             model = ca.CompositionalAnalysis(data_ready, formula=formula,
                                              reference_cell_type="automatic",
-                                             automatic_reference_absence_threshold=0.4)
+                                             automatic_reference_absence_threshold=0.7)
             sim_results = model.sample_hmc(num_results=num_results,num_burnin=num_burnin)
             
             # 提取所有细胞类型并缓存

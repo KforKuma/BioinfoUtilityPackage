@@ -8,7 +8,7 @@ import pandas as pd
 from scipy.special import softmax
 
 from src.utils.hier_logger import logged
-
+from src.stats.simulation.truth_refine import refine_ground_truth_by_observation
 logger = logging.getLogger(__name__)
 
 
@@ -30,9 +30,7 @@ def simulate_LogisticNormal_hierarchical(
         inflamed_cell_frac=0.15,
         donor_noise_sd=0.3,
         sample_noise_sd=0.5,
-        total_count_mean=2e4,
-        total_count_sd=5e3,
-        min_count=1000,
+        total_count_mean=2e4,total_count_sd=5e2,min_count=1000,
         disease_levels=("HC", "CD", "UC"),
         tissue_levels=("nif", "if"),
         random_state=1234
@@ -145,8 +143,9 @@ def simulate_LogisticNormal_hierarchical(
         cell_types, ref_disease, ref_tissue,
         disease_effects, tissue_effect_vec, inter_effects, other_tissue
     )
-    
-    return df_long.reset_index(drop=True), df_true_effect
+    df_long = df_long.reset_index(drop=True)
+    df_true_refined = refine_ground_truth_by_observation(df_long, df_true_effect)
+    return df_long, df_true_refined
 
 @logged
 def build_true_effect_table(cell_types, ref_disease, ref_tissue, disease_effects, tissue_effect,
@@ -172,14 +171,25 @@ def build_true_effect_table(cell_types, ref_disease, ref_tissue, disease_effects
             'True_Significant': True if E_tissue != 0 else False
         })
     for other_disease, E_inter_vec in interaction_effects.items():
+        E_disease_vec = disease_effects[other_disease]
         for i, ct_name in enumerate(cell_types):
+            E_disease = E_disease_vec[i]
+            E_tissue = tissue_effect[i]
             E_interaction = E_inter_vec[i]
+            
+            # 计算总效应
+            total_effect = E_disease + E_tissue + E_interaction
+            # 只要三者有一个注入了，就是显著的（符合 Addition 语义）
+            is_truly_sig = (E_disease != 0) or (E_tissue != 0) or (E_interaction != 0)
+            
             true_effects.append({
-                'cell_type': ct_name, 'contrast_factor': 'interaction',
+                'cell_type': ct_name,
+                'contrast_factor': 'interaction',  # 以后可以考虑统一改为 'addition'
                 'contrast_group': f'{other_disease} x {other_tissue}',
                 'contrast_ref': f'{ref_disease} x {ref_tissue}',
-                'True_Effect': E_interaction, 'True_Direction': 'other_greater' if E_interaction > 0 else (
-                    'ref_greater' if E_interaction < 0 else 'None'),
-                'True_Significant': True if E_interaction != 0 else False
+                'True_Effect': total_effect,
+                'True_Direction': 'other_greater' if total_effect > 0 else (
+                    'ref_greater' if total_effect < 0 else 'None'),
+                'True_Significant': is_truly_sig
             })
     return pd.DataFrame(true_effects)

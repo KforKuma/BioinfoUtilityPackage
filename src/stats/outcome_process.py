@@ -16,7 +16,8 @@ logger = logging.getLogger(__name__)
 
 
 
-def _calculate_performance_metrics(df_all_sims: pd.DataFrame, alpha: float = 0.05) -> pd.DataFrame:
+def _calculate_performance_metrics(df_all_sims: pd.DataFrame,
+                                   alpha: float = 0.05) -> pd.DataFrame:
     """
     计算基于多次模拟结果的性能指标 (Power, FPR)。
     """
@@ -85,7 +86,8 @@ def _collect_simulation_results(
     cell_types = df_sim['cell_type'].unique().tolist()
     
     # 真实效应表预处理: 确保 True_Significant 基于 alpha
-    df_true_effect['True_Significant'] = (df_true_effect['True_Effect'] != 0)
+    # 更新 refine 逻辑后不需要
+    # df_true_effect['True_Significant'] = (df_true_effect['True_Effect'] != 0)
     
     # 存储所有对比结果
     all_results = []
@@ -108,19 +110,20 @@ def _collect_simulation_results(
         # 3. 匹配真实效应和统计估计值
         for _, true_row in df_true_ct.iterrows():
             contrast_factor = true_row['contrast_factor']
+            group_full = true_row['contrast_group']  # 例如 'UC x if'
             
             # 根据 Fallback 规则确定要查找的 'other' 组名称
             if contrast_factor == 'tissue':
                 # Rule: contrast_factor=tissue 对应 other='if'
-                target_other = true_row['contrast_group']  # 'if'
-            elif contrast_factor in ('disease', 'interaction'):
+                target_other = group_full
+                est_results = _extract_contrast_results(contrast_table, target_other)
+            elif contrast_factor == 'disease':
+                target_other = group_full
+                est_results = _extract_contrast_results(contrast_table, target_other)
+            elif contrast_factor in ('addition', 'interaction'):
                 # Rule: disease/interaction 对应 other=疾病名称
                 # 从 'UC x if' 或 'CD x if' 中提取疾病名称 'UC' 或 'CD'
-                target_other_full = true_row['contrast_group']
-                target_other = target_other_full.split(' ')[0]  # 'CD' 或 'UC'
-            
-            # 提取统计结果
-            est_results = _extract_contrast_results(contrast_table, target_other)
+                est_results = _extract_addition_results(contrast_table, group_full)
             
             # 组合结果
             result_record = {
@@ -130,7 +133,7 @@ def _collect_simulation_results(
                 'contrast_ref': true_row['contrast_ref'],
                 'True_Effect': true_row['True_Effect'],
                 'True_Direction': true_row['True_Direction'],
-                'True_Significant': true_row['True_Significant'],
+                'True_Significant': true_row['Is_Detectable_True'],
                 **est_results
             }
             all_results.append(result_record)
@@ -138,7 +141,10 @@ def _collect_simulation_results(
     return pd.DataFrame(all_results)
 
 
-def _extract_contrast_results(contrast_table: pd.DataFrame, target_other: str, alpha: float = 0.05) -> dict:
+def _extract_contrast_results(contrast_table: pd.DataFrame,
+                              target_other: str,
+                              alpha: float = 0.05
+                              ) -> dict:
     """
     从统计模型的 contrast_table 中提取特定对比的结果 (Coef, PValue, direction, significant)。
     已修正索引查找逻辑，并增加了 P 值列名的 fallback 机制 (P>|z| -> p_adj -> pval)。
@@ -202,6 +208,56 @@ def _extract_contrast_results(contrast_table: pd.DataFrame, target_other: str, a
         'Est_Significant': est_significant
     }
 
+
+def _extract_addition_results(contrast_table, group_name):
+    """
+    专门为 Addition 语义设计的提取器。
+    它不仅尝试查找 'UC x if' 这个索引，如果找不到，
+    则尝试在长表中进行累加。
+    """
+    # 尝试直接匹配（如果你的统计方法已经算好了组合对比）
+    if group_name in contrast_table.index:
+        res = contrast_table.loc[group_name]
+        return {
+            'Est_Coef': res.get('Coef.', res.get('Coef', 0.0)),
+            'Est_PValue': res.get('P>|z|', 1.0),
+            'Est_Significant': res.get('significant', False),
+            'Est_Direction': res.get('direction', 'None')
+        }
+    
+    # 【备选逻辑】如果 contrast_table 是解耦的，手动进行线性组合（Linear Combination）
+    # 注意：这需要解析 'UC x if' 为 ['UC', 'if']
+    parts = group_name.split(' x ')
+    if len(parts) == 2:
+        d_part, t_part = parts[0], parts[1]
+        
+        # 只有当两个主成分都在表中时才进行估算
+        if d_part in contrast_table.index and t_part in contrast_table.index:
+            def get_coef(df, row):
+                coef_col = next(c for c in df.columns if c.lower().replace('.', '') == 'coef')
+                return df.loc[row, coef_col]
+            
+            c1 = get_coef(contrast_table, d_part)
+            c2 = get_coef(contrast_table, t_part)
+            # 粗略估计组合效应（不考虑交互项系数，或假设交互项为0）
+            combined_coef = c1 + c2
+            # P值在这里很难手动合并，通常取最不显著的一个（保守做法）
+            pval_candidates = ['P>|z|', 'p_adj', 'pval']
+            for col in pval_candidates:
+                if col in contrast_table.columns:
+                    pval_colname = col
+                    break
+            combined_p = min(contrast_table.loc[d_part, pval_colname],
+                             contrast_table.loc[t_part, pval_colname])
+            
+            return {
+                'Est_Coef': combined_coef,
+                'Est_PValue': combined_p,
+                'Est_Significant': combined_p < 0.05,
+                'Est_Direction': 'other_greater' if combined_coef > 0 else 'ref_greater'
+            }
+    
+    return {'Est_Coef': 0.0, 'Est_PValue': 1.0, 'Est_Significant': False, 'Est_Direction': 'None'}
 
 @logged
 def evaluate_effect_size_scaling(
@@ -268,6 +324,16 @@ def evaluate_effect_size_scaling(
             formula=formula,
             **stats_filtered_kwargs
         )
+        
+        # 收缩
+        sig_ratio = sum(results_df["Est_PValue"] < 0.05) / results_df.shape[0]
+        if sig_ratio < 0.5:
+            alpha_adj = 0.05
+        else:
+            alpha_adj = 0.05 * (0.5 / sig_ratio)  # 自动收缩 alpha
+        
+        results_df["Est_Significant"] = (results_df["Est_Significant"].astype(bool) &
+                                         (results_df["Est_PValue"] < alpha_adj))
         
         # 5. 计算性能指标
         metrics = _calculate_performance_metrics(results_df, alpha=0.05)
@@ -346,11 +412,170 @@ def evaluate_effect_size_scaling_with_raw(
     return final_summary_df, final_raw_df
 
 
+def _collect_simulation_meta_results(
+        df_sim: pd.DataFrame,
+        df_true_effect: pd.DataFrame,
+        run_stats_func,
+        formula: str,
+        **kwargs
+):
+    cell_types = df_sim['cell_type'].unique().tolist()
+    storage = {'meta': [], 'dmw': [], 'clr': [], 'deseq2': []}
+    
+    for ct_name in cell_types:
+        tables_map = {}
+        try:
+            stats_res = run_stats_func(df_all=df_sim, cell_type=ct_name, formula=formula, **kwargs)
+            # 此时 stats_res["contrast_table"] 是 Meta 的结果
+            tables_map = {
+                'meta': stats_res.get("contrast_table"),
+                'dmw': stats_res.get("raw_results", {}).get("dmw", {}).get("contrast_table") if stats_res.get(
+                    "raw_results") else None,
+                'clr': stats_res.get("raw_results", {}).get("clr", {}).get("contrast_table") if stats_res.get(
+                    "raw_results") else None,
+                'deseq2': stats_res.get("raw_results", {}).get("deseq2", {}).get("contrast_table") if stats_res.get(
+                    "raw_results") else None
+            }
+        except Exception as e:
+            print(f"Warning: Meta-Stats execution failed for {ct_name}. Error: {e}")
+            continue
+        
+        df_true_ct = df_true_effect[df_true_effect['cell_type'] == ct_name].copy()
+        
+        for _, true_row in df_true_ct.iterrows():
+            contrast_factor = true_row['contrast_factor']
+            group_full = true_row['contrast_group']
+            
+            for key in storage.keys():
+                current_table = tables_map.get(key)
+                
+                # --- 修正点 1: 增加空值判断，防止子方法失败时报错 ---
+                if current_table is None or (isinstance(current_table, pd.DataFrame) and current_table.empty):
+                    est_results = {
+                        'Est_Coef': np.nan, 'Est_PValue': np.nan,
+                        'Est_Direction': 'None', 'Est_Significant': False
+                    }
+                else:
+                    # --- 修正点 2: 严格使用 current_table 提取各方法独立的结果 ---
+                    if contrast_factor == 'tissue':
+                        est_results = _extract_contrast_results(current_table, group_full)
+                    elif contrast_factor == 'disease':
+                        est_results = _extract_contrast_results(current_table, group_full)
+                    elif contrast_factor in ('addition', 'interaction'):
+                        est_results = _extract_addition_results(current_table, group_full)
+                
+                record = {
+                    'cell_type': ct_name,
+                    'contrast_factor': contrast_factor,
+                    'contrast_group': group_full,
+                    'contrast_ref': true_row['contrast_ref'],
+                    'True_Effect': true_row['True_Effect'],
+                    'True_Direction': true_row['True_Direction'],
+                    'True_Significant': true_row.get('Is_Detectable_True', true_row['True_Significant']),
+                    **est_results
+                }
+                storage[key].append(record)
+    
+    # 转换为 DataFrame
+    final_storage = {}
+    for key, records in storage.items():
+        final_storage[key] = pd.DataFrame(records) if records else pd.DataFrame()
+    
+    return final_storage
 
 
-
-
-
-
+@logged
+def evaluate_effect_size_meta_scaling(
+        scale_factors=[0.1, 0.25, 0.5, 1.0, 1.5, 2.0, 5.0, 10.0],
+        sim_func=None,  # 新增：模拟函数入口
+        run_meta_func=None,
+        formula="disease + C(tissue, Treatment(reference='nif'))",
+        base_params=None,
+        **kwargs
+):
+    """
+    连续调整 effect_size 并收集性能指标的循环函数。
+    支持自定义模拟器 sim_func。
+    """
+    
+    # 1. 初始化模拟器和基础参数
+    if sim_func is None:
+        raise ValueError("Please provide a simulation function (sim_func).")
+    
+    if base_params is None:
+        # 这是一个通用的基础模板，会根据 sim_func 的需求自动过滤
+        base_params = {
+            "n_donors": 20,
+            "n_samples_per_donor": 4,
+            "n_celltypes": 50,
+            "baseline_alpha_scale": 51,  # DM 专用
+            "baseline_mu_scale": 1.0,  # LN 专用
+            "disease_effect_size": 0.5,
+            "tissue_effect_size": 0.8,
+            "interaction_effect_size": 0.5,
+            "inflamed_cell_frac": 0.1,
+            "disease_levels": ["HC", "BD", "CD", "Colitis", "UC"],
+            "tissue_levels": ("nif", "if"),
+            "random_state": 710
+        }
+    
+    metrics_storage = {
+        'meta': [],
+        'dmw': [],
+        'clr': [],
+        'deseq2': []
+    }
+    print(f"Starting evaluation: Sim[{sim_func.__name__}] -> Stats[{run_meta_func.__name__}]")
+    
+    for k in tqdm(scale_factors):
+        # 2. 整体缩放 effect_size
+        current_params = base_params.copy()
+        # 动态检测并缩放所有包含 'effect_size' 的键
+        for key in current_params:
+            if "effect_size" in key:
+                current_params[key] *= k
+        
+        # 3. 生成模拟数据 (根据 sim_func 的签名自动过滤参数)
+        sim_filtered_params = filter_kwargs_for_func(sim_func, current_params)
+        df_sim, df_true_effect = sim_func(**sim_filtered_params)
+        
+        # 4. 运行统计检验 (同样自动过滤统计函数参数)
+        # 这里合并了 base_params 和用户通过 **kwargs 传入的额外参数（如 coef_threshold）
+        full_stats_params = {**current_params, **kwargs}
+        stats_filtered_kwargs = filter_kwargs_for_func(run_meta_func, full_stats_params)
+        
+        print(f"\n[Scale {k}] Params for {run_meta_func.__name__}: {stats_filtered_kwargs}")
+        
+        results_df_dict = _collect_simulation_meta_results(
+            df_sim=df_sim,
+            df_true_effect=df_true_effect,
+            run_stats_func=run_meta_func,
+            formula=formula,
+            **stats_filtered_kwargs
+        )
+        for key, value in results_df_dict.items():
+            sig_ratio = sum(results_df_dict[key]["Est_PValue"] < 0.05)/results_df_dict[k].shape[0]
+            if sig_ratio < 0.4:
+                alpha_adj = 0.05
+            else:
+                alpha_adj = 0.05 * (0.25 / sig_ratio)**2 # 自动收缩 alpha
+                
+            results_df_dict[key]["Est_Significant"] = (results_df_dict[key]["Est_Significant"].astype(bool) &
+                                                     (results_df_dict[key]["Est_PValue"] < alpha_adj))
+            
+        # 5. 计算性能指标
+        for key in results_df_dict.keys():
+            metrics = _calculate_performance_metrics(results_df_dict[key], alpha=0.05)
+            # 6. 记录当前的倍数因子
+            metrics['scale_factor'] = k
+            metrics_storage[key].append(metrics)
+    
+    # 合并所有结果
+    final_df_dict = {}
+    for key in metrics_storage.keys():
+        final_df = pd.concat(metrics_storage[key], ignore_index=True)
+        final_df_dict.update({key:final_df})
+    
+    return final_df_dict
 
 

@@ -74,12 +74,13 @@ common_kwargs = dict(
 
 # 循环测试
 for func in [run_ANOVA_naive,run_ANOVA_transformed,
-             run_CLR_LMM,run_CLR_LMM_with_LFC,run_pCLR_LMM,run_pCLR_OLS,
-             run_PyDESeq2,
+             run_CLR_LMM,run_CLR_LMM_with_LFC,#run_pCLR_LMM,run_pCLR_OLS,
+             # run_PyDESeq2,
              run_Dirichlet_Wald,run_Dirichlet_Multinomial_Wald,
              run_DKD,
              run_LMM,
-             run_Perm_Mixed]:
+             # run_Perm_Mixed
+             ]:
     res = call_with_compatible_args(func,cell_type=count_df1.cell_type.iloc[10], **common_kwargs)
     res_ls.append(res)
     print(res["contrast_table"])
@@ -131,14 +132,73 @@ for n,i in enumerate(res_ls):
 df_long, df_true_effect = simulate_DM_data(**param_dict['dm_params'],random_state=2026)
 print(df_long.shape)
 print(df_true_effect['True_Significant'].value_counts())
+print(df_true_effect['Is_Detectable_True'].value_counts())
+df_true_effect[df_true_effect['Is_Detectable_True']==True]
 
+df_true_effect[
+    (df_true_effect["Is_Detectable_True"] == False) &
+    (df_true_effect["contrast_factor"] == "interaction")
+]
+
+
+max(df_true_effect[
+    (df_true_effect["Is_Detectable_True"] == False) &
+    (df_true_effect["contrast_factor"] == "interaction")
+]["Observed_LFC"])
+# df_true_effect[df_true_effect["Observed_LFC"]>3]
 
 df_long, df_true_effect = simulate_LogisticNormal_hierarchical(**param_dict['ln_params'],random_state=2026)
 print(df_long.shape)
 print(df_true_effect['True_Significant'].value_counts())
+print(df_true_effect['Is_Detectable_True'].value_counts())
+df_true_effect[df_true_effect['Is_Detectable_True']==True]
+
+max(df_true_effect[
+    (df_true_effect["Is_Detectable_True"] == False) &
+    (df_true_effect["contrast_factor"] == "interaction")
+]["Observed_LFC"])
 
 df_long, df_true_effect = simulate_CLR_resample_data(**param_dict['resample_params'],
                                                      count_df=count_df1,random_state=2026)
 print(df_long.shape)
 print(df_true_effect['True_Significant'].value_counts())
-print(df_true_effect[df_true_effect['True_Significant']==True])
+# print(df_true_effect[df_true_effect['True_Significant']==True])
+# print(df_long[df_long["count"]==0])
+print(df_true_effect['Is_Detectable_True'].value_counts())
+df_true_effect[df_true_effect['Is_Detectable_True']==True]
+
+df_true_effect[
+    (df_true_effect["Is_Detectable_True"] == False) &
+    (df_true_effect["True_Significant"] == True)
+]
+
+df_true_effect[df_true_effect["Is_Detectable_True"] == True]
+
+# 测试 tri_anchor 的逻辑
+res_dw = call_with_compatible_args(run_Dirichlet_Wald,
+                                    cell_type=count_df1.cell_type.iloc[1],  **common_kwargs)
+print(res_dw['contrast_table'])
+
+res_dmw = call_with_compatible_args(run_Dirichlet_Multinomial_Wald,
+                                    cell_type=count_df1.cell_type.iloc[10],  **common_kwargs)
+print(res_dmw['contrast_table'])
+
+
+res_clr = call_with_compatible_args(run_CLR_LMM,
+                                    cell_type=count_df1.cell_type.iloc[1],  **common_kwargs)
+print(res_clr['contrast_table'])
+
+res_dsq = call_with_compatible_args(run_PyDESeq2,
+                                    cell_type=count_df1.cell_type.iloc[1],  **common_kwargs)
+print(res_dsq['contrast_table'])
+
+res_meta = call_with_compatible_args(run_Meta_Ensemble,
+                                    cell_type=count_df1.cell_type.iloc[1],  **common_kwargs)
+print(res_meta['contrast_table'])
+
+
+
+res_meta["raw_results"]["dmw"]['contrast_table']
+res_meta["raw_results"]["clr"]['contrast_table']
+res_meta["raw_results"]["deseq2"]['contrast_table']
+

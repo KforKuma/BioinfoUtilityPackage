@@ -108,9 +108,14 @@ def estimate_DM_parameters(collected_results: Dict[str, pd.DataFrame], alpha=0.0
     
     # 3. 最终安全性检查：如果 interaction_effect_size 还是太小（比如 < 0.1）
     # 在进行方法学评估（Power Test）时，通常需要一个手动注入的“最小可探测值”
-    if interaction_cell_frac < 0.1:
-        # 提示：这代表原始数据完全没有交互趋势，设置一个小波动
-        params['interaction_effect_size'] = 0.5
-        pass
+    if interaction_cell_frac < 0.1:  # 如果原始数据基本没检测到交互项
+        # 选择 A: 取消
+        params['interaction_effect_size'] = 0.0
+        print("Warning: No interaction signal detected in seed data. Skipping interaction simulation.")
+    else:
+        # 选择 B: 动态注入
+        # 交互项强度不应低于主效应的某个比例，否则在数学上就被噪声盖过了
+        min_detectable = params.get('disease_effect_size', 0.5) * 0.3  # 至少是主效应的 30%
+        params['interaction_effect_size'] = max(params.get('interaction_effect_size', 0), min_detectable)
     
     return params

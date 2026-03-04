@@ -73,7 +73,7 @@ def get_all_simulation_params(df_real, collected_results, ref_disease="HC", ref_
     # 计算测序深度 (Total Count) 统计量
     sample_sums = df_real.groupby('sample_id')['count'].sum()
     total_count_mean = float(sample_sums.mean())
-    total_count_sd = float(sample_sums.std())
+    total_count_sd = min(float(sample_sums.std()),500)
     
     # D. 深度对齐各个字典
     n_samples_per_donor = n_samples_per_donor = int(
@@ -104,8 +104,8 @@ def get_all_simulation_params(df_real, collected_results, ref_disease="HC", ref_
         "n_celltypes": len(df_real['cell_type'].unique()),
         "donor_noise_sd": refined_noise["donor_noise_sd"],
         "sampling_bias_strength": 0.0,  # 逻辑对齐：DM 波动由 alpha_sum 承担
-        "sample_size_range": (max(int(total_count_mean - total_count_sd),1000),
-                              max(int(total_count_mean + total_count_sd),3000)),
+        "total_count_mean": total_count_mean,
+        "total_count_sd": total_count_sd,
         'disease_levels': collected_results['disease_levels']
     })
     

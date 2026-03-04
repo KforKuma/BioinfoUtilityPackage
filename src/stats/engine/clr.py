@@ -292,7 +292,7 @@ def run_pCLR_OLS(
                 'pval': res['P>|t|'],
                 'significant': res['P>|t|'] < alpha,
                 'prop_diff': m_other - m_ref,
-                'Coef': res['Coef.'],
+                'Coef.': res['Coef.'],
                 'Std.Err': res['Std.Err.'],
                 'z': res['t'],
                 'direction': 'other_greater' if res['Coef.'] > 0 else 'ref_greater'
@@ -420,7 +420,7 @@ def run_pCLR_LMM(
                 'pval': res['P>|z|'],
                 'significant': res['P>|z|'] < alpha,
                 'prop_diff': m_other - m_ref,
-                'Coef': res['Coef.'],
+                'Coef.': res['Coef.'],
                 'Std.Err': res['Std.Err.'],
                 'z': res['z'],
                 'direction': 'other_greater' if res['Coef.'] > 0 else 'ref_greater'

@@ -200,7 +200,7 @@ def run_Dirichlet_Wald(df_all: pd.DataFrame,
     # --- 关键：定义标准空表模板，防止 downstream AttributeError ---
     empty_contrast = pd.DataFrame(columns=[
         'ref', 'mean_ref', 'mean_other', 'prop_diff',
-        'Coef', 'Std.Err', 'z', 'P>|z|', 'direction', 'significant'
+        'Coef.', 'Std.Err', 'z', 'P>|z|', 'direction', 'significant'
     ])
     empty_contrast.index.name = 'other'
     
@@ -218,8 +218,9 @@ def run_Dirichlet_Wald(df_all: pd.DataFrame,
                            extra={"error": f"target cell_type '{cell_type}' not found"},
                            alpha=alpha)
     
-    # 逻辑：确保对比的目标 cell_type 不是最后一个作为 Dirichlet 的 Reference
-    if celltypes[-1] == cell_type:
+    
+    best_ref = find_stable_reference(wide)
+    if celltypes[-1] != best_ref:
         if K < 2:
             return make_result(method=method_name, cell_type=cell_type,
                                p_val=1.0, p_type='Minimal',
@@ -227,7 +228,7 @@ def run_Dirichlet_Wald(df_all: pd.DataFrame,
                                extra={"error": "Need >=2 cell types"},
                                alpha=alpha)
         # 交换最后两个，确保 target 不在末尾
-        cols = celltypes[:-2] + [celltypes[-1], celltypes[-2]]
+        cols = [c for c in celltypes if c != best_ref] + [best_ref]
         wide = wide[cols]
         celltypes = list(wide.columns)
     
@@ -331,24 +332,40 @@ def run_Dirichlet_Wald(df_all: pd.DataFrame,
             
             contrast_rows.append({
                 "ref": ref_label, "other": g, "mean_ref": p_ref, "mean_other": p_g,
-                "prop_diff": p_g - p_ref, "Coef": delta, "Std.Err": se, "z": z, "P>|z|": pval,
+                "prop_diff": p_g - p_ref, "Coef.": delta, "Std.Err": se, "z": z, "P>|z|": pval,
                 "direction": "other_greater" if (p_g - p_ref) > 0 else "ref_greater",
                 "significant": pval < alpha
             })
         
         # 处理其他协变量 (tissue等)
         for j, term in enumerate(colnames):
-            if term.startswith('C(') or term.startswith('tissue'):
-                coef = float(params[k_index, j])
-                idx = k_index * P + j
-                se_j = np.sqrt(max(abs(hess_inv[idx, idx]), 1e-12))
-                pval_j = float(2.0 * (1.0 - norm.cdf(abs(coef / se_j))))
-                
-                contrast_rows.append({
-                    "ref": "base", "other": term, "Coef": coef, "Std.Err": se_j,
-                    "P>|z|": pval_j, "significant": pval_j < alpha,
-                    "direction": "other_greater" if coef > 0 else "ref_greater"
-                })
+            if term == 'Intercept' or term.startswith('disease'):
+                continue  # 已经在前面的 groups 循环中处理过了
+            
+            coef = float(params[k_index, j])
+            idx = k_index * P + j
+            se_j = np.sqrt(max(abs(hess_inv[idx, idx]), 1e-12))
+            z_j = coef / se_j  # 计算 z 值
+            pval_j = float(2.0 * (1.0 - norm.cdf(abs(z_j))))
+            
+            # 使用与 DMW 版本一致的解析逻辑
+            if term.startswith('C('):
+                # 调用解析函数（确保该函数已在 support.py 中定义并导入）
+                name_split = split_C_terms(pd.Series(term))
+                ref_name = name_split.iloc[0, 0]
+                other_name = name_split.iloc[0, 1]
+            else:
+                ref_name = "base"
+                other_name = term
+            
+            contrast_rows.append({
+                "ref": ref_name,
+                "other": other_name,
+                "mean_ref": np.nan, "mean_other": np.nan, "prop_diff": np.nan,  # 保持列对齐
+                "Coef": coef, "Std.Err": se_j, "z": z_j,
+                "P>|z|": pval_j, "significant": pval_j < alpha,
+                "direction": "other_greater" if coef > 0 else "ref_greater"
+            })
         
         contrast_table = pd.DataFrame(contrast_rows).set_index("other")
         extra.update({"groups": groups})
@@ -384,7 +401,7 @@ def run_Dirichlet_Wald_with_LFC(
         ct = res['contrast_table']
         # 重新定义显著性：P值达标且效应量足够大
         # 注意：这里的 Coef 在 CLR/Dirichlet 空间通常对应 Log 尺度的变化
-        ct['significant'] = (ct['P>|z|'] < res['alpha']) & (ct['Coef'].abs() > coef_threshold)
+        ct['significant'] = (ct['P>|z|'] < res['alpha']) & (ct['Coef.'].abs() > coef_threshold)
         
         # 同步更新顶级指标
         res['significant'] = any(ct['significant'])
@@ -538,13 +555,13 @@ def run_Dirichlet_Multinomial_Wald(df_all: pd.DataFrame,
             se_j = float(np.sqrt(abs(var_j)))
             z_j = coef / (se_j + 1e-12)
             p_j = float(2.0 * (1.0 - norm.cdf(abs(z_j))))
-            fe_rows.append({"term": term, "Coef": coef, "Std.Err": se_j, "z": z_j, "P>|z|": p_j,
+            fe_rows.append({"term": term, "Coef.": coef, "Std.Err": se_j, "z": z_j, "P>|z|": p_j,
                             "2.5%": coef - 1.96 * se_j, "97.5%": coef + 1.96 * se_j})
         
         # Append Alpha Sum Stats
         idx_alpha = nparam_total - 1
         se_alpha = float(np.sqrt(abs(hess_inv[idx_alpha, idx_alpha])))
-        fe_rows.append({"term": "Log_Alpha_Sum", "Coef": params_full[-1], "Std.Err": se_alpha,
+        fe_rows.append({"term": "Log_Alpha_Sum", "Coef.": params_full[-1], "Std.Err": se_alpha,
                         "z": np.nan, "P>|z|": np.nan})
         fixed_effect_df = pd.DataFrame(fe_rows).set_index("term")
         
@@ -581,7 +598,7 @@ def run_Dirichlet_Multinomial_Wald(df_all: pd.DataFrame,
             
             contrast_rows.append({
                 "ref": ref_label, "other": g, "mean_ref": mean_props[ref_label], "mean_other": mean_props[g],
-                "prop_diff": pred_prop_g - pred_prop_ref, "Coef": delta, "Std.Err": se, "z": z, "P>|z|": pval,
+                "prop_diff": pred_prop_g - pred_prop_ref, "Coef.": delta, "Std.Err": se, "z": z, "P>|z|": pval,
                 "direction": "ref_greater" if (pred_prop_g - pred_prop_ref) < 0 else "other_greater",
                 "significant": bool(pval < alpha)
             })
@@ -592,8 +609,8 @@ def run_Dirichlet_Multinomial_Wald(df_all: pd.DataFrame,
                 name_split = split_C_terms(pd.Series(term))
                 contrast_rows.append({
                     "ref": name_split.iloc[0, 0], "other": name_split.iloc[0, 1],
-                    "Coef": row["Coef"], "Std.Err": row["Std.Err"], "z": row["z"], "P>|z|": row["P>|z|"],
-                    "direction": "ref_greater" if row["Coef"] < 0 else "other_greater",
+                    "Coef": row["Coef."], "Std.Err": row["Std.Err"], "z": row["z"], "P>|z|": row["P>|z|"],
+                    "direction": "ref_greater" if row["Coef."] < 0 else "other_greater",
                     "significant": row["P>|z|"] < 0.05
                 })
         contrast_table = pd.DataFrame(contrast_rows).set_index("other")
@@ -610,3 +627,20 @@ def run_Dirichlet_Multinomial_Wald(df_all: pd.DataFrame,
                        p_val=contrast_table['P>|z|'].min(), p_type='Minimal',
                        contrast_table=contrast_table,
                        extra=extra)
+
+
+def find_stable_reference(wide_df):
+    """
+    寻找最适合作为基准的细胞：1. 非零值最多; 2. 丰度适中; 3. CV(变异系数)最低
+    """
+    presence = (wide_df > 0).sum(axis=0)
+    # 优先选在所有样本中都存在的细胞
+    full_presence_cts = presence[presence == len(wide_df)].index
+    
+    if len(full_presence_cts) > 0:
+        # 在全存在的细胞中选变异系数最小的
+        cv = wide_df[full_presence_cts].std() / wide_df[full_presence_cts].mean()
+        return cv.idxmin()
+    else:
+        # 如果没有全存在的，选出现频率最高的 5 个中丰度最大的
+        return presence.idxmax()
