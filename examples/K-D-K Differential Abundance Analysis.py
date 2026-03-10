@@ -4,7 +4,7 @@ import numpy as np
 import anndata
 
 from src.stats.legacy.legacy import *
-from src.stats.plot import *
+from src.stats.plot.plot import *
 
 # 加载文件
 adata = anndata.read_h5ad("/data/HeLab/bio/IBD_analysis/output/Step07/Step07_finalversion_5.h5ad")

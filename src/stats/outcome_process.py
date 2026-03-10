@@ -42,7 +42,8 @@ def _calculate_performance_metrics(df_all_sims: pd.DataFrame,
     # 分类为 TP, FP, TN, FN
     # TP = (df_all_sims['True_Significant']) & (df_all_sims['Est_Significant_Alpha']).sum()
     # FP = (~df_all_sims['True_Significant']) & (df_all_sims['Est_Significant_Alpha']).sum()
-    # TN = (~df_all_sims['True_Significant']) & (~df_all_sims['Est_Significant_Alpha']).sum()
+    # TN = (~df_all_sims['True_Significant']) & (~df_all
+    # _sims['Est_Significant_Alpha']).sum()
     # FN = (df_all_sims['True_Significant']) & (~df_all_sims['Est_Significant_Alpha']).sum()
     
     # 按对比因素计算指标
@@ -397,6 +398,18 @@ def evaluate_effect_size_scaling_with_raw(
         )
         
         results_df["scale_factor"] = k
+        
+        # 收缩
+        sig_ratio = sum(results_df["Est_PValue"] < 0.05) / results_df.shape[0]
+        if sig_ratio < 0.5:
+            alpha_adj = 0.05
+        else:
+            alpha_adj = 0.05 * (0.5 / sig_ratio)  # 自动收缩 alpha
+        
+        results_df["Est_Significant"] = (results_df["Est_Significant"].astype(bool) &
+                                         (results_df["Est_PValue"] < alpha_adj))
+        
+        
         all_raw_results.append(results_df)
         
         # 4. 汇总性能指标
@@ -554,7 +567,7 @@ def evaluate_effect_size_meta_scaling(
             **stats_filtered_kwargs
         )
         for key, value in results_df_dict.items():
-            sig_ratio = sum(results_df_dict[key]["Est_PValue"] < 0.05)/results_df_dict[k].shape[0]
+            sig_ratio = sum(results_df_dict[key]["Est_PValue"] < 0.05)/results_df_dict[key].shape[0]
             if sig_ratio < 0.4:
                 alpha_adj = 0.05
             else:

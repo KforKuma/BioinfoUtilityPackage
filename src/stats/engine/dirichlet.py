@@ -362,7 +362,7 @@ def run_Dirichlet_Wald(df_all: pd.DataFrame,
                 "ref": ref_name,
                 "other": other_name,
                 "mean_ref": np.nan, "mean_other": np.nan, "prop_diff": np.nan,  # 保持列对齐
-                "Coef": coef, "Std.Err": se_j, "z": z_j,
+                "Coef.": coef, "Std.Err": se_j, "z": z_j,
                 "P>|z|": pval_j, "significant": pval_j < alpha,
                 "direction": "other_greater" if coef > 0 else "ref_greater"
             })
@@ -609,7 +609,7 @@ def run_Dirichlet_Multinomial_Wald(df_all: pd.DataFrame,
                 name_split = split_C_terms(pd.Series(term))
                 contrast_rows.append({
                     "ref": name_split.iloc[0, 0], "other": name_split.iloc[0, 1],
-                    "Coef": row["Coef."], "Std.Err": row["Std.Err"], "z": row["z"], "P>|z|": row["P>|z|"],
+                    "Coef.": row["Coef."], "Std.Err": row["Std.Err"], "z": row["z"], "P>|z|": row["P>|z|"],
                     "direction": "ref_greater" if row["Coef."] < 0 else "other_greater",
                     "significant": row["P>|z|"] < 0.05
                 })

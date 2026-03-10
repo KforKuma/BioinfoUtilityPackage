@@ -3,8 +3,8 @@ from .meta_engine import *
 from .simulation import * # 导出模拟相关函数
 from .evaluation import *
 
-from .plot import *
-from .plotting_helpers import *
+from src.stats.plot.plot import *
+from src.stats.plot.plotting_helpers import *
 from .real_data_analysis import *
 from .outcome_process import *
 

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from typing import Dict, Any
-import re
+from typing import Any
 import inspect
 
 import numpy as np
 import pandas as pd
 
-from src.stats.plot import *
+from src.stats.plot.plot import *
 
 import logging
 from src.utils.hier_logger import logged

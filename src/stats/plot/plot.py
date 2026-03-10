@@ -12,15 +12,16 @@ from sklearn.cluster import KMeans
 from scipy.spatial import ConvexHull
 from scipy.stats import f_oneway
 
-
 from src.core.plot.basics import matplotlib_savefig
 
 import logging
 from src.utils.hier_logger import logged
+
 logger = logging.getLogger(__name__)
 
+
 @logged
-def plot_residual_boxplot(df, subset,group_key, sample_key,save_addr):
+def plot_residual_boxplot(df, subset, group_key, sample_key, save_addr):
     fig, ax = plt.subplots(figsize=(6, 4))
     
     # 绘制 boxplot
@@ -35,13 +36,13 @@ def plot_residual_boxplot(df, subset,group_key, sample_key,save_addr):
     abs_fig_path = os.path.join(save_addr, f"{subset}_Residual_Boxplot(by_{sample_key})")
     matplotlib_savefig(fig, abs_fig_path)
 
+
 @logged
 def plot_confidence_interval(posthoc_df, subset, save_addr, method):
     # 按 meandiff 由大到小排序
     tukey_df = posthoc_df.sort_values("meandiff", ascending=False).reset_index(drop=True)
     
     fig, ax = plt.subplots(figsize=(8, len(tukey_df) * 0.5))
-    
     
     # Tukey 显著
     color_tukey = 'firebrick'
@@ -98,6 +99,7 @@ def plot_confidence_interval(posthoc_df, subset, save_addr, method):
     # 保存
     abs_fig_path = os.path.join(save_addr, f"{subset}_{method}_ConfidenceInterval")
     matplotlib_savefig(fig, abs_fig_path)
+
 
 @logged
 def plot_better_residual(df, tukey_df, group_key, subset, save_addr):
@@ -163,6 +165,7 @@ def plot_better_residual(df, tukey_df, group_key, subset, save_addr):
     abs_fig_path = os.path.join(save_addr, f"{subset}_Residual_Barplot")
     matplotlib_savefig(fig, abs_fig_path)
 
+
 @logged
 def plot_de_novo_ANOVA(df, group_key, subset, save_addr):
     # 计算 mean 和 sem
@@ -224,6 +227,7 @@ def plot_de_novo_ANOVA(df, group_key, subset, save_addr):
     # 保存并关闭图
     abs_fig_path = os.path.join(save_addr, f"{subset}_Average_Percentage_Barplot")
     matplotlib_savefig(fig, abs_fig_path)
+
 
 @logged
 def perform_pca_clustering_on_residuals(df, group_key, save_addr, auto_choose_k_func):
@@ -350,6 +354,7 @@ def plot_residual_heatmap(resid_scaled_row, subset_to_cluster, save_addr):
     abs_fig_path = os.path.join(save_addr, "All_Subset_Residual_Heatmap")
     matplotlib_savefig(fig, abs_fig_path)
 
+
 @logged
 def plot_simulation_benchmarks(df, save_addr, filename):
     # 设置风格
@@ -389,70 +394,51 @@ def plot_simulation_benchmarks(df, save_addr, filename):
     fig.tight_layout()
     matplotlib_savefig(fig, abs_file_path)
 
+
 @logged
 def plot_simulation_with_inflam_prop(df_plot_combined, save_addr, filename):
     sns.set_theme(style="whitegrid")
-    
     abs_file_path = os.path.join(save_addr, filename)
     
     # 2. 准备数据：只筛选你关注的 scale_factor 范围
-    
-    plot_df = df_plot_combined[df_plot_combined['scale_factor'] <= 2.0].copy()
-    
+    plot_df = df_plot_combined[df_plot_combined['scale_factor'] <= 5.0].copy()
     plot_df['inflam'] = plot_df['inflam'].astype(str)  # 转为分类变量便于上色
     
     # 3. 创建画布：一列看 Power，一列看 FPR
-    
     fig, axes = plt.subplots(1, 2, figsize=(16, 6), sharex=True)
     
     # 绘制 Power 随 scale_factor 的变化
     
     sns.lineplot(
-        
         data=plot_df,
-        
         x='scale_factor', y='Power',
-        
-        hue='inflam', style='method',
-        
+        hue='inflam', style='Method',
         marker='o', ax=axes[0]
-    
     )
     
     axes[0].set_title('Power Comparison by Inflam Fraction', fontsize=14)
-    
     axes[0].set_ylim(0, 1.05)
     
     # 绘制 FPR 随 scale_factor 的变化
-    
     sns.lineplot(
-        
         data=plot_df,
-        
         x='scale_factor', y='FPR',
-        
-        hue='inflam', style='method',
-        
+        hue='inflam', style='Method',
         marker='s', ax=axes[1]
-    
     )
     
     axes[1].set_title('FPR Comparison by Inflam Fraction', fontsize=14)
-    
     axes[1].axhline(0.05, ls='--', color='red', alpha=0.5)  # 设定显著性阈值线
-    
     axes[1].set_ylim(0, 1.05)
     
     fig.tight_layout()
-    
     matplotlib_savefig(fig, abs_file_path)
+
 
 @logged
 def plot_simulation_with_inflam_marginalized(
-        df_plot_combined, save_addr, filename, max_scale_factor=2.0, ci_type="se"
+        df_plot_combined, save_addr, filename, max_scale_factor=5.0, ci_type="se"
 ):
-    
-    
     sns.set_theme(style="whitegrid")
     abs_file_path = os.path.join(save_addr, filename)
     
@@ -474,7 +460,7 @@ def plot_simulation_with_inflam_marginalized(
     sns.lineplot(
         data=plot_df,
         x="scale_factor", y="Power",
-        hue="method",
+        hue="Method",
         marker="o",
         errorbar=eb,
         ax=axes[0]
@@ -486,7 +472,7 @@ def plot_simulation_with_inflam_marginalized(
     sns.lineplot(
         data=plot_df,
         x="scale_factor", y="FPR",
-        hue="method",
+        hue="Method",
         marker="s",
         errorbar=eb,
         ax=axes[1],
@@ -501,8 +487,8 @@ def plot_simulation_with_inflam_marginalized(
     fig.tight_layout()
     
     # 保存
-    fig.savefig(abs_file_path, dpi=300, bbox_inches='tight')
-    plt.close(fig)
+    matplotlib_savefig(fig, abs_file_path)
+
 
 @logged
 def plot_volcano_stratified_label(df, save_path="volcano_stratified.png", p_threshold=0.05, coef_threshold=1.0, bins=6):
@@ -582,8 +568,9 @@ def plot_volcano_stratified_label(df, save_path="volcano_stratified.png", p_thre
     plt.close()
     print(f"Stratified volcano plot fixed and saved to {save_path}")
 
+
 @logged
-def plot_ppv_with_counts(ppv_table, save_path="ppv_trend_analysis.png"):
+def plot_ppv_with_counts(ppv_table, save_addr, filename):
     # 设置风格
     sns.set_theme(style="white", rc={"axes.facecolor": (0, 0, 0, 0)})
     fig, ax1 = plt.subplots(figsize=(14, 7))
@@ -625,7 +612,12 @@ def plot_ppv_with_counts(ppv_table, save_path="ppv_trend_analysis.png"):
     ax2.set_ylim(0, 1.05)  # 概率在 0-1 之间
     
     # --- 3. 细节装饰 ---
-    plt.title('PPV Reliability Analysis vs. Estimated Effect Size', fontsize=15, pad=20)
+    ax1.set_title(
+        'PPV Reliability Analysis vs. Estimated Effect Size',
+        fontsize=15,
+        pad=20
+    )
+    
     ax1.grid(axis='y', linestyle='--', alpha=0.3)
     
     # 合并图例
@@ -633,47 +625,46 @@ def plot_ppv_with_counts(ppv_table, save_path="ppv_trend_analysis.png"):
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2,
                loc='upper left', frameon=True,
-               facecolor='white',     # 强制背景为白色
-            framealpha=0.9,        # 设置微透明，可以看到背后的网格线
-           edgecolor='#dcdde1',   # 浅色边框，不突兀
-           fontsize=10)
+               facecolor='white',  # 强制背景为白色
+               framealpha=0.9,  # 设置微透明，可以看到背后的网格线
+               edgecolor='#dcdde1',  # 浅色边框，不突兀
+               fontsize=10)
     
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300)
-    plt.close()
-    print(f"PPV plot saved to {save_path}")
+    fig.tight_layout()
+    
+    os.makedirs(save_addr, exist_ok=True)
+    abs_file_path = os.path.join(save_addr, filename)
+    matplotlib_savefig(fig, abs_file_path)
+
 
 @logged
-def plot_multi_layer_ppv(df_combined, save_path, max_x=2.0):
-    
-    
+def plot_multi_layer_ppv(df_combined, save_addr, filename, max_x=2.0):
     df = df_combined.copy()
     
-    # 1. 提取 Bin 中点用于数值对齐
+    # 1. 提取 Bin 中点
     def get_bin_midpoint(bin_str):
-        if pd.isna(bin_str): return np.nan
-        # 提取括号内的数字，如 "(0.3, 0.4]" -> [0.3, 0.4]
+        if pd.isna(bin_str):
+            return np.nan
         nums = re.findall(r"[-+]?\d*\.\d+|\d+", str(bin_str))
         if len(nums) == 2:
             return (float(nums[0]) + float(nums[1])) / 2
         return np.nan
     
-    df['bin_midpoint'] = df['coef_bin'].apply(get_bin_midpoint)
+    df['bin_midpoint'] = df['coef_bin'].apply(get_bin_midpoint).astype(float)
     
     # 2. 筛选 X 轴范围
     plot_df = df[df['bin_midpoint'] <= max_x].copy()
     
-    plt.figure(figsize=(13, 7))
     sns.set_theme(style="whitegrid")
+    fig, ax = plt.subplots(figsize=(13, 7))
     
     layers = plot_df['layer'].unique()
     palette = sns.color_palette("Set1", n_colors=len(layers))
     
     for i, layer in enumerate(layers):
-        # --- 修复点：使用 plot_df['layer'] 进行筛选 ---
+        
         layer_df = plot_df[plot_df['layer'] == layer].sort_values('bin_midpoint')
         
-        # 排除 total_pred_pos 为 0 的无效点，避免拟合时 y 轴全是 0 的干扰
         valid_data = layer_df[layer_df['total_pred_pos'] > 0]
         if valid_data.empty:
             continue
@@ -681,55 +672,92 @@ def plot_multi_layer_ppv(df_combined, save_path, max_x=2.0):
         x = valid_data['bin_midpoint']
         y = valid_data['PPV']
         
-        # --- A. 绘制原始数据点（半透明，突出趋势） ---
-        plt.plot(x, y, marker='o', label=f"{layer} (Raw)",
-                 color=palette[i], linewidth=1, alpha=0.4, markersize=5)
+        # A. 原始数据
+        ax.plot(
+            x, y,
+            marker='o',
+            label=f"{layer} (Raw)",
+            color=palette[i],
+            linewidth=1,
+            alpha=0.4,
+            markersize=5
+        )
         
-        # --- B. 绘制 3 次多项式拟合曲线 ---
+        # B. 3次多项式拟合
         if len(x) > 3:
             try:
                 z = np.polyfit(x, y, 3)
                 p = np.poly1d(z)
                 
-                # 生成平滑的拟合线
                 x_smooth = np.linspace(x.min(), x.max(), 100)
                 y_smooth = p(x_smooth)
-                
-                # 约束拟合线在 [0, 1] 概率范围内，避免绘图溢出
                 y_smooth = np.clip(y_smooth, 0, 1)
                 
-                plt.plot(x_smooth, y_smooth, linestyle='--',
-                         color=palette[i], linewidth=2.5, alpha=1.0,
-                         label=f"{layer} Trend")
+                ax.plot(
+                    x_smooth,
+                    y_smooth,
+                    linestyle='--',
+                    color=palette[i],
+                    linewidth=2.5,
+                    alpha=1.0,
+                    label=f"{layer} Trend"
+                )
+            
             except np.RankWarning:
-                # 如果点太少无法拟合，则跳过拟合部分
                 pass
     
-    # 3. 细节处理
-    plt.xlim(0, max_x)
-    plt.ylim(-0.05, 1.05)
+    # 3. 轴范围
+    ax.set_xlim(0, max_x)
+    ax.set_ylim(-0.05, 1.05)
     
-    # 标注 1.5 之后为数据稀疏区
-    plt.axvline(x=1.5, color='gray', linestyle=':', alpha=0.4)
-    plt.fill_between([1.5, max_x], -0.05, 1.05, color='gray', alpha=0.03)
-    plt.text(1.52, 0.95, "Sparse Data Region", color='gray', fontsize=10, fontstyle='italic')
+    # 稀疏区域标注
+    ax.axvline(x=1.5, color='gray', linestyle=':', alpha=0.4)
     
-    # 4. 图例美化 (白色背景，无深色阴影)
-    plt.legend(bbox_to_anchor=(1.02, 1), loc='upper left',
-               frameon=True, facecolor='white', edgecolor='lightgray',
-               fontsize=10, title="Methods & Fitting")
+    ax.fill_between(
+        [1.5, max_x],
+        -0.05,
+        1.05,
+        color='gray',
+        alpha=0.03
+    )
     
-    plt.title(f"PPV Reliability Analysis (Layer Comparison up to {max_x})", fontsize=15, pad=20)
-    plt.xlabel("Estimated Coefficient Size (|Est_Coef|)", fontsize=12)
-    plt.ylabel("Positive Predictive Value (PPV)", fontsize=12)
+    ax.text(
+        1.52,
+        0.95,
+        "Sparse Data Region",
+        color='gray',
+        fontsize=10,
+        fontstyle='italic'
+    )
     
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300)
-    plt.close()
-    print(f"PPV plot saved to {save_path}")
+    # 4. 图例
+    ax.legend(
+        bbox_to_anchor=(1.02, 1),
+        loc='upper left',
+        frameon=True,
+        facecolor='white',
+        edgecolor='lightgray',
+        fontsize=10,
+        title="Methods & Fitting"
+    )
+    
+    ax.set_title(
+        f"PPV Reliability Analysis (Layer Comparison up to {max_x})",
+        fontsize=15,
+        pad=20
+    )
+    
+    ax.set_xlabel("Estimated Coefficient Size (|Est_Coef|)", fontsize=12)
+    ax.set_ylabel("Positive Predictive Value (PPV)", fontsize=12)
+    
+    fig.tight_layout()
+    os.makedirs(save_addr, exist_ok=True)
+    abs_file_path = os.path.join(save_addr, filename)
+    matplotlib_savefig(fig, abs_file_path)
+
 
 @logged
-def plot_significance_heatmap(df, term_order=None, save_path="significance_heatmap.png", p_threshold=0.05):
+def plot_significance_heatmap(df, term_order=None, save_path="significance_heatmap.png", p_threshold=None):
     """
     图2：显著性热图。
     - 移除了顶部的空白。
@@ -749,17 +777,21 @@ def plot_significance_heatmap(df, term_order=None, save_path="significance_heatm
         final_order = existing_terms + remaining_terms
     else:
         final_order = terms
-        
+    
     df['term'] = pd.Categorical(df['term'], categories=final_order, ordered=True)
     
     # 1. 转换数据格式 (pivot 会遵循 categorical 的顺序)
     pivot_coef = df.pivot(index='cell_type', columns='term', values='Coef.')
     pivot_pval = df.pivot(index='cell_type', columns='term', values='P>|z|')
+    pivot_sig = df.pivot(index='cell_type', columns='term', values='significant')
     
     # 2. 预处理
     pivot_coef_filled = pivot_coef.fillna(0)
     pivot_pval_filled = pivot_pval.fillna(1.0)
-    annot_matrix = pivot_pval_filled.applymap(lambda x: "*" if x < p_threshold else "")
+    if p_threshold is not None:
+        annot_matrix = pivot_pval_filled.applymap(lambda x: "*" if x < p_threshold else "")
+    else:
+        annot_matrix = pivot_sig.applymap(lambda x: "*" if x == True else "")
     
     # 3. 绘图
     cmap = sns.diverging_palette(240, 10, as_cmap=True)
@@ -798,7 +830,6 @@ def plot_significance_heatmap(df, term_order=None, save_path="significance_heatm
     print(f"Significance heatmap saved to {save_path}")
 
 
-
 @logged
 def plot_ratio_scatter(
         plot_df, save_addr, filename,
@@ -810,7 +841,6 @@ def plot_ratio_scatter(
         jitter=0.15,
         figsize=(6, 4)
 ):
-    
     A, B = cell_pair
     
     # ------------------------

@@ -1,6 +1,3 @@
-import os
-import logging
-
 import numpy as np
 import pandas as pd
 import scipy.stats as stats
@@ -12,7 +9,6 @@ from scikit_posthocs import posthoc_dunn
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 
-from src.stats.plot import *
 from src.stats.support import *
 from src.utils.warnings import deprecated
 from src.utils.hier_logger import logged

@@ -76,7 +76,7 @@ def get_all_simulation_params(df_real, collected_results, ref_disease="HC", ref_
     total_count_sd = min(float(sample_sums.std()),500)
     
     # D. 深度对齐各个字典
-    n_samples_per_donor = n_samples_per_donor = int(
+    n_samples_per_donor = int(
         np.ceil(df_real["sample_id"].nunique() / df_real["donor_id"].nunique()))
     
     # 1. 对齐 LogisticNormal 参数

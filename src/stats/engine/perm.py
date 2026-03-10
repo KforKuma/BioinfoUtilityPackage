@@ -26,7 +26,7 @@ def _pairwise_perm_vs_ref(df: pd.DataFrame,
                           ref_label: str,
                           group_label: str,
                           pairwise_level: str,
-                          n_perm: int = 2000,
+                          n_perm: int = 500,
                           alpha: float = 0.05,
                           seed: int = 0):
     '''

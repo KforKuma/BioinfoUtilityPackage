@@ -20,12 +20,12 @@ sys.stdout.reconfigure(encoding='utf-8')
 
 ####################################
 sys.path.append('/public/home/xiongyuehan/data/BioinfoUtilityPackage')
-os.chdir("/public/home/xiongyuehan/data/IBD_analysis/output/Step08_Cellphonedb")
+os.chdir("/public/home/xiongyuehan/data/IBD_analysis/output/Step09_Cellphonedb")
 
-# save_addr="/public/home/xiongyuehan/data/IBD_analysis/output/Step08_Cellphonedb/251203"
-# save_addr="/public/home/xiongyuehan/data/IBD_analysis/output/Step08_Cellphonedb/251204"
-# save_addr="/public/home/xiongyuehan/data/IBD_analysis/output/Step08_Cellphonedb/260106"
-save_addr = "/public/home/xiongyuehan/data/IBD_analysis/output/Step08_Cellphonedb/260125"
+# save_addr="/public/home/xiongyuehan/data/IBD_analysis/output/Step09_Cellphonedb/251203"
+# save_addr="/public/home/xiongyuehan/data/IBD_analysis/output/Step09_Cellphonedb/251204"
+# save_addr="/public/home/xiongyuehan/data/IBD_analysis/output/Step09_Cellphonedb/260106"
+save_addr = "/public/home/xiongyuehan/data/IBD_analysis/output/Step09_Cellphonedb/260125"
 
 os.makedirs(save_addr, exist_ok=True)
 ##——————————————————————————————————————————————————————————————————————————
@@ -50,7 +50,7 @@ adata = anndata.read_h5ad(
 print(adata.shape)
 
 gc.collect()
-# adata.write_h5ad("/data/HeLab/bio/IBD_analysis/output/Step08_Cellphonedb/Step08_0625.h5ad")
+# adata.write_h5ad("/data/HeLab/bio/IBD_analysis/output/Step09_Cellphonedb/Step08_0625.h5ad")
 adata.write_h5ad(f"{save_addr}/Step08_for_CPDB_0125.h5ad")
 gc.collect()
 ##——————————————————————————————————————————————————————————————————————————
@@ -213,10 +213,10 @@ for disease in adata.obs.disease.unique():
     print("GC collected.\n")
 
 # 检查一下数据
-test_dir = "/public/home/xiongyuehan/data/IBD_analysis/output/Step08_Cellphonedb/251204/Step08_for_CPDB.h5ad"
+test_dir = "/public/home/xiongyuehan/data/IBD_analysis/output/Step09_Cellphonedb/251204/Step08_for_CPDB.h5ad"
 adata_test = anndata.read_h5ad(test_dir)
 
-test_meta = "/public/home/xiongyuehan/data/IBD_analysis/output/Step08_Cellphonedb/251203/input/Colitis/metadata.tsv"
+test_meta = "/public/home/xiongyuehan/data/IBD_analysis/output/Step09_Cellphonedb/251203/input/Colitis/metadata.tsv"
 meta_df = pd.read_csv(test_meta, sep="\t")  # sep="\t" 表示制表符分隔
 
 ##——————————————————————————————————————————————————————————————————————————
@@ -229,7 +229,7 @@ for disease in ["HC", "UC", "BD", "CD", "Colitis"]:
     print(f"💠 Processing disease: {disease}")
     print("=" * 80)
     
-    data_path = "/public/home/xiongyuehan/data/IBD_analysis/output/Step08_Cellphonedb/260125/input"
+    data_path = "/public/home/xiongyuehan/data/IBD_analysis/output/Step09_Cellphonedb/260125/input"
     
     subsetfile_path = f"{data_path}/{disease}/Subset.h5ad"
     counts_file_path = f"{data_path}/{disease}/counts.h5ad"
@@ -279,7 +279,7 @@ for disease in ["HC", "UC", "BD", "CD", "Colitis"]:
 for disease in ["HC", "UC", "BD", "CD", "Colitis"]:
     print(disease)
     test = pd.read_csv(
-        f"/public/home/xiongyuehan/data/IBD_analysis/output/Step08_Cellphonedb/260106/input/{disease}/metadata.tsv",
+        f"/public/home/xiongyuehan/data/IBD_analysis/output/Step09_Cellphonedb/260106/input/{disease}/metadata.tsv",
         sep='\t')
     print(test.cell_type.unique())
     print()

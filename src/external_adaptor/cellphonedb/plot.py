@@ -423,262 +423,239 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+from matplotlib.path import Path
+import matplotlib.patches as patches
 
 
 def plot_gene_bubble_with_cell_fraction(
         adata, save_addr, filename,
         gene,
+        hk_genes=None,
         celltype_col="Subset_Identity",
         celltype_exclude=None,
         celltype_order=None,
         disease_col="disease",
         disease_order=['HC', 'Colitis', 'BD', 'CD', 'UC'],
-        pseudo_cutoff=0.1,
-        frac_cutoff=0.05,
+        topN=10,min_frac=0.15,out_frac=0.05,
         bubble_size_range=(20, 200),
-        figsize=(10, 6),
+        figsize=(12, 6),
         cmap="Reds"
 ):
-    """
-    左侧：
-        bubble plot
-        - color: pseudo-bulk per-cell
-        - size : fraction of expressing cells
-
-    右侧：
-        细胞数量加权、per-sample 归一化后的
-        基因来源比例（百分比）
-    """
-    
     import numpy as np
     import pandas as pd
     import matplotlib.pyplot as plt
     import seaborn as sns
     
     # -----------------------------
-    # Step1: 构建基础 dataframe
+    # Step1: 数据提取与 HKG 校准
     # -----------------------------
-    if celltype_exclude is not None:
-        celltype_exclude = set(celltype_exclude)
-        adata_use = adata[~adata.obs[celltype_col].isin(celltype_exclude)]
-    else:
-        adata_use = adata
-    
+    adata_use = adata[~adata.obs[celltype_col].isin(celltype_exclude)] if celltype_exclude else adata
     df = adata_use.obs.copy()
     
-    # ---- raw 表达
-    if isinstance(gene, str):
-        X_raw = adata_use.raw[:, gene].X
-        df["expr"] = X_raw.ravel() if isinstance(X_raw, np.ndarray) else X_raw.toarray().ravel()
-    else:
-        X_raw = adata_use.raw[:, gene].X
-        if isinstance(X_raw, np.ndarray):
-            df["expr"] = X_raw.mean(axis=1)
+    def get_expr_safe(ad, g):
+        source = ad.raw if ad.raw is not None else ad
+        if g not in source.var_names: return np.zeros(ad.n_obs)
+        X = source[:, g].X
+        return X.ravel() if isinstance(X, np.ndarray) else X.toarray().ravel()
+    
+    genes_to_fetch = [gene] if isinstance(gene, str) else gene
+    df["expr_raw"] = np.mean([get_expr_safe(adata_use, g) for g in genes_to_fetch], axis=0)
+    
+    if hk_genes:
+        ref_obj = adata_use.raw if adata_use.raw is not None else adata_use
+        valid_hk = [h for h in hk_genes if h in ref_obj.var_names]
+        if len(valid_hk) >= 3:
+            hk_mean = np.mean([get_expr_safe(adata_use, h) for h in valid_hk], axis=0)
+            limit = 0.8
+            delta_raw = hk_mean - np.median(hk_mean)
+            # 使用 tanh 进行软截断
+            delta = limit * np.tanh(delta_raw / limit)
+            df["expr"] = (df["expr_raw"] - delta).clip(lower=0)
         else:
-            df["expr"] = X_raw.toarray().mean(axis=1)
+            df["expr"] = df["expr_raw"]
+    else:
+        df["expr"] = df["expr_raw"]
     
     # -----------------------------
-    # Step2: celltype × disease summary
+    # Step2: 初步汇总与 TopN 筛选 (按 Score 初筛)
     # -----------------------------
     summary = df.groupby([celltype_col, disease_col]).agg(
         n_cells=("expr", "size"),
         sum_expr=("expr", "sum"),
-        frac_expr=("expr", lambda x: (x > 0).mean())
+        frac_expr=("expr_raw", lambda x: (x > 0).mean())
     ).reset_index()
+    summary["pseudo_bulk_log"] = summary["sum_expr"] / summary["n_cells"]
     
-    summary["pseudo_bulk_per_cell"] = summary["sum_expr"] / summary["n_cells"]
+    ct_stats = summary.groupby(celltype_col).agg({"pseudo_bulk_log": "max", "frac_expr": "max"})
+    ct_stats["score"] = ct_stats["pseudo_bulk_log"] * ct_stats["frac_expr"]
     
-    # -----------------------------
-    # Step3: 过滤 celltype（确定 valid_celltypes）
-    # -----------------------------
+    # --- 新增筛选条件 ---
+    potential_candidates = ct_stats[ct_stats["frac_expr"] > min_frac].index.tolist()
+    
+    # 如果符合比例条件的太少，则降低门槛（保底机制）
+    if len(potential_candidates) < 3:
+        potential_candidates = ct_stats.sort_values("frac_expr", ascending=False).head(5).index.tolist()
+    
+    # 在符合比例条件的里面，再按之前的逻辑选出初筛名单
+    candidates = ct_stats.loc[potential_candidates].copy()
+    candidates["score"] = candidates["pseudo_bulk_log"] * candidates["frac_expr"]
     if celltype_order is not None:
-        celltype_order_legal = [i for i in celltype_order if i in summary[celltype_col].unique()]
-        if len(celltype_order_legal) == 0:
-            raise ValueError("No celltype in `celltype_order` is available.")
-        summary_filtered = summary[summary[celltype_col].isin(celltype_order_legal)]
-        valid_celltypes = celltype_order_legal
+        valid_celltypes = candidates.sort_values("score", ascending=False).head(topN * 2).index.tolist()
     else:
-        summary_filtered = summary.groupby(celltype_col).filter(
-            lambda x: ((x["pseudo_bulk_per_cell"] >= pseudo_cutoff) &
-                       (x["frac_expr"] >= frac_cutoff)).any()
-        )
-        valid_celltypes = (
-            summary_filtered[celltype_col]
-            .astype(str)
-            .unique()
-            .tolist()
-        )
+        # 初步筛选出有表达潜力的细胞类型
+        candidates = ct_stats.sort_values("score", ascending=False).head(topN * 2)  # 多取一点用于后续贡献度排序
+        valid_celltypes = candidates.index.tolist()
     
-    # =========================================================
-    # Step4: 提前计算 stack_df，用于 celltype 重排序
-    # =========================================================
+    # -----------------------------
+    # Step3: 计算贡献度并“重新排序”
+    # -----------------------------
     weighted_df = adata.uns["weighted_cell_prop"].copy()
-    weighted_df = weighted_df.loc[weighted_df.index.isin(valid_celltypes)]
-    
     cell_weight_records = []
     for ct, row in weighted_df.iterrows():
+        # 此时先记录原始名称，稍后统一处理 Others
         for dis in disease_order:
             if dis == "HC":
                 w = row["weight"]
+            elif dis in row.index:
+                w = np.exp(row[dis] + row["if"]) * row["weight"]
             else:
-                coef_sum = row[dis] + row["if"]
-                w = np.exp(coef_sum) * row["weight"]
-            
-            cell_weight_records.append({
-                celltype_col: ct,
-                disease_col: dis,
-                "cell_weight": w
-            })
+                w = 0
+            cell_weight_records.append({celltype_col: ct, disease_col: dis, "cell_weight": w})
     
     cell_weight_df = pd.DataFrame(cell_weight_records)
-    
-    expr_df = summary[
-        summary[celltype_col].isin(valid_celltypes)
-    ][[celltype_col, disease_col, "pseudo_bulk_per_cell"]]
-    
-    stack_df = expr_df.merge(
-        cell_weight_df,
-        on=[celltype_col, disease_col],
-        how="left"
+    # 这一步计算每个细胞类型在所有疾病状态下的“理论总分子产出”
+    full_contribution = summary.merge(cell_weight_df, on=[celltype_col, disease_col])
+    # 如果该细胞类型在任何组中的最大表达比例都 < out_frac，则该细胞类型全局置 0
+    ct_max_frac = full_contribution.groupby(celltype_col)["frac_expr"].transform("max")
+    full_contribution["clean_contribution"] = np.where(
+        ct_max_frac < out_frac,
+        0,
+        (np.exp(full_contribution["pseudo_bulk_log"]) - 1) * full_contribution["cell_weight"]
     )
     
-    stack_df["weighted_expr"] = (
-            stack_df["pseudo_bulk_per_cell"] * stack_df["cell_weight"]
+    
+    # 【核心逻辑 1】：按右侧分子表达量（clean_contribution）的总和重新排序
+    # 我们只对初筛通过的 celltypes 进行排序
+    contribution_rank = (
+        full_contribution[full_contribution[celltype_col].isin(valid_celltypes)]
+        .groupby(celltype_col)["clean_contribution"].sum()
+        .sort_values(ascending=False)  # 贡献最大的排最前面
+        .head(topN)
     )
+    valid_celltypes = contribution_rank.index.tolist()
     
     # -----------------------------
-    # Step5: 基于 weighted_expr 重排 celltypes
+    # Step4: 构建绘图用的 stack_df (处理 Others)
     # -----------------------------
-    reordered_celltypes = (
-        stack_df
-        .groupby(celltype_col)["weighted_expr"]
-        .sum()
-        .sort_values(ascending=False)
-        .index
-        .tolist()
-    )
-    
-    # =========================================================
-    # Step6: 左图 bubble 使用 reordered_celltypes
-    # =========================================================
-    summary_filtered[celltype_col] = pd.Categorical(
-        summary_filtered[celltype_col],
-        categories=reordered_celltypes,
-        ordered=True
-    )
-    summary_filtered = summary_filtered.sort_values(celltype_col)
-    
-    summary_filtered[disease_col] = pd.Categorical(
-        summary_filtered[disease_col],
-        categories=disease_order,
-        ordered=True
-    )
+    # 重新打标签
+    full_contribution["plot_label"] = full_contribution[celltype_col].apply(
+        lambda x: x if x in valid_celltypes else "Others")
+    stack_df = full_contribution.groupby(["plot_label", disease_col])["clean_contribution"].sum().reset_index()
+    stack_df.columns = [celltype_col, disease_col, "clean_contribution"]
     
     # -----------------------------
-    # Step7: 作图
+    # Step5: 设置 Categorical 顺序
     # -----------------------------
-    fig, axes = plt.subplots(
-        1, 2, figsize=figsize,
-        gridspec_kw={"width_ratios": [3.6, 2]}
-    )
-    fig.subplots_adjust(wspace=0.7, right=0.88)
+    # 左图 Y 轴：贡献最大的在最上方，Others 不显示在左图气泡中
+    summary_filtered = summary[summary[celltype_col].isin(valid_celltypes)].copy()
+    summary_filtered[celltype_col] = pd.Categorical(summary_filtered[celltype_col], categories=valid_celltypes,
+                                                    ordered=True)
+    summary_filtered[disease_col] = pd.Categorical(summary_filtered[disease_col], categories=disease_order,
+                                                   ordered=True)
     
-    # ===== 左侧 bubble plot =====
-    scatter = sns.scatterplot(
-        data=summary_filtered,
-        x=disease_col,
-        y=celltype_col,
-        size="frac_expr",
-        hue="pseudo_bulk_per_cell",
-        sizes=bubble_size_range,
-        palette=cmap,
-        ax=axes[0]
-    )
+    # 【核心逻辑 2】：右图堆叠顺序
+    # Pandas 绘图从底向上堆叠。为了让 Others 在顶端，它必须是最后一个 Category
+    # 顺序：[贡献最小, ..., 贡献最大, Others] -> 对应 [底部, ..., 中间, 顶端]
+    stack_categories = valid_celltypes + ["Others"]
+    stack_df[celltype_col] = pd.Categorical(stack_df[celltype_col], categories=stack_categories, ordered=True)
     
-    axes[0].set_title(f"{'+'.join(gene) if isinstance(gene, list) else gene}")
-    axes[0].set_xlabel("Disease")
-    axes[0].set_ylabel("Cell type")
-    axes[0].legend_.remove()
-    axes[0].grid(False)
+    # -----------------------------
+    # Step6: 绘图
+    # -----------------------------
+    fig, axes = plt.subplots(1, 2, figsize=figsize, gridspec_kw={"width_ratios": [1.5, 1]})
+    fig.subplots_adjust(wspace=0.5, right=0.85, left=0.1)
     
-    norm = plt.Normalize(
-        summary_filtered["pseudo_bulk_per_cell"].min(),
-        summary_filtered["pseudo_bulk_per_cell"].max()
-    )
+    # --- Bubble Plot ---
+    sns.scatterplot(data=summary_filtered, x=disease_col, y=celltype_col, size="frac_expr", hue="pseudo_bulk_log",
+                    sizes=bubble_size_range, palette=cmap, ax=axes[0], edgecolor='0.3')
+    axes[0].get_legend().remove()
+    if isinstance(gene, list):
+        if len(gene) > 3:
+            gene_name = f"{gene[0]}+{gene[1]}...({len(gene)} genes)"
+        else:
+            gene_name = "+".join(gene)
+    else:
+        gene_name = gene
+    
+    axes[0].set_title(f"Expression Per Subset\n {gene_name}")
+    
+    # 颜色条
+    norm = plt.Normalize(summary_filtered["pseudo_bulk_log"].min(), summary_filtered["pseudo_bulk_log"].max())
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
-    fig.colorbar(sm, ax=axes[0], fraction=0.03, pad=0.015)
+    fig.colorbar(sm, ax=axes[0], fraction=0.03, pad=0.08)
     
-    # ===== 右侧 stacked bar =====
-    stack_df[celltype_col] = pd.Categorical(
-        stack_df[celltype_col],
-        categories=reordered_celltypes,
-        ordered=True
-    )
-    stack_df[disease_col] = pd.Categorical(
-        stack_df[disease_col],
-        categories=disease_order,
-        ordered=True
-    )
+    # --- Stacked Bar ---
+    stack_pivot = stack_df.pivot_table(index=disease_col, columns=celltype_col, values="clean_contribution",
+                                       aggfunc="sum").fillna(0)
+    stack_pivot = stack_pivot.reindex(disease_order)
     
-    stack_pivot = stack_df.pivot_table(
-        index=disease_col,
-        columns=celltype_col,
-        values="weighted_expr",
-        aggfunc="sum",
-        fill_value=0
-    ).loc[disease_order]
-    
-    ordered_cols = [ct for ct in reordered_celltypes if ct in stack_pivot.columns]
-    stack_pivot = stack_pivot[ordered_cols]
-    
+    # 归一化
     if "HC" in stack_pivot.index:
-        hc_total = stack_pivot.loc["HC"].sum()
-        if hc_total > 0:
-            stack_pivot = stack_pivot / hc_total
+        hc_total = float(stack_pivot.loc["HC"].sum())
+        if hc_total > 0: stack_pivot = stack_pivot / hc_total
     
-    base_palette = sns.color_palette("tab20", n_colors=len(stack_pivot.columns))
-    bottom = np.zeros(len(stack_pivot))
+    # 配色：前 N 个彩色，最后一个 Others 灰色
+    base_colors = sns.color_palette("tab20", n_colors=len(valid_celltypes))
+    # 注意这里颜色顺序要对应 stack_categories: [贡献小->大(Set2), Others(Gray)]
+    # 我们希望贡献大的颜色显眼，Others 永远在最后
+    plot_colors = list(base_colors) + ["#D3D3D3"]
     
-    for ct, color in zip(stack_pivot.columns, base_palette):
-        axes[1].bar(
-            stack_pivot.index,
-            stack_pivot[ct].values,
-            bottom=bottom,
-            label=ct,
-            color=color,
-            width=0.7
-        )
-        bottom += stack_pivot[ct].values
+    stack_pivot.plot(kind='bar', stacked=True, ax=axes[1], color=plot_colors, width=0.7, edgecolor='white',
+                     linewidth=0.5)
     
-    axes[1].set_ylabel("Relative Total Expression")
-    axes[1].set_title("Abundance-weighted\nMean Expression")
-    axes[1].tick_params(axis="x", rotation=45)
-    
-    axes[1].legend(
-        title="Cell type",
-        bbox_to_anchor=(1.05, 1),
-        loc="upper left",
-        frameon=False,
-        fontsize=8
-    )
+    axes[1].set_title("Molecular Contribution\n(Abundance Weighted)")
+    axes[1].legend(title="Cell type", bbox_to_anchor=(1.05, 1), loc="upper left", frameon=False,
+                   fontsize=10, title_fontsize=10)
+    axes[1].set_ylabel("Relative to HC Total")
     
     # -----------------------------
-    # 保存
+    # 保存与导出
     # -----------------------------
-    if filename.endswith(".png") or filename.endswith(".pdf"):
-        plt.savefig(f"{save_addr}/{filename}")
-    else:
-        plt.savefig(f"{save_addr}/{filename}.png")
-        plt.savefig(f"{save_addr}/{filename}.pdf")
-    
-    plt.close("all")
-    
-    with pd.ExcelWriter(f"{save_addr}/{filename}(data).xlsx", engine="xlsxwriter") as writer:
-        summary_filtered.to_excel(writer, sheet_name="bubble_summary", index=False)
-        stack_df.to_excel(writer, sheet_name="stack_df", index=False)
+    plt.savefig(f"{save_addr}/{filename}.png", bbox_inches="tight", dpi=300)
+    plt.savefig(f"{save_addr}/{filename}.pdf", bbox_inches="tight")
+    summary_filtered.to_excel(f"{save_addr}/{filename}_data.xlsx", index=False)
+    plt.close()
     
     return summary_filtered
+
+
+def plot_universal_bubble_legend(save_addr, bubble_size_range=(20, 200)):
+    
+    # 创建一个小画布
+    fig, ax = plt.subplots(figsize=(2, 3))
+    ax.axis('off')
+    
+    # 定义参照点：0%, 25%, 50%, 75%, 100%
+    labels = [0.0, 0.25, 0.5, 0.75, 1.0]
+    # 计算对应的像素大小 (线性插值)
+    sizes = [bubble_size_range[0] + (bubble_size_range[1] - bubble_size_range[0]) * l for l in labels]
+    
+    # 画出参考气泡
+    for i, (l, s) in enumerate(zip(labels, sizes)):
+        ax.scatter([], [], s=s, c='gray', edgecolors='0.3', label=f"{int(l * 100)}%")
+    
+    ax.legend(
+        title="Fraction Expressed",
+        labelspacing=1.2,
+        handletextpad=1.5,
+        loc='center',
+        frameon=False
+    )
+    
+    plt.savefig(f"{save_addr}/Universal_Bubble_Legend.pdf", bbox_inches='tight')
+    plt.savefig(f"{save_addr}/Universal_Bubble_Legend.png", bbox_inches='tight', dpi=300)
+    plt.close()
 
 
 
@@ -893,7 +870,6 @@ def prune_cells_by_activity(mat, min_value=0.0):
     pd.DataFrame
         剪枝后的矩阵
     """
-    import numpy as np
     
     row_max = mat.max(axis=1)
     col_max = mat.max(axis=0)

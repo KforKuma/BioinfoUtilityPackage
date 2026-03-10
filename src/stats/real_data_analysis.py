@@ -50,8 +50,30 @@ def collect_real_data_results(count_df, stats_func, **kwargs):
     # 合并所有细胞类型的结果
     df_results = pd.concat(all_summary_list, ignore_index=False)
     
+    # 增加一个 posterior p 值校正逻辑
+    pval_candidates = ['P>|z|', 'p_adj', 'pval']
+    existing_cols = df_results.columns  # 在 DataFrame (result_rows) 上检查 .columns 是正确的
+    
+    for col in pval_candidates:
+        if col in existing_cols:
+            pval_colname = col
+            break
+        else:
+            raise ValueError("There is no p-value column detected in the contrast table.")
+    
+    sig_ratio = sum(df_results[pval_colname] < 0.05) / df_results.shape[0]
+    if sig_ratio < 0.4:
+        alpha_adj = 0.05
+    else:
+        alpha_adj = 0.05 * (0.25 / sig_ratio) ** 2  # 自动收缩 alpha
+    
+    df_results["significant"] = (df_results["significant"].astype(bool) &
+                                     (df_results[pval_colname] < alpha_adj))
+    
+    
     # 整理列顺序，方便阅读
-    cols = ['ref', 'Coef.', 'Std.Err.', 'z', 'P>|z|', '[0.025', '0.975]',
+    cols = ['cell_type','ref', 'Coef.', 'Std.Err.', 'z', 'P>|z|','p_adj', 'pval',
+            '[0.025', '0.975]','method_agreement',
             'significant', 'direction']
     # 保留结果中存在的列
     existing_cols = [c for c in cols if c in df_results.columns]

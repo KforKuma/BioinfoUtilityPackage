@@ -119,7 +119,7 @@ for i, adata_obs_sub in enumerate(adata_obs_ls):
     # 稍微调低了 MAD 倍数（建议 3-5），6 可能太严苛
     mad_val = median_abs_deviation(entropy)
     low_entropy = entropy < (np.median(entropy) - 3 * mad_val)
-    high_dominance = dominant_frac > 0.9
+    high_dominance = dominant_frac > 0.75
     
     outlier_samples = entropy.index[low_entropy & high_dominance].tolist()
     

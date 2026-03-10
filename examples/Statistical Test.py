@@ -90,6 +90,9 @@ print(count_df1[count_df1['cell_type']==count_df1.cell_type.iloc[10]])
 dfs=count_df1[count_df1['cell_type']==count_df1.cell_type.iloc[11]]
 dfs['disease'].value_counts()
 
+res = call_with_compatible_args(run_Dirichlet_Wald,
+                                cell_type=count_df1.cell_type.iloc[1],  **common_kwargs)
+print(res['contrast_table'])
 
 res = call_with_compatible_args(run_Perm_Mixed,cell_type=count_df1.cell_type.iloc[1],  **common_kwargs)
 print(res['contrast_table'])

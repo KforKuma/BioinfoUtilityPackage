@@ -20,10 +20,9 @@ def collect_DM_results(
         cell_types_list: List[str],
         run_DM_func,
         # 核心修改：默认公式改为包含交互项 (*)
-        formula: str = "disease * C(tissue, Treatment(reference='nif'))",
+        formula: str = "disease + C(tissue, Treatment(reference='nif'))",
         tissue_levels: Tuple[str, str] = ("nif", "if"),
         disease_levels: Tuple[str, str] = ("HC", "Colitis", "BD", "CD", "UC"),
-        debug=False
 ) -> Dict[str, pd.DataFrame]:
     all_coefs = []
     ref_tissue, other_tissue = tissue_levels
@@ -40,7 +39,7 @@ def collect_DM_results(
             for other, row in contrast_df.iterrows():
                 if other == row['ref']: continue
                 
-                coef = row["Coef"]
+                coef = row["Coef."]
                 pval = row["P>|z|"]
                 if pd.isna(coef): continue
                 
@@ -119,3 +118,58 @@ def estimate_DM_parameters(collected_results: Dict[str, pd.DataFrame], alpha=0.0
         params['interaction_effect_size'] = max(params.get('interaction_effect_size', 0), min_detectable)
     
     return params
+
+
+@logged
+def filter_rare_celltypes(count_df, zero_threshold=0.25, verbose=True):
+    """
+    过滤在超过一定比例 sample 中不存在的 cell types
+
+    Parameters
+    ----------
+    count_df : pd.DataFrame
+        原始 count dataframe
+    zero_threshold : float
+        允许为0的最大 sample 比例 (默认0.25)
+    verbose : bool
+        是否打印统计信息
+
+    Returns
+    -------
+    filtered_df : pd.DataFrame
+        过滤后的 dataframe
+    summary : pd.DataFrame
+        每个 cell_type 的 zero 统计
+    """
+    
+    # 构建矩阵
+    mat = count_df.pivot_table(
+        index="sample_id",
+        columns="cell_type",
+        values="count",
+        fill_value=0
+    )
+    
+    # 统计
+    zero_counts = (mat == 0).sum()
+    zero_prop = (mat == 0).mean()
+    
+    summary = pd.DataFrame({
+        "n_zero_samples": zero_counts,
+        "zero_fraction": zero_prop
+    }).sort_values("zero_fraction", ascending=False)
+    
+    # 保留 cell types
+    keep_celltypes = summary[summary["zero_fraction"] <= zero_threshold].index
+    
+    filtered_df = count_df[count_df["cell_type"].isin(keep_celltypes)].copy()
+    
+    if verbose:
+        print("===== Cell Type Zero Summary =====")
+        print(summary.head(20))
+        print()
+        print(f"Total cell types: {summary.shape[0]}")
+        print(f"Remaining cell types: {len(keep_celltypes)}")
+        print(f"Filtered out: {summary.shape[0] - len(keep_celltypes)}")
+    
+    return filtered_df, summary
