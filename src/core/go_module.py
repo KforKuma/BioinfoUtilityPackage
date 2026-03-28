@@ -1,4 +1,6 @@
 # ===== Third-party =====
+import os.path
+
 import numpy as np
 import pandas as pd
 
@@ -8,6 +10,49 @@ import gseapy as gp
 import matplotlib
 import matplotlib.pyplot as plt
 import seaborn as sns
+
+import pandas as pd
+import scanpy as sc
+import anndata as ad
+
+from src.core.plot.utils import matplotlib_savefig
+
+def balance_cell_subsets(adata, subset_col='Subset_Identity', cond_col='cond_group', groups=['Inflammatory', 'Control'],
+                         random_state=42):
+    """
+    对每个细胞亚群，平衡其在两个实验组别中的数量（取较小值）。
+    """
+    # 1. 提取元数据
+    obs = adata.obs[[subset_col, cond_col]].copy()
+    
+    # 2. 计算每个亚群在每个组别中的频数
+    # 得到一个表：Index是Subset_Identity, Columns是cond_group
+    counts = obs.groupby([subset_col, cond_col]).size().unstack(fill_value=0)
+    
+    # 3. 确定每个亚群应该保留的数量（取两组中的最小值）
+    # 如果某组完全没有该细胞，则该亚群保留 0
+    min_counts_per_subset = counts[groups].min(axis=1)
+    
+    sampled_indices = []
+    
+    # 4. 遍历每个亚群进行下采样
+    for subset, n_target in min_counts_per_subset.items():
+        if n_target <= 0:
+            continue
+        
+        for group in groups:
+            # 找到当前亚群且属于当前组别的所有细胞索引
+            current_idx = obs[(obs[subset_col] == subset) & (obs[cond_col] == group)].index
+            
+            # 随机抽样
+            sampled_idx = pd.Series(current_idx).sample(n=int(n_target), random_state=random_state)
+            sampled_indices.extend(sampled_idx.tolist())
+    
+    # 5. 根据索引切片并返回新的 AnnData
+    adata_balanced = adata[sampled_indices].copy()
+    
+    print(f"平衡完成。原始细胞数: {adata.n_obs}, 平衡后细胞数: {adata_balanced.n_obs}")
+    return adata_balanced
 
 
 def analyze_DEG(adata,save_addr,filename,
@@ -33,72 +78,85 @@ def analyze_DEG(adata,save_addr,filename,
     result.to_csv(f"{save_addr}/{filename}.csv", index=False)
 
 
-def plot_volcano(result,save_addr,filename,
-                 cluster_genes_dict=None,  # 新增：字典 {cluster_name: [gene1, gene2, ...]}
+from adjustText import adjust_text
+
+
+def plot_volcano(result, save_addr, filename,
+                 cluster_genes_dict=None,
                  lfc_limit=10,
                  p_thresh=0.05,
                  lfc_thresh=1.0):
     """
-    绘制火山图，并可标注指定基因。
-
-    参数:
-        result: pd.DataFrame, 包含列 ['cluster', 'logfoldchanges', 'pvals_adj', 'gene']
-        cluster_genes_dict: dict, {cluster_name: [gene1, gene2, ...]}，标注这些基因
-        lfc_limit: log fold change 最大截断值
-        p_thresh: 调整后的 p 值阈值
-        lfc_thresh: log fold change 阈值
+    使用 fig, ax 对象绘制高性能火山图，并自动优化标签布局。
     """
+    # 0. 确定基因名所在的列 (自动兼容 'names' 或 'gene')
+    gene_col = 'names' if 'names' in result.columns else 'gene'
     
-    # 1. 分类 Up/Down/Normal
-    result['sig'] = 'Normal'
-    result.loc[(result['pvals_adj'] < p_thresh) & (result['logfoldchanges'] > lfc_thresh), 'sig'] = 'Up'
-    result.loc[(result['pvals_adj'] < p_thresh) & (result['logfoldchanges'] < -lfc_thresh), 'sig'] = 'Down'
+    # 1. 数据预处理
+    df = result.copy()
+    df['sig'] = 'Normal'
+    df.loc[(df['pvals_adj'] < p_thresh) & (df['logfoldchanges'] > lfc_thresh), 'sig'] = 'Up'
+    df.loc[(df['pvals_adj'] < p_thresh) & (df['logfoldchanges'] < -lfc_thresh), 'sig'] = 'Down'
     
-    # 2. LFC 截断
-    result['plot_lfc'] = result['logfoldchanges'].clip(-lfc_limit, lfc_limit)
+    df['plot_lfc'] = df['logfoldchanges'].clip(-lfc_limit, lfc_limit)
+    df['nlog10'] = -np.log10(df['pvals_adj'] + 1e-300)
     
-    # 3. -log10(p)
-    result['nlog10'] = -np.log10(result['pvals_adj'] + 1e-300)
-    
-    # 4. 绘图
-    plt.figure(figsize=(7, 6))
+    # 2. 初始化画布
+    fig, ax = plt.subplots(figsize=(8, 7))
     colors = {'Up': '#e41a1c', 'Down': '#377eb8', 'Normal': '#d9d9d9'}
     
-    sns.scatterplot(data=result, x='plot_lfc', y='nlog10', hue='sig',
-                    palette=colors, s=20, alpha=0.6, edgecolor=None)
+    # 3. 绘制散点
+    sns.scatterplot(data=df, x='plot_lfc', y='nlog10', hue='sig',
+                    palette=colors, s=25, alpha=0.7, edgecolor=None, ax=ax, rasterized=True)
     
-    # 阈值线
-    plt.axvline(x=lfc_thresh, color='black', linestyle='--', linewidth=0.8, alpha=0.5)
-    plt.axvline(x=-lfc_thresh, color='black', linestyle='--', linewidth=0.8, alpha=0.5)
-    plt.axhline(y=-np.log10(p_thresh), color='black', linestyle='--', linewidth=0.8, alpha=0.5)
+    # 4. 绘制阈值线
+    ax.axvline(x=lfc_thresh, color='gray', linestyle='--', linewidth=0.8)
+    ax.axvline(x=-lfc_thresh, color='gray', linestyle='--', linewidth=0.8)
+    ax.axhline(y=-np.log10(p_thresh), color='gray', linestyle='--', linewidth=0.8)
     
-    # 5. 标注指定基因
+    # 5. 标注指定基因并优化布局
+    texts = []
     if cluster_genes_dict is not None:
         for cluster, genes in cluster_genes_dict.items():
-            genes_to_plot = result[(result['cluster'] == cluster) & (result['names'].isin(genes))]
+            # 筛选匹配的行
+            genes_to_plot = df[(df['cluster'] == cluster) & (df[gene_col].isin(genes))]
+            
+            # 1) 打印未匹配到的基因
+            found_genes = genes_to_plot[gene_col].tolist()
+            missing_genes = set(genes) - set(found_genes)
+            if missing_genes:
+                print(f"⚠️ [Warning] 在 Cluster '{cluster}' 中未找到基因: {missing_genes}")
+            if not genes_to_plot.empty:
+                print(f"✅ [Info] 正在为 Cluster '{cluster}' 标注 {len(found_genes)} 个基因")
+            
+            # 2) 创建文本对象
             for _, row in genes_to_plot.iterrows():
-                ha = 'right' if row['plot_lfc'] < 0 else 'left'
-                plt.text(x=row['plot_lfc'], y=row['nlog10'], s=row['names'],
-                         fontsize=8, ha=ha, va='bottom', color='black')
+                texts.append(ax.text(row['plot_lfc'], row['nlog10'], row[gene_col],
+                                     fontsize=9, fontweight='medium'))
+        
+        # 3) 核心优化：自动排版防止重叠
+        if texts:
+            adjust_text(texts, ax=ax,
+                        only_move={'points': 'y', 'text': 'xy'},  # 允许在xy方向移动文字以避开点
+                        arrowprops=dict(arrowstyle='->', color='black', lw=0.5),  # 添加指引线
+                        expand_points=(1.5, 1.5))  # 增加点周围的排斥力
     
-    # 从 result["cluster"] 自动取组名作为标题
-    clusters = result['cluster'].unique()
-    if len(clusters) == 2:
-        title = f'{clusters[0]} vs {clusters[1]}'
-    else:
-        title = 'Volcano Plot'
+    # 6. 细节修饰
+    clusters = df['cluster'].unique()
+    title = f"{clusters[0]} vs Others" if len(clusters) > 0 else "Volcano Plot"
+    ax.set_title(title, fontsize=14, pad=15)
+    ax.set_xlabel('$\log_{2}(\text{Fold Change})$ (Clipped)', fontsize=12)
+    ax.set_ylabel('$-\log_{10}(\text{Adjusted P-value})$', fontsize=12)
+    ax.set_xlim(-lfc_limit * 1.1, lfc_limit * 1.1)
     
-    plt.title(title, fontsize=12)
-    plt.xlabel('log2(Fold Change) [Clipped]', fontsize=11)
-    plt.ylabel('-log10(Adjusted P-value)', fontsize=11)
-    plt.xlim(-lfc_limit * 1.05, lfc_limit * 1.05)
-    plt.legend(title='Expression', loc='upper right', frameon=False)
+    # 图例处理
+    ax.legend(title='Expression', bbox_to_anchor=(1.05, 1), loc='upper left', frameon=False)
+    
+    sns.despine()  # 去除上方和右侧边框
     plt.tight_layout()
-    
     # 保存 PDF 和 PNG
-    plt.savefig(f"{save_addr}/{filename}.png", dpi=300)
-    plt.savefig(f"{save_addr}/{filename}.pdf")
-    plt.close()
+    abs_path = os.path.join(save_addr, filename)
+    matplotlib_savefig(fig,abs_path)
     
     print(f"Volcano plot saved as PNG and PDF. LFC values clipped at ±{lfc_limit}.")
 

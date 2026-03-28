@@ -2,6 +2,7 @@
 import os
 import re
 import logging
+from site import abs_paths
 
 # ===== Third-party =====
 import numpy as np
@@ -21,7 +22,7 @@ import ktplotspy as kpy
 from src.external_adaptor.cellphonedb.settings import DEFAULT_CPDB_SEP
 from src.external_adaptor.cellphonedb.toolkit import size_map
 from src.utils.hier_logger import logged
-
+from src.core.plot.utils import matplotlib_savefig
 # ===== Matplotlib global settings =====
 plt.rcParams["font.family"] = "monospace"
 
@@ -315,7 +316,7 @@ def draw_combine_dotplot(df_full, save_addr, filename,
                 s=sig["dot_size"] + 150,
                 facecolors="none",
                 edgecolors="#C21E56",
-                linewidth=2.4
+                linewidth=0.4
             )
         
         # --------------------------
@@ -405,16 +406,15 @@ def draw_combine_dotplot(df_full, save_addr, filename,
     legend_ax.set_ylim(0, 1)
     legend_ax.axis("off")
     
+    fig = g.fig
     # 尺寸调整
-    g.fig.set_size_inches(w=fig_width, h=fig_height)
+    fig.set_size_inches(w=fig_width, h=fig_height)
     # 布局调整
-    g.fig.subplots_adjust(left=left, right=right,
+    fig.subplots_adjust(left=left, right=right,
                           bottom=bottom, top=top,
                           hspace=hspace)
-    
-    plt.savefig(f"{save_addr}/{filename}.png")
-    plt.savefig(f"{save_addr}/{filename}.pdf")
-    plt.close()
+    abs_path = os.path.join(save_addr, filename)
+    matplotlib_savefig(fig, abs_path)
     
     df_full.to_excel(f"{save_addr}/{filename}(data).xlsx", index=False)
 
@@ -425,6 +425,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from matplotlib.path import Path
 import matplotlib.patches as patches
+from src.core.plot.utils import matplotlib_savefig
 
 
 def plot_gene_bubble_with_cell_fraction(
@@ -622,8 +623,8 @@ def plot_gene_bubble_with_cell_fraction(
     # -----------------------------
     # 保存与导出
     # -----------------------------
-    plt.savefig(f"{save_addr}/{filename}.png", bbox_inches="tight", dpi=300)
-    plt.savefig(f"{save_addr}/{filename}.pdf", bbox_inches="tight")
+    abs_path = os.path.join(save_addr, filename)
+    matplotlib_savefig(fig, abs_path)
     summary_filtered.to_excel(f"{save_addr}/{filename}_data.xlsx", index=False)
     plt.close()
     
@@ -1046,5 +1047,12 @@ def CCI_sankey_plot_top5(
     if title:
         fig.update_layout(title_text=title)
     
-    fig.write_image(f"{save_addr}/{filename}.pdf", width=800, height=600)
-    fig.write_image(f"{save_addr}/{filename}.png", width=800, height=600, scale=2)
+    fig.write_image(f"{save_addr}/{filename}.pdf", width=800, height=600, engine="kaleido")
+    fig.write_image(f"{save_addr}/{filename}.svg", width=800, height=600, engine="kaleido")
+    
+    # PNG 保持高分辨率用于快速预览
+    fig.write_image(f"{save_addr}/{filename}.png", width=800, height=600, scale=3)
+    
+    # 保存 Excel 数据
+    if len(top_records) > 0:
+        pd.DataFrame(top_records).to_excel(f"{save_addr}/{filename}(data).xlsx", index=False)

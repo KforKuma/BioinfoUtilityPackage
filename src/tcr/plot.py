@@ -1,4 +1,5 @@
 # ===== Standard library =====
+import os
 from typing import Tuple, Callable
 
 # ===== Third-party =====
@@ -8,84 +9,74 @@ import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 import seaborn as sns
 
+from src.core.plot.utils import matplotlib_savefig
 
 
-
-
-def draw_lorenz(freq_series, label):
+def draw_lorenz(freq_series, label, ax=None):
     '''
-    使用时，需要单独建立画布，并不是单独用来生成保存对象的完整函数。
-    :param freq_series:
-    :param label:
-    :return:
+    现在支持显式传入 ax 对象。如果不传，则回退到当前活动坐标轴。
     '''
+    if ax is None:
+        ax = plt.gca()
+    
     x = freq_series.sort_values().cumsum()
+    # 归一化到 0-1 之间（Lorenz 曲线的标准定义）
+    x = x / x.max() if x.max() != 0 else x
     y = np.linspace(0, 1, len(x))
-    plt.plot(y, x, label=label)
+    
+    ax.plot(y, x, label=label)
 
 
 def plot_lorenz(
-    tcr_usage_df,
-    save_addr,
-    filename,
-    groups,
-    chain: str = "TRAV",
-    freq_col: str = "freq",
-    figsize=(4, 4),
+        tcr_usage_df,
+        save_addr,
+        filename,
+        groups,
+        chain: str = "TRAV",
+        freq_col: str = "freq",
+        figsize=(4, 4),
 ):
-    """
-    绘制多个细胞群的 TCR usage Lorenz 曲线
-
-    Parameters
-    ----------
-    tcr_usage_df : pd.DataFrame
-        index 为 cell type，columns 为 MultiIndex (chain, freq/count)
-    groups : list[str]
-        需要绘制的细胞群
-    chain : str
-        TRAV / TRBV
-    freq_col : str
-        使用 freq 还是 count
-    fig_output_dir : str | None
-        若提供则保存图像
-    prefix : str
-        输出文件名前缀
-    figsize : tuple
-    """
-
-    plt.figure(figsize=figsize)
-
+    # 1. 显式创建 fig 和 ax
+    fig, ax = plt.subplots(figsize=figsize)
+    
     for g in groups:
+        # 2. 将 ax 传给子函数
         draw_lorenz(
             tcr_usage_df.loc[g, (chain, freq_col)].dropna(),
             g,
+            ax=ax
         )
+    
+    # 3. 使用 ax 对象进行装饰
+    ax.plot([0, 1], [0, 1], "k--", alpha=0.5)
+    ax.set_xlabel("Cumulative V genes")
+    ax.set_ylabel("Cumulative frequency")
+    ax.set_title(f"Lorenz curve of {chain} usage")
+    ax.legend()
+    
+    fig.tight_layout()
+    
+    # 4. 显式通过 fig 对象保存
+    abs_path = os.path.join(save_addr, filename)
+    matplotlib_savefig(fig, abs_path)
+    
 
-    # 对角线
-    plt.plot([0, 1], [0, 1], "k--", alpha=0.5)
-
-    plt.xlabel("Cumulative V genes")
-    plt.ylabel("Cumulative frequency")
-    plt.legend()
-    plt.title(f"Lorenz curve of {chain} usage")
-    plt.tight_layout()
-
-    plt.savefig(f"{save_addr}/{filename}.pdf",bbox_inches="tight")
-    plt.savefig(f"{save_addr}/{filename}.png",dpi=300,bbox_inches="tight")
-
-def plot_simpson_index(simpson_mat, save_addr, filename,figsize=(6, 7),):
-    plt.figure(figsize)
-    sns.heatmap(
+def plot_simpson_index(simpson_mat, save_addr, filename,figsize=(6, 7)):
+    plt.figure(figsize=figsize)
+    ax = sns.heatmap(
         simpson_mat,
         cmap="Reds",
         linewidths=0.5,
         linecolor="gray"
     )
-    plt.title("TCR usage skewness (Simpson index)")
-    plt.tight_layout()
-    plt.savefig(f"{save_addr}/{filename}.pdf", bbox_inches="tight")
-    plt.savefig(f"{save_addr}/{filename}.png", dpi=300, bbox_inches="tight")
-
+    ax.grid(False)
+    
+    fig = ax.get_figure()
+    ax.set_title("TCR usage skewness (Simpson index)")
+    fig.tight_layout()
+    abs_path = os.path.join(save_addr, filename)
+    matplotlib_savefig(fig, abs_path)
+    
 
 def color_to_rgb_tuple(hex_color):
     hex_color = hex_color.lstrip('#')

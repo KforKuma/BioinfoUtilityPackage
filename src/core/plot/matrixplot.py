@@ -1,4 +1,5 @@
 import os
+import warnings
 import anndata
 import pandas as pd
 import numpy as np
@@ -191,3 +192,86 @@ def plot_matrixplot(
         plt.close(fig)
     
     return marker_dict
+
+
+
+
+def plot_professional_matrix(adata, gene_dict, groupby,
+                             save_addr=None,
+                             filename="matrixplot",
+                             dendrogram=False,
+                             cmap='RdYlBu_r',
+                             show_gene_groups=True,  # 新增：是否显示顶部的基因组 Bracket 名称
+                             show_group_names=False,
+                             **kwargs):
+    """
+    修正后的 Matrixplot 函数，具备功能模块标注和高级感配色
+    """
+    warnings.filterwarnings('ignore', category=FutureWarning)
+    logging.getLogger('matplotlib').setLevel(logging.ERROR)
+    logging.getLogger('fontTools').setLevel(logging.ERROR)
+    
+    # 1. 预处理：确保基因存在
+    filtered_gene_dict = {}
+    for k, v in gene_dict.items():
+        existing_genes = [g for g in v if g in adata.var_names]
+        if existing_genes:
+            filtered_gene_dict[k] = existing_genes
+    
+    # 如果要隐藏基因组名称，直接传入展平后的基因列表，Scanpy 就不会绘制 Brackets
+    var_names_input = filtered_gene_dict if show_gene_groups else [g for v in filtered_gene_dict.values() for g in v]
+    
+    mp = sc.pl.matrixplot(
+        adata,
+        var_names=var_names_input,
+        groupby=groupby,
+        standard_scale='var',
+        use_raw=False,
+        cmap=cmap,
+        return_fig=True,
+        dendrogram=dendrogram,
+        **kwargs
+    )
+    
+    # 3. 核心步骤：手动触发绘图渲染，确保 ax_dict 被填充
+    mp.swap_axes = kwargs.get('swap_axes', False)  # 保持参数一致性
+    mp.style(cmap=cmap, edge_color='white')
+    
+    # 手动获取图表对象，这是解决 'No axes' 的关键
+    # 在某些版本中，必须调用这个方法才会生成 fig 和 axes
+    mp_fig = mp.make_figure()
+    
+    # 4. 安全地获取 Figure 和 Axes
+    # 现在 mp.ax_dict 应该已经填充完毕
+    axes_dict = mp.ax_dict
+    if not axes_dict:
+        # 最后的兜底：如果还不行，从 plt 现存的 figure 中抓取
+        fig = plt.gcf()
+        all_axes = fig.get_axes()
+        if not all_axes:
+            print("Critical Error: Matplotlib failed to generate any axes.")
+            return
+    else:
+        # 正常逻辑：获取 Figure
+        any_ax = axes_dict.get('main_plot_ax') or list(axes_dict.values())[0]
+        fig = any_ax.get_figure()
+    
+    # 5. 处理顶部的 Bracket 和 文字
+    gene_group_ax = axes_dict.get('gene_group_ax')
+    if gene_group_ax:
+        if not show_gene_groups:
+            gene_group_ax.set_visible(False)
+        elif not show_group_names:
+            # 保留括号线条，隐藏文字
+            for txt in gene_group_ax.texts:
+                txt.set_visible(False)
+    
+    # 5. 保存逻辑
+    if save_addr:
+        if not os.path.exists(save_addr):
+            os.makedirs(save_addr)
+        abs_path = os.path.join(save_addr, filename)
+        matplotlib_savefig(fig, abs_path, close_after=True)
+        print(f"Figures saved to: {abs_path}")
+    
+    plt.close(fig)

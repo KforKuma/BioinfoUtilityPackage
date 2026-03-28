@@ -1,7 +1,9 @@
 import pandas as pd
+import numpy as np
+import re
 
 def call_major_tcr_v(adata, threshold=0.55, trav_genes=None, colname_1="TRAV_call",
-                     trbv_genes=None, colname_2="TRBV_call"):
+                     trbv_genes=None, colname_2="TRBV_call",use_raw=False):
     """
     为每个细胞 call 出主要 TRAV / TRBV 基因（占比 > threshold）
 
@@ -13,7 +15,10 @@ def call_major_tcr_v(adata, threshold=0.55, trav_genes=None, colname_1="TRAV_cal
         trav_call: pd.Series
         trbv_call: pd.Series
     """
-    var_names = adata.raw.var_names
+    if use_raw:
+        var_names = adata.raw.var_names
+    else:
+        var_names = adata.var_names
     
     if trav_genes is None:
         pattern_trav = re.compile(r"^TRAV")
@@ -29,10 +34,16 @@ def call_major_tcr_v(adata, threshold=0.55, trav_genes=None, colname_1="TRAV_cal
         print("Warning: No TRBV genes found in adata.var_names.")
     
     # --- 高效从矩阵切片 ---
-    X_trav = adata.raw[:, trav_genes].X.toarray() \
-        if hasattr(adata.raw[:, trav_genes].X, "toarray") else adata.raw[:, trav_genes].X
-    X_trbv = adata.raw[:, trbv_genes].X.toarray() \
-        if hasattr(adata.raw[:, trbv_genes].X, "toarray") else adata.raw[:, trbv_genes].X
+    if use_raw:
+        X_trav = adata.raw[:, trav_genes].X.toarray() \
+            if hasattr(adata.raw[:, trav_genes].X, "toarray") else adata.raw[:, trav_genes].X
+        X_trbv = adata.raw[:, trbv_genes].X.toarray() \
+            if hasattr(adata.raw[:, trbv_genes].X, "toarray") else adata.raw[:, trbv_genes].X
+    else:
+        X_trav = adata[:, trav_genes].X.toarray() \
+            if hasattr(adata[:, trav_genes].X, "toarray") else adata[:, trav_genes].X
+        X_trbv = adata[:, trbv_genes].X.toarray() \
+            if hasattr(adata[:, trbv_genes].X, "toarray") else adata[:, trbv_genes].X
     
     # --- 计算每细胞各 V 基因占比 ---
     trav_sum = X_trav.sum(axis=1)

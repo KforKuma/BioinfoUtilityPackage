@@ -99,9 +99,9 @@ def _execute_cluster_analysis_workflow(
     
     # 1. UMAP 可视化
     plot_func(
+        adata=adata,
         save_addr=addr,
         filename=f"{prefix}_{key}_UMAP",
-        adata=adata,
         color=key,
         legend_loc="right margin",
         use_raw=raw,

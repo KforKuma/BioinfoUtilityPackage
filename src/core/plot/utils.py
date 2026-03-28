@@ -9,6 +9,8 @@ import seaborn as sns
 import matplotlib
 
 matplotlib.use('Agg')  # 使用无GUI的后端
+matplotlib.rcParams['pdf.fonttype'] = 42
+matplotlib.rcParams['ps.fonttype'] = 42
 
 import logging
 from src.utils.hier_logger import logged
@@ -27,7 +29,7 @@ def jitter_color(base_rgb, scale=0.1):
     return (r, g, b)
 
 @logged
-def matplotlib_savefig(fig, abs_file_path, close_after=True):
+def matplotlib_savefig(fig, abs_file_path, dpi=150,close_after=True):
     """
     Save a Matplotlib figure safely:
     - Automatically creates directory
@@ -72,10 +74,10 @@ def matplotlib_savefig(fig, abs_file_path, close_after=True):
     # 4️⃣ 保存文件
     if ext == "":
         # 未指定扩展名 → 默认保存 PNG + PDF
-        fig.savefig(base + ".png", bbox_inches="tight", dpi=300)
-        fig.savefig(base + ".pdf", bbox_inches="tight", dpi=300)
+        fig.savefig(base + ".png", bbox_inches="tight", dpi=dpi)
+        fig.savefig(base + ".pdf", bbox_inches="tight", format="pdf", dpi=dpi)
     else:
-        fig.savefig(base + ext, bbox_inches="tight", dpi=300)
+        fig.savefig(base + ext, bbox_inches="tight", dpi=dpi)
     
     # 5️⃣ 可选关闭 figure
     if close_after:

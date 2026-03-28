@@ -12,6 +12,7 @@ from adjustText import adjust_text
 
 import logging
 from src.utils.hier_logger import logged
+from src.core.plot.utils import matplotlib_savefig
 logger = logging.getLogger(__name__)
 
 
@@ -124,7 +125,7 @@ def pyscenic_pheatmap(tf_data: pd.DataFrame,
         col_colors=col_colors if len(obs_key) > 1 else col_colors[obs_key[0]],
         **default_pars
     )
-    
+    fig = g.fig
     # --- 添加图例 ---
     for key in obs_key:
         lut = {label: col_colors[key][col_colors[key].index == idx].iloc[0]
@@ -142,10 +143,9 @@ def pyscenic_pheatmap(tf_data: pd.DataFrame,
     )
     
     # --- 保存 ---
-    outpath = os.path.join(plt_savedir, f"{plt_name}.png")
-    plt.savefig(outpath, dpi=300, bbox_inches="tight")
-    plt.close()
-    print(f"Saved figure: {outpath}")
+    outpath = os.path.join(plt_savedir, plt_name)
+    matplotlib_savefig(fig, outpath)
+    
 
 @logged
 def plot_regulon_variability(
@@ -204,36 +204,60 @@ def plot_regulon_variability(
     if plt_savedir is None:
         plt_savedir = os.getcwd()
     os.makedirs(plt_savedir, exist_ok=True)
-
-    plt.figure(figsize=(6, 6))
-    sns.scatterplot(x="log10_mean", y="log10_cv2", data=plot_df, s=15, color="gray", alpha=0.6)
-    sns.lineplot(x="log10_mean", y="log10_fit", data=plot_df, color="red", label="Fitted model")
-    sns.lineplot(x="log10_mean", y="log10_thr", data=plot_df, color="blue", label=f"{fit_thr}× threshold")
-
+    
+    fig, ax = plt.subplots(figsize=(6, 6))
+    
+    # 2. 绘制基础散点图
+    sns.scatterplot(
+        x="log10_mean", y="log10_cv2", data=plot_df,
+        s=15, color="gray", alpha=0.6, ax=ax
+    )
+    
+    # 3. 绘制拟合线和阈值线
+    sns.lineplot(
+        x="log10_mean", y="log10_fit", data=plot_df,
+        color="red", label="Fitted model", ax=ax
+    )
+    sns.lineplot(
+        x="log10_mean", y="log10_thr", data=plot_df,
+        color="blue", label=f"{fit_thr}× threshold", ax=ax
+    )
+    
+    # 4. 如果有高变 Regulons，叠加红色散点
     if hv_regulons is not None:
         sns.scatterplot(
             x=np.log10(mean_auc[hv_regulons] + eps),
             y=np.log10(cv2[hv_regulons] + eps),
-            color="#cf5c60", s=20, label="HV regulons"
+            color="#cf5c60", s=20, label="HV regulons", ax=ax
         )
-
-    plt.title(f"Highly variable regulons (n={len(hv_regulons) if hv_regulons is not None else 0})")
-    plt.xlabel("Mean regulon activity (log10)")
-    plt.ylabel("CV² (log10)")
-    plt.legend(frameon=False)
-    plt.grid(True)
-    plt.tight_layout()
-
-    outfile = os.path.join(plt_savedir, f"{plt_name}.png")
-    plt.savefig(outfile, dpi=300, bbox_inches="tight")
-    plt.close()
+    
+    # 5. 使用 ax 对象设置属性
+    num_hv = len(hv_regulons) if hv_regulons is not None else 0
+    ax.set_title(f"Highly variable regulons (n={num_hv})")
+    ax.set_xlabel("Mean regulon activity (log10)")
+    ax.set_ylabel("CV² (log10)")
+    
+    # 6. 细节修饰
+    ax.legend(frameon=False)
+    ax.grid(True, linestyle='--', alpha=0.7)  # 建议网格线稍微淡化
+    
+    # 7. 保存与关闭
+    fig.tight_layout()
+    outfile = os.path.join(plt_savedir, plt_name)
+    
+    # 确保目录存在
+    if not os.path.exists(plt_savedir):
+        os.makedirs(plt_savedir)
+    
+    
+    matplotlib_savefig(fig, outfile)
     
     logger.info(f"Saved figure: {outfile}")
 
 @logged
 def plot_rss_heatmap(rss: pd.DataFrame,
-                     plt_savedir: object,
-                     plt_name: object,
+                     plt_savedir,
+                     plt_name,
                      thr: float = None,
                      order_rows: bool = True,
                      cluster_rows: bool = False,
@@ -296,7 +320,10 @@ def plot_rss_heatmap(rss: pd.DataFrame,
                        xticklabels=True,
                        yticklabels=True)
 
-    g.savefig(f"{plt_savedir}/{plt_name}.png", dpi=300, bbox_inches="tight")
+    fig = g.fig
+    outfile = os.path.join(plt_savedir, plt_name)
+    matplotlib_savefig(fig, outfile)
+    
     plt.close()
 
 @logged
@@ -340,16 +367,38 @@ def plot_rss_one_set(rss_df: pd.DataFrame,
     # Only keep top `n` for labeling
     df["label"] = df["regulon"]
     df.loc[n:, "label"] = None
-
-    plt.figure(figsize=(6, 4))
-    plt.scatter(df["rank"], df["rss"], color="blue", s=10)
-    texts = [plt.text(x, y, label, fontsize=8)
-             for x, y, label in zip(df["rank"], df["rss"], df["label"]) if label is not None]
-    adjust_text(texts, arrowprops=dict(arrowstyle='-', color='grey', lw=0.5))
-
-    plt.xlabel("Regulon Rank")
-    plt.ylabel("RSS")
-    plt.grid(True, linestyle="--", alpha=0.3)
-    plt.savefig(f"{plt_savedir}/{plt_name}.png", dpi=300, bbox_inches="tight")
-    plt.close()
+    
+    fig, ax = plt.subplots(figsize=(6, 4))
+    
+    # 2. 绘制散点图
+    # 注意：在 ax 对象中，scatter 是 ax.scatter
+    ax.scatter(df["rank"], df["rss"], color="blue", s=10)
+    
+    # 3. 添加文本标签
+    # 显式指定在 ax 上绘制 text
+    texts = [
+        ax.text(x, y, label, fontsize=8)
+        for x, y, label in zip(df["rank"], df["rss"], df["label"])
+        if label is not None
+    ]
+    
+    # 4. 自动调整标签位置
+    # add_objects 可以传入 ax，确保 adjust_text 知道边界
+    adjust_text(
+        texts,
+        ax=ax,
+        arrowprops=dict(arrowstyle='-', color='grey', lw=0.5)
+    )
+    
+    # 5. 使用 ax 设置坐标轴属性
+    ax.set_xlabel("Regulon Rank")
+    ax.set_ylabel("RSS")
+    ax.grid(True, linestyle="--", alpha=0.3)
+    
+    # 6. 保存与关闭
+    if not os.path.exists(plt_savedir):
+        os.makedirs(plt_savedir)
+    
+    save_path = os.path.join(plt_savedir, plt_name)
+    matplotlib_savefig(fig, save_path)
 

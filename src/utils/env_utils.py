@@ -100,16 +100,16 @@ def sanitize_filename(filename: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', '_', filename)
 
 
-
-
-def call_with_compatible_args(func, **kwargs):
+def call_with_compatible_args(func, *args, **kwargs):
+    # 获取函数签名
     sig = inspect.signature(func)
     accepted_params = sig.parameters
     
-    # 只保留 func 明确声明的参数
+    # 只保留 func 明确声明的关键字参数
     filtered_kwargs = {
         k: v for k, v in kwargs.items()
         if k in accepted_params
     }
     
-    return func(**filtered_kwargs)
+    # 传递 *args 和过滤后的 **kwargs 给目标函数
+    return func(*args, **filtered_kwargs)
