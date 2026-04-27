@@ -221,17 +221,21 @@ def plot_professional_matrix(adata, gene_dict, groupby,
     # 如果要隐藏基因组名称，直接传入展平后的基因列表，Scanpy 就不会绘制 Brackets
     var_names_input = filtered_gene_dict if show_gene_groups else [g for v in filtered_gene_dict.values() for g in v]
     
-    mp = sc.pl.matrixplot(
-        adata,
+    plot_kwargs = dict(
+        adata=adata,
         var_names=var_names_input,
         groupby=groupby,
         standard_scale='var',
         use_raw=False,
         cmap=cmap,
         return_fig=True,
-        dendrogram=dendrogram,
-        **kwargs
+        dendrogram=dendrogram
     )
+    
+    # 用 kwargs 覆盖默认参数
+    plot_kwargs.update(kwargs)
+    
+    mp = sc.pl.matrixplot(**plot_kwargs)
     
     # 3. 核心步骤：手动触发绘图渲染，确保 ax_dict 被填充
     mp.swap_axes = kwargs.get('swap_axes', False)  # 保持参数一致性

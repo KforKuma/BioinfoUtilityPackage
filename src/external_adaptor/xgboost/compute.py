@@ -13,8 +13,9 @@ import shap
 from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.preprocessing import (StandardScaler, label_binarize)
 from sklearn.decomposition import PCA
-from sklearn.metrics import (accuracy_score, classification_report, plot_confusion_matrix,
-                                 roc_curve, roc_auc_score)
+from sklearn.metrics import (accuracy_score, classification_report,roc_curve, roc_auc_score)
+
+
 
 import matplotlib
 matplotlib.use("Agg")  # 必须在导入 pyplot 之前设置后端
@@ -182,7 +183,7 @@ def _check_and_filter_diseases(adata_sub, group_key, categorical_key="disease_ty
     if verbose:
         if len(removed) > 0:
             logger.info(f"Removed categories: {list(removed)}")
-        logger.info("Remaining categories:", list(adata_sub.obs[categorical_key].unique()))
+        logger.info(f"Remaining categories: {list(adata_sub.obs[categorical_key].unique())}")
 
     if adata_sub.obs[categorical_key].nunique() <= 1:
         raise SkipThis("Not enough disease groups left for classification after filtering.")
@@ -372,6 +373,7 @@ def xgb_data_prepare(
         adata,
         obs_select=None,
         save_path=None,
+        file_name=None,
         method="scvi",
         obs_key="Subset_Identity",
         group_key="Patient",
@@ -458,9 +460,10 @@ def xgb_data_prepare(
 
     # 7. 保存
     # 默认保存在 f"{save_path}/dataset.npz"
-    _save_dataset(save_path, method, X_train, X_test, y_train, y_codes[test_idx],
-                  train_obs_index, adata_sub.obs.index[test_idx],
-                  sample_weights, mapping)
+    _save_dataset(save_path=save_path, X_train=X_train, X_test=X_test, y_train=y_train, y_test=y_codes[test_idx],
+                  train_obs_index=train_obs_index, test_obs_index=adata_sub.obs.index[test_idx],
+                  sample_weights=sample_weights, mapping=mapping,
+                  filename_prefix=file_name, verbose=True)
     logger.info("Finished and successfully saved.")
 
     return
@@ -473,10 +476,7 @@ def xgb_data_prepare_lodo(
         method="combined",
         group_key="Patient",
         categorical_key="disease_type",
-        test_size=0.2,
         verbose=False,
-        random_state=42,
-        oversample=True,
         weightsample=True,
         min_samples_per_class=10
 ):
@@ -535,37 +535,63 @@ def xgb_data_prepare_lodo(
                                            min_samples_per_class=min_samples_per_class,
                                            verbose=verbose)
 
-    # 2. 标签编码
-    # 这一步完全相同
+    # 全局特征预提取：
+    if "pca" in method.lower() or "combined" in method.lower():
+        logger.info("Pre-calculating global PCA...")
+        # 确保已经标准化
+        sc.pp.normalize_total(adata_sub, target_sum=1e4)
+        sc.pp.log1p(adata_sub)
+        sc.pp.scale(adata_sub, max_value=10)  # 建议全局 Scale
+        sc.tl.pca(adata_sub, n_comps=50)
+        
+    # 3. 将数据提前拉取到内存 (NumPy 格式)
+    # 这样循环内只有索引操作，没有任何计算
+    features_dict = {}
+    if "scvi" in method.lower() or "combined" in method.lower():
+        features_dict['scvi'] = np.ascontiguousarray(adata_sub.obsm["X_scVI"])
+    if "pca" in method.lower() or "combined" in method.lower():
+        features_dict['pca'] = np.ascontiguousarray(adata_sub.obsm["X_pca"])
+    
     logger.info("Start labeling tags.")
-    y_codes, mapping, y = _encode_labels(adata_sub, categorical_key=categorical_key, verbose=verbose)
-
-    # 3. 更新：循环分组生成子数据集，并顺带检查是否有幽灵类别不能满足
-    # 由于在子集规范步骤（_check_and_filter_diseases）已经做了基本的保证，
-    # 在 lodo 中采取宽松的要求，只做基本存在检查，不存在则跳过
-
-    patients = adata_sub.obs["Patient"]  # pandas Series
-    uniques = patients.dropna().unique()  # 保留出现顺序；若需排序可用 np.sort(np.unique(...))
+    y_codes, mapping, _ = _encode_labels(adata_sub, categorical_key=categorical_key, verbose=verbose)
+    obs_names = adata_sub.obs_names.values
+    patients = adata_sub.obs["Patient"].values
+    uniques = np.unique(patients)
+    
     total = len(uniques)
 
     for i, donor in enumerate(uniques, 1):
         logger.info(f"{i}/{total} • working on {donor}")
 
-        # ...你的处理逻辑...
         cell_num = (adata_sub.obs["Patient"].eq(donor)).sum()
         logger.info(f"Donor: {donor},total cells: {cell_num}")
 
         # 定义训练/测试集
         train_idx = adata_sub.obs["Patient"] != donor
         test_idx = adata_sub.obs["Patient"] == donor
-
+    
         if train_idx.sum() == 0 or test_idx.sum() == 0:
             # 不应该发生这种情况
             logger.info(f"Triggers length boundary condition, check data preprocessing.")
             continue
 
-        # 4. 特征提取（PCA 必须在 train 上 fit）
-        X_train, X_test = _extract_features(adata_sub, method, train_idx, test_idx, verbose)
+        # 4. 特征提取（简洁版）
+        # 直接拼接，不再调用 _extract_features
+        X_parts_train = []
+        X_parts_test = []
+        
+        if "scvi" in method.lower() or "combined" in method.lower():
+            # 这里甚至不需要重新 Scale，因为 scVI 潜变量通常已经很规整
+            X_parts_train.append(features_dict['scvi'][train_idx])
+            X_parts_test.append(features_dict['scvi'][test_idx])
+        
+        if "pca" in method.lower() or "combined" in method.lower():
+            X_parts_train.append(features_dict['pca'][train_idx])
+            X_parts_test.append(features_dict['pca'][test_idx])
+        
+        X_train = np.hstack(X_parts_train)
+        X_test = np.hstack(X_parts_test)
+
         y_train = y_codes[train_idx]
         y_test = y_codes[test_idx]
         train_obs_index = adata_sub.obs.index[train_idx.values]
@@ -580,9 +606,11 @@ def xgb_data_prepare_lodo(
         # 按照新格式来命名
         # 默认保存在 f"{save_path}/LODO_{donor}_dataset.npz"
         file_name = f"LODO_{donor}"
-        _save_dataset(save_path, X_train, X_test, y_train, y_test,
-                      train_obs_index, test_obs_index,
-                      sample_weights, mapping, file_name)
+        _save_dataset(save_path=save_path, X_train=X_train, X_test=X_test, y_train=y_train, y_test=y_test,
+                      train_obs_index=train_obs_index,
+                      test_obs_index=test_obs_index,
+                      sample_weights=sample_weights, mapping=mapping,
+                      filename_prefix=file_name, verbose=True)
         logger.info(f"Sample successfully finished and saved.")
 
     return
@@ -634,7 +662,7 @@ def xgboost_process(save_path, filename_prefix=None, eval_metric="mlogloss",
 
     # 读取数据，默认不使用 npz_file 参数
     if npz_file is None:
-        if filename_prefix is None:
+        if filename_prefix is not None:
             data_path = os.path.join(save_path, f"{filename_prefix}_dataset.npz")
         else:
             data_path = os.path.join(save_path, f"dataset.npz")
@@ -723,3 +751,92 @@ def xgboost_process_lodo(save_path, filename_prefix=None, eval_metric="mlogloss"
         )
 
     logger.info("All donors processed.")
+
+
+import numpy as np
+import pandas as pd
+from scipy.stats import rankdata
+from scipy.sparse import issparse
+@logged
+def compute_scvi_gene_corr_fast(
+        adata,
+        layer=None,
+        chunk_size=1000,
+        method="spearman",
+        top_n=50,
+        verbose=True
+):
+    """
+    内存优化版本：分块 + 向量化
+    """
+    
+    X_scvi = adata.obsm["X_scVI"]  # (cells, n_latent)
+    
+    if layer is None:
+        X_gene = adata.X
+    else:
+        X_gene = adata.layers[layer]
+    
+    gene_names = np.array(adata.var_names)
+    
+    n_cells, n_genes = X_gene.shape
+    n_latent = X_scvi.shape[1]
+    
+    if verbose:
+        print(f"{n_cells} cells × {n_genes} genes × {n_latent} latent")
+    
+    # --- rank transform (for Spearman) ---
+    if method == "spearman":
+        X_scvi_rank = np.apply_along_axis(rankdata, 0, X_scvi)
+    else:
+        X_scvi_rank = X_scvi
+    
+    result = {}
+    
+    # --- 对每个 latent ---
+    for i in range(n_latent):
+        latent_vec = X_scvi_rank[:, i]
+        
+        corrs_all = []
+        genes_all = []
+        
+        # --- 分块 gene ---
+        for start in range(0, n_genes, chunk_size):
+            end = min(start + chunk_size, n_genes)
+            
+            if issparse(X_gene):
+                chunk = X_gene[:, start:end].toarray()  # ⚠️只转一小块
+            else:
+                chunk = X_gene[:, start:end]
+            
+            # --- rank transform gene ---
+            if method == "spearman":
+                chunk = np.apply_along_axis(rankdata, 0, chunk)
+            
+            # --- 标准化 ---
+            chunk = chunk - chunk.mean(axis=0)
+            latent_centered = latent_vec - latent_vec.mean()
+            
+            # --- 向量化 Pearson ---
+            numerator = latent_centered @ chunk
+            denom = np.sqrt(
+                (latent_centered ** 2).sum() * (chunk ** 2).sum(axis=0)
+            )
+            
+            corr = numerator / denom
+            
+            corrs_all.append(corr)
+            genes_all.append(gene_names[start:end])
+        
+        corrs_all = np.concatenate(corrs_all)
+        genes_all = np.concatenate(genes_all)
+        
+        df = pd.DataFrame({
+            "gene": genes_all,
+            "corr": corrs_all
+        })
+        
+        df = df.reindex(df["corr"].abs().sort_values(ascending=False).index)
+        result[f"scVI_{i}"] = df.head(top_n)
+    
+    return result

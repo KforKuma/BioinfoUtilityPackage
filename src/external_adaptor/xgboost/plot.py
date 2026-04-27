@@ -22,46 +22,53 @@ import matplotlib
 matplotlib.use("Agg")  # 必须在导入 pyplot 之前设置后端
 import matplotlib.pyplot as plt
 
-from src.core.plot.basics import _matplotlib_savefig
+from src.core.plot.basics import matplotlib_savefig
 
 import logging
 from src.utils.hier_logger import logged
 logger = logging.getLogger(__name__)
 
 @logged
-def plot_tree_importance(clf,save_path,filename_prefix):
+def plot_tree_importance(clf, save_path, filename_prefix, label_mapping=None):
     """
-    Plot feature importance of a XGBoost model.
-
-    TODO: 返回数据，兼容对维度的进一步分析。
-
-    Parameters
-    ----------
-    clf : XGBClassifier
-        Trained XGBClassifier model.
-    save_path : str
-        Path to save the figure.
-    filename_prefix : str
-        Prefix of the filename to save the figure.
-
-    Returns
-    -------
-    None
-
-    Notes
-    -----
-    This function uses the `xgb.plot_importance` function to plot the feature importance of a XGBClassifier model.
-    The figure is saved to the specified path with the given filename prefix.
+    Plot feature importance and return importance data.
     """
+    
+    plt.figure()  # ⭐ 防止污染
+    
     ax = xgb.plot_importance(clf, max_num_features=20)
     fig = ax.figure
     
     prefix = f"{filename_prefix}_" if filename_prefix else ""
-    
     abs_path = os.path.join(save_path, "output", f"{prefix}FeatureImportance")
-    _matplotlib_savefig(fig, abs_path)
+    
+    matplotlib_savefig(fig, abs_path)
+    plt.close(fig)  # ⭐ 防止影响后续图
     
     logger.info(f"Plot saved at {abs_path}.")
+    
+    # ✅ ===== 核心：提取 importance 数据 =====
+    booster = clf.get_booster()
+    
+    # 默认 importance（weight = 出现次数）
+    score_dict = booster.get_score(importance_type="weight")
+    
+    # 转成 DataFrame
+    importance_df = pd.DataFrame({
+        "feature": list(score_dict.keys()),
+        "importance": list(score_dict.values())
+    })
+    
+    # ✅ 映射真实 feature 名
+    if label_mapping is not None:
+        importance_df["feature"] = importance_df["feature"].map(
+            lambda x: label_mapping.get(int(x[1:]), x)
+        )
+    
+    # 排序
+    importance_df = importance_df.sort_values("importance", ascending=False)
+    
+    return importance_df
 
 @logged
 def plot_confusion_matrix(cm_matrix,label_mapping,save_path,filename_prefix):
@@ -100,61 +107,46 @@ def plot_confusion_matrix(cm_matrix,label_mapping,save_path,filename_prefix):
     fig.subplots_adjust(left=0.25, bottom=0.25)  # 调整边距
     
     prefix = f"{filename_prefix}_" if filename_prefix else ""
-    abs_path = os.path.join(save_path, "output", f"{prefix}ConfusionMatrix.png")
-    _matplotlib_savefig(fig,abs_path)
+    abs_path = os.path.join(save_path, "output", f"{prefix}ConfusionMatrix")
+    matplotlib_savefig(fig,abs_path)
     
     logger.info(f"Plot saved at {abs_path}.")
+
 
 @logged
-def plot_shap_summary(clf,X_test,label_mapping,save_path,filename_prefix):
-    """
-    Plot SHAP summary plot.
-
-    TODO: 返回数据，兼容对 SHAP 的进一步分析。
-
-    Parameters
-    ----------
-    clf : Xgboost.Classifier
-        Classifier object trained on the data.
-    X_test : numpy.ndarray
-        Test data.
-    label_mapping : dict
-        Mapping from feature index to feature name.
-    save_path : str
-        Path to save the figure.
-    filename_prefix : str
-        Prefix of the filename to save the figure.
-
-    Returns
-    -------
-    None
-
-    Notes
-    -----
-    This function uses the SHAP library to plot the SHAP summary plot.
-    The SHAP summary plot shows the contribution of each feature to the model
-    output for a set of test samples. The plot is saved to the specified path with
-    the given filename prefix.
-
-    Examples
-    --------
-    # Plot SHAP summary plot
-    plot_shap_summary(clf, X_test, label_mapping, save_path, "test")
-    """
+def plot_shap_summary(clf, X_test, label_mapping, save_path, filename_prefix):
     feature_names = [label_mapping.get(i, f"Feature {i}") for i in range(X_test.shape[1])]
+    
     explainer = shap.TreeExplainer(clf)
     shap_values = explainer.shap_values(X_test)
-    ax = shap.summary_plot(shap_values, X_test, feature_names=feature_names, show=False)
-    fig = ax.figure
+    
+    plt.figure()
+    # 不要接 ax
+    shap.summary_plot(
+        shap_values,
+        X_test,
+        feature_names=feature_names,
+        show=False
+    )
+    
+    fig = plt.gcf()  # 获取当前图
     
     fig.tight_layout()
-    fig.subplots_adjust(top=0.9)  # 这里留白
+    fig.subplots_adjust(top=0.9)
     
     prefix = f"{filename_prefix}_" if filename_prefix else ""
-    abs_path = os.path.join(save_path, "output", f"{prefix}ShapSummary.png")
-    _matplotlib_savefig(fig, abs_path)
+    abs_path = os.path.join(save_path, "output", f"{prefix}ShapSummary")
+    
+    matplotlib_savefig(fig, abs_path)
     
     logger.info(f"Plot saved at {abs_path}.")
+    
+    # 新增：返回数据用于后续分析
+    return {
+        "shap_values": shap_values,
+        "feature_names": feature_names,
+        "X_test": X_test
+    }
 
 @logged
 def plot_roc_per_class(y_test,y_proba,label_mapping,save_path,filename_prefix):
@@ -204,8 +196,8 @@ def plot_roc_per_class(y_test,y_proba,label_mapping,save_path,filename_prefix):
     fig.tight_layout()
     
     prefix = f"{filename_prefix}_" if filename_prefix else ""
-    abs_path = os.path.join(save_path, "output", f"{prefix}ROC.png")
-    _matplotlib_savefig(fig, abs_path)
+    abs_path = os.path.join(save_path, "output", f"{prefix}ROC")
+    matplotlib_savefig(fig, abs_path)
     
     logger.info(f"Plot saved at {abs_path}.")
 
@@ -246,8 +238,8 @@ def plot_fpr_per_class(y_test, y_pred, label_mapping, save_path, filename_prefix
     fig.tight_layout()
     
     prefix = f"{filename_prefix}_" if filename_prefix else ""
-    abs_path = os.path.join(save_path, "output", f"{prefix}perClassMetrics.png")
-    _matplotlib_savefig(fig, abs_path)
+    abs_path = os.path.join(save_path, "output", f"{prefix}perClassMetrics")
+    matplotlib_savefig(fig, abs_path)
     
     logger.info(f"Combined plot saved at {abs_path}.")
 
@@ -298,7 +290,7 @@ def plot_fpr_violin(results, filename_prefix,save_path,show_points=True):
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     prefix = f"{filename_prefix}_" if filename_prefix else ""
     abs_path = os.path.join(save_path, "output", f"{prefix}perClassMetrics.png")
-    _matplotlib_savefig(fig, abs_path)
+    matplotlib_savefig(fig, abs_path)
 
 
 @logged
@@ -359,8 +351,8 @@ def plot_consensus_dendrogram(Z_consensus, donor_labels, branch_supports,
     fig.tight_layout()
 
     prefix = f"{filename_prefix}_" if filename_prefix else ""
-    abs_path = os.path.join(save_path, "output", f"{prefix}ConsensusDendro.png")
-    _matplotlib_savefig(fig, abs_path)
+    abs_path = os.path.join(save_path, "output", f"{prefix}ConsensusDendro")
+    matplotlib_savefig(fig, abs_path)
 
 
 @logged
@@ -383,8 +375,8 @@ def plot_stability_dendrogram(co_matrix, labels, save_path, filename_prefix):
     ax.set_title("Stability Dendrogram")
 
     prefix = f"{filename_prefix}_" if filename_prefix else ""
-    abs_path = os.path.join(save_path, "output", f"{prefix}StabilityDendro.png")
-    _matplotlib_savefig(fig, abs_path)
+    abs_path = os.path.join(save_path, "output", f"{prefix}StabilityDendro")
+    matplotlib_savefig(fig, abs_path)
 
 
 @logged
@@ -394,8 +386,8 @@ def plot_stability_clustermap(co_matrix, labels, save_path, filename_prefix):
     fig = ax.figure
 
     prefix = f"{filename_prefix}_" if filename_prefix else ""
-    abs_path = os.path.join(save_path, "output", f"{prefix}StabilityCluster.png")
-    _matplotlib_savefig(fig, abs_path)
+    abs_path = os.path.join(save_path, "output", f"{prefix}StabilityCluster")
+    matplotlib_savefig(fig, abs_path)
 
 @logged
 def plot_xgb_prediction_umap(adata, save_path, filename_prefix=None, skip_subcluster=False,do_return=True,**kwargs):
@@ -451,7 +443,7 @@ def plot_xgb_prediction_umap(adata, save_path, filename_prefix=None, skip_subclu
     if not skip_subcluster:
         from src.core.adata.ops import subcluster
         logger.info(f"Starting subclustering process, this may take some time...")
-        default_pars = {"adata":adata_sub,"n_neighbors":20, "n_pcs":20,
+        default_pars = {"adata":adata_sub,"n_neighbors":20, "n_pcs":10,
                         "skip_DR":False, "resolutions":[1.0], "use_rep":"X_scVI"}
         default_pars.update(kwargs)
         adata_sub = subcluster(**default_pars)
@@ -518,7 +510,8 @@ def plot_taxonomy(adata, save_path, filename_prefix=None):
     fig, ax = plt.subplots(figsize=(6, 4))
     dendrogram(linkage_matrix, labels=class_names, orientation="right",ax=ax)
     ax.set_title("Class taxonomy (from confusion matrix)")
-    _matplotlib_savefig(fig, abs_path)
+    abs_path = os.path.join(os.path.join(save_path, "output"), "Class_taxonomy(confusion matrix)")
+    matplotlib_savefig(fig, abs_path)
     
     logger.info(f"Linkage map (confusion matrix) plotted.")
     del fig, ax
@@ -548,7 +541,8 @@ def plot_taxonomy(adata, save_path, filename_prefix=None):
     fig, ax = plt.subplots(figsize=(6, 4))
     dendrogram(linkage_matrix, labels=class_names, orientation="right",ax=ax)
     ax.set_title("Class taxonomy (from feature importances)")
-    _matplotlib_savefig(fig, abs_path)
+    abs_path = os.path.join(os.path.join(save_path, "output"), "Class_taxonomy(feature importances)")
+    matplotlib_savefig(fig, abs_path)
     
     logger.info(f"Linkage map (SHAP) plotted.")
     del fig, ax
@@ -575,7 +569,8 @@ def plot_taxonomy(adata, save_path, filename_prefix=None):
     fig, ax = plt.subplots(figsize=(6, 4))
     dendrogram(linkage_matrix, labels=class_names, orientation="right",ax=ax)
     ax.set_title("Class taxonomy (from latent space)")
-    _matplotlib_savefig(fig, abs_path)
+    abs_path = os.path.join(os.path.join(save_path, "output"), "Class_taxonomy(latent space)")
+    matplotlib_savefig(fig, abs_path)
     
     logger.info(f"Linkage map (latent space) plotted.")
     del fig, ax
@@ -624,8 +619,8 @@ def plot_lodo_stripplots(results, save_path,filename_prefix,show_points=True):
 
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     prefix = f"{filename_prefix}_" if filename_prefix else ""
-    abs_path = os.path.join(save_path, "output", f"{prefix}LodoStripplots.png")
-    _matplotlib_savefig(fig, abs_path)
+    abs_path = os.path.join(save_path, "output", f"{prefix}LodoStripplots")
+    matplotlib_savefig(fig, abs_path)
 
 @logged
 def plot_lodo_confusion_matrix(results, save_path, filename_prefix):
@@ -672,6 +667,6 @@ def plot_lodo_confusion_matrix(results, save_path, filename_prefix):
 
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     prefix = f"{filename_prefix}_" if filename_prefix else ""
-    abs_path = os.path.join(save_path, "output", f"{prefix}LodoConfusionMatrix.png")
-    _matplotlib_savefig(fig, abs_path)
+    abs_path = os.path.join(save_path, "output", f"{prefix}LodoConfusionMatrix")
+    matplotlib_savefig(fig, abs_path)
 

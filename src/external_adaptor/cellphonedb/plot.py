@@ -625,7 +625,8 @@ def plot_gene_bubble_with_cell_fraction(
     # -----------------------------
     abs_path = os.path.join(save_addr, filename)
     matplotlib_savefig(fig, abs_path)
-    summary_filtered.to_excel(f"{save_addr}/{filename}_data.xlsx", index=False)
+    summary_filtered.to_excel(f"{save_addr}/{filename}_data(dot).xlsx", index=False)
+    stack_pivot.to_excel(f"{save_addr}/{filename}_data(bar).xlsx", index=False)
     plt.close()
     
     return summary_filtered

@@ -235,7 +235,7 @@ def run_Dirichlet_Wald(df_all: pd.DataFrame,
     # 2) Metadata & Design Matrix
     meta = df_all.drop_duplicates(subset=[group_label]).set_index(group_label).reindex(wide.index)
     
-    # 获取 BLUPs (调用你的外部辅助函数)
+    # 获取 BLUPs
     try:
         blup_df = _compute_donor_blups(df_all, celltypes)
         offset = np.zeros_like(wide.values)

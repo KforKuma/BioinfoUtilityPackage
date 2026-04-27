@@ -20,9 +20,16 @@ class HierLogger(logging.Logger):
     
     def info(self, msg, *args, **kwargs):
         lvl = _current_level.get()
+        # 保持缩进逻辑
         indented_msg = f"{self.indent_str * lvl}{msg}"
-        super().info(indented_msg, *args, **kwargs)
-
+        
+        # 关键修复：
+        # 如果 args 里面有内容，说明用户用了 logger.info("msg %s", arg)
+        # 如果 args 为空，说明用户可能用了 f-string，直接传 indented_msg 即可
+        if not args:
+            super().info(indented_msg, **kwargs)
+        else:
+            super().info(indented_msg, *args, **kwargs)
 
 logging.setLoggerClass(HierLogger)
 logger = logging.getLogger("myhier")

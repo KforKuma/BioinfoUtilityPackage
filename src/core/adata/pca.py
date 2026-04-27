@@ -1,138 +1,207 @@
-import anndata
-import pandas as pd
-import scanpy as sc
-import numpy as np
-import scipy as sp
-
-from sklearn.decomposition import PCA
-from sklearn.preprocessing import RobustScaler
-
-from src.core.plot.pca import _plot_pca, _pca_cluster_process
-from src.utils.env_utils import sanitize_filename
-
+import os
 import sys
-sys.stdout.reconfigure(encoding='utf-8')
+from typing import Literal, Tuple
 
-
+import pandas as pd
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler
 
 import logging
 from src.utils.hier_logger import logged
+
+sys.stdout.reconfigure(encoding="utf-8")
+
 logger = logging.getLogger(__name__)
 
-@logged
-def _run_pca(logfc_matrix, n_components=2):
-    
 
-    # 转置 → 每行是一个“celltype-disease”样本，每列是基因
-    df_T = logfc_matrix.T  # shape: [samples x genes]
+def _validate_input_dataframe(df: pd.DataFrame, required_columns: list[str]) -> None:
+    """检查输入表是否包含 PCA 所需列。"""
+    missing_cols = [col for col in required_columns if col not in df.columns]
+    if missing_cols:
+        raise KeyError(f"Required columns are missing from input DataFrame: {missing_cols}.")
 
-    # 标准化（按列，即基因）
-    scaler = RobustScaler()
-    X_scaled = scaler.fit_transform(df_T)
 
-    # PCA
-    pca = PCA(n_components=n_components)
-    pca_result = pca.fit_transform(X_scaled)
+def _prepare_score_matrix(
+        df: pd.DataFrame,
+        agg_func: Literal["mean", "median", "sum", "max", "min"] | str = "mean",
+) -> pd.DataFrame:
+    """将长表整理为可供 PCA 使用的宽表。"""
+    _validate_input_dataframe(df, ["folder_name", "names", "scores"])
 
-    # 构造结果 dataframe
-    result_df = pd.DataFrame(
-        pca_result,
-        columns=[f"PC{i + 1}" for i in range(n_components)],
-        index=df_T.index  # 每个index是 like "UC_T Cell_NK.CD16+"
+    prepared_df = df.copy()
+    prepared_df["cell_type"] = prepared_df["folder_name"].astype(str).str.lstrip("_")
+
+    data_matrix = prepared_df.pivot_table(
+        index="cell_type",
+        columns="names",
+        values="scores",
+        aggfunc=agg_func,
     )
-    result_df = result_df.copy()
-    result_df['label'] = result_df.index
-    result_df = result_df.reset_index(drop=True)
 
-    # 解析 label 中的疾病 & 细胞类型（可根据你的格式微调）
-    result_df['group'] = result_df['label'].apply(lambda x: '_'.join(x.split('_')[:-2]))
-    result_df['cell_type'] = result_df['label'].apply(lambda x: '_'.join(x.split('_')[-2:]))
+    if data_matrix.empty:
+        raise ValueError("The pivoted score matrix is empty. Please check the input DataFrame.")
 
-    return result_df, pca
+    return data_matrix
+
 
 @logged
-def _pca_process(merged_df, save_addr, filename_prefix, figsize=(12, 10)):
+def merge_xlsx_from_subfolders(parent_dir: str, file_suffix: str = ".xlsx") -> pd.DataFrame:
+    """递归合并子目录中的 Excel 文件。
 
-    if merged_df.columns.duplicated().any():
-        logger.info("Warning: There are duplicated column names!")
-        # 可加前缀防止冲突，例如按df编号
-        df_list_renamed = [
-            df.add_prefix(f"df{i}_") for i, df in enumerate(merged_df)
-        ]
-        merged_df = pd.concat(df_list_renamed, axis=1)
+    仅会读取目录名以下划线 `_` 开头的子目录，并为每条记录补充 `folder_name` 列。
 
-    result_df, pca = _run_pca(merged_df, n_components=3)
-    explained_var = pca.explained_variance_ratio_
-    logger.info(f"PC1 explains {explained_var[0]:.2%} of variance")
-    logger.info(f"PC2 explains {explained_var[1]:.2%} of variance")
-    logger.info(f"PC3 explains {explained_var[2]:.2%} of variance")
+    Args:
+        parent_dir: 待扫描的父目录。
+        file_suffix: 需要合并的文件后缀名。
 
-    _plot_pca(result_df, pca,
-              save_addr=save_addr, filename_prefix=filename_prefix, figsize=figsize,
-              color_by='cell_type')
-    return result_df, pca
+    Returns:
+        合并后的 DataFrame。
+    """
+    if not os.path.exists(parent_dir):
+        raise FileNotFoundError(f"`parent_dir`: '{parent_dir}' does not exist.")
 
-@logged
-def run_pca_and_deg_for_celltype(celltype, merged_df_filtered, adata, save_addr,
-                                 figsize=(12, 10),
-                                 file_prefix="20251110"):
-    '''
-    对每个/每组细胞亚群按照分组信进行拆分后，进行 PCA 聚类，观察其模式
+    combined_data = []
+    for subdir, _, files in os.walk(parent_dir):
+        if not os.path.basename(subdir).startswith("_"):
+            continue
 
-    :param celltype: list or tuple or str
-    :param merged_df_filtered:
-    :param adata:
-    :param save_addr:
-    :param figsize:
-    :param file_prefix: 探索性任务推荐用时间批次进行文件管理
-    :return:
-    '''
-    from src.core.adata.ops import remap_obs_clusters
-    from src.core.adata.deg import easy_DEG
-    
-    
-    if isinstance(celltype, (list, tuple)):
-        logger.info(f"Processing multiple celltypes.")
-        column_mask = [col for col in merged_df_filtered.columns if col.split("_")[-2] in celltype]
-        celltype_use_as_name = "-".join(celltype)
-    else:
-        logger.info(f"Processing {celltype}")
-        column_mask = [col for col in merged_df_filtered.columns if col.split("_")[-2] == celltype]
-        celltype_use_as_name = celltype
+        for file_name in files:
+            if not file_name.endswith(file_suffix):
+                continue
 
-    celltype_use_as_name = celltype_use_as_name.replace(" ", "-")
-    celltype_use_as_name = sanitize_filename(celltype_use_as_name)
+            file_path = os.path.join(subdir, file_name)
+            logger.info(f"[merge_xlsx_from_subfolders] Reading file: {file_path}")
+            try:
+                df = pd.read_excel(file_path)
+                df["folder_name"] = os.path.basename(subdir)
+                combined_data.append(df)
+            except Exception as exc:
+                logger.info(
+                    f"[merge_xlsx_from_subfolders] Warning! Failed to read file: {file_path}. "
+                    f"Details: {exc}"
+                )
 
-    if not column_mask:
-        logger.info(f"No columns found for {celltype}")
-        return None
+    if not combined_data:
+        raise ValueError(
+            f"No file ending with '{file_suffix}' was found in subfolders starting with '_' under: {parent_dir}."
+        )
 
-    df_split = merged_df_filtered.loc[:, column_mask]
-    result_df, pca = _pca_process(df_split,
-                                  save_addr=save_addr,
-                                  filename_prefix=f"{file_prefix}({celltype_use_as_name})",
-                                  figsize=figsize)
-
-    cluster_to_labels = _pca_cluster_process(result_df,
-                                             save_addr=save_addr,
-                                             filename=f"{file_prefix}({celltype_use_as_name})",
-                                             figsize=figsize)
-
-    if not cluster_to_labels:
-        logger.info(f"{celltype} cannot be clustered, skipped.")
-        return None
-
-    # 进行多对一的映射
-    adata_combined = remap_obs_clusters(adata, mapping=cluster_to_labels,
-                                        obs_key="tmp", new_key="cluster")
-
-    easy_DEG(
-        adata_combined,
-        save_addr=save_addr,
-        filename_prefix=f"{file_prefix}_{celltype_use_as_name})",
-        obs_key="cluster",
-        save_plot=True,
-        plot_gene_num=10,
-        downsample=5000,
-        use_raw=True
+    merged_df = pd.concat(combined_data, ignore_index=True)
+    logger.info(
+        f"[merge_xlsx_from_subfolders] Merged DataFrame generated with shape: {merged_df.shape}."
     )
+    return merged_df
+
+
+@logged
+def run_pca_analysis(
+        df: pd.DataFrame,
+        n_components: int = 5,
+        agg_func: Literal["mean", "median", "sum", "max", "min"] | str = "mean",
+) -> Tuple[pd.DataFrame, pd.Series]:
+    """执行 PCA 降维分析。
+
+    Args:
+        df: 输入长表，至少包含 `folder_name`、`names`、`scores` 三列。
+        n_components: 需要保留的主成分数量。
+        agg_func: 当同一 cell subtype/subpopulation 与同一基因重复出现时的聚合方式。
+
+    Returns:
+        一个二元组：
+        1. 含 PCA 坐标的 DataFrame；
+        2. 各主成分解释方差比例。
+    """
+    if n_components < 1:
+        raise ValueError("`n_components` must be greater than or equal to 1.")
+
+    data_matrix = _prepare_score_matrix(df, agg_func=agg_func).fillna(0)
+
+    scaler = StandardScaler()
+    scaled_data = scaler.fit_transform(data_matrix)
+
+    n_components_final = min(n_components, data_matrix.shape[0], data_matrix.shape[1])
+    if n_components_final < 1:
+        raise ValueError("No valid PCA component can be computed from the current data matrix.")
+
+    pca = PCA(n_components=n_components_final)
+    pca_results = pca.fit_transform(scaled_data)
+
+    pca_df = pd.DataFrame(
+        pca_results,
+        columns=[f"PC{i + 1}" for i in range(pca.n_components_)],
+        index=data_matrix.index,
+    ).reset_index()
+    pca_df = pca_df.rename(columns={"cell_type": "cell_type"})
+
+    logger.info(
+        f"[run_pca_analysis] PCA completed with `n_components`: {pca.n_components_}. "
+        f"Input matrix shape: {data_matrix.shape}."
+    )
+    return pca_df, pca.explained_variance_ratio_
+
+
+@logged
+def run_pca_and_clustering(
+        df: pd.DataFrame,
+        n_components: int = 5,
+        n_clusters: int = 3,
+        agg_func: Literal["mean", "median", "sum", "max", "min"] | str = "mean",
+) -> Tuple[pd.DataFrame, pd.Series]:
+    """执行 PCA 降维并在 PCA 空间中进行 KMeans 聚类。
+
+    Args:
+        df: 输入长表，至少包含 `folder_name`、`names`、`scores` 三列。
+        n_components: 需要保留的主成分数量。
+        n_clusters: KMeans 聚类簇数。
+        agg_func: 当同一 cell subtype/subpopulation 与同一基因重复出现时的聚合方式。
+
+    Returns:
+        一个二元组：
+        1. 含 PCA 坐标和聚类标签的 DataFrame；
+        2. 各主成分解释方差比例。
+    """
+    if n_components < 1:
+        raise ValueError("`n_components` must be greater than or equal to 1.")
+    if n_clusters < 1:
+        raise ValueError("`n_clusters` must be greater than or equal to 1.")
+
+    data_matrix = _prepare_score_matrix(df, agg_func=agg_func)
+
+    # 使用 0 作为缺失分数兜底，避免 PCA/KMeans 被 NaN 阻断。
+    imputer = SimpleImputer(strategy="constant", fill_value=0)
+    imputed_data = imputer.fit_transform(data_matrix)
+
+    scaler = StandardScaler()
+    scaled_data = scaler.fit_transform(imputed_data)
+
+    n_comp = min(n_components, data_matrix.shape[0], data_matrix.shape[1])
+    if n_comp < 1:
+        raise ValueError("No valid PCA component can be computed from the current data matrix.")
+    if n_clusters > data_matrix.shape[0]:
+        logger.info(
+            f"[run_pca_and_clustering] Warning! `n_clusters`: {n_clusters} is greater than sample size: "
+            f"{data_matrix.shape[0]}. Falling back to sample size."
+        )
+        n_clusters = data_matrix.shape[0]
+
+    pca = PCA(n_components=n_comp)
+    pca_results = pca.fit_transform(scaled_data)
+
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init="auto")
+    cluster_labels = kmeans.fit_predict(pca_results)
+
+    pca_columns = [f"PC{i + 1}" for i in range(pca_results.shape[1])]
+    final_df = pd.DataFrame(
+        pca_results,
+        columns=pca_columns,
+        index=data_matrix.index,
+    ).reset_index()
+    final_df["cluster"] = cluster_labels.astype(str)
+
+    logger.info(
+        f"[run_pca_and_clustering] PCA and clustering completed with `n_components`: {n_comp}, "
+        f"`n_clusters`: {n_clusters}."
+    )
+    return final_df, pca.explained_variance_ratio_

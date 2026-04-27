@@ -13,8 +13,7 @@ import shap
 from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.preprocessing import (StandardScaler, label_binarize)
 from sklearn.decomposition import PCA
-from sklearn.metrics import (accuracy_score, classification_report, plot_confusion_matrix,
-                                 roc_curve, roc_auc_score)
+from sklearn.metrics import (accuracy_score, classification_report,confusion_matrix, roc_curve, roc_auc_score)
 from scipy.cluster.hierarchy import linkage
 from scipy.spatial.distance import pdist, squareform
 

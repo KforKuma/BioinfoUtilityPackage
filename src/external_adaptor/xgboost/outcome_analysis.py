@@ -11,8 +11,7 @@ import shap
 from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.preprocessing import (StandardScaler, label_binarize)
 from sklearn.decomposition import PCA
-from sklearn.metrics import (accuracy_score, classification_report, plot_confusion_matrix,
-                                 roc_curve, roc_auc_score)
+from sklearn.metrics import (accuracy_score, classification_report,roc_curve, roc_auc_score)
 from scipy.cluster.hierarchy import linkage
 from scipy.spatial.distance import pdist, squareform
 
@@ -22,10 +21,10 @@ import matplotlib.pyplot as plt
 
 # Function in this program
 
-from plot import (plot_tree_importance, plot_confusion_matrix, plot_roc_per_class,
+from .plot import (plot_tree_importance, plot_confusion_matrix, plot_roc_per_class,
                   plot_fpr_per_class, plot_lodo_confusion_matrix, plot_shap_summary, plot_lodo_stripplots,
                   plot_stability_dendrogram, plot_consensus_dendrogram, plot_stability_clustermap)
-from support import (_compute_cm, _read_lodo_outcome, _donor_vectors_from_proba,
+from .support import (_compute_cm, _read_lodo_outcome, _donor_vectors_from_proba,
                      compute_donor_similarity_matrix, bootstrap_consensus_dendrogram)
 
 import logging
@@ -70,7 +69,7 @@ def xgb_outcome_analyze(save_path, filename_prefix=None):
 
     # 开始做图
     ## 特征重要性
-    plot_tree_importance(clf, save_path, filename_prefix)
+    importance_df = plot_tree_importance(clf, save_path, filename_prefix)
 
     ## 混淆矩阵
     confusion_matrix = _compute_cm(y_test,y_pred)
@@ -78,7 +77,7 @@ def xgb_outcome_analyze(save_path, filename_prefix=None):
                           save_path=save_path,filename_prefix=filename_prefix)
 
     # SHAP分析
-    plot_shap_summary(clf,X_test,label_mapping,save_path,filename_prefix)
+    shap_dict = plot_shap_summary(clf,X_test,label_mapping,save_path,filename_prefix)
 
     # ROC
     plot_roc_per_class(y_test,y_proba,label_mapping,save_path,filename_prefix)
@@ -87,9 +86,14 @@ def xgb_outcome_analyze(save_path, filename_prefix=None):
     plot_fpr_per_class(y_test, y_pred, label_mapping, save_path, filename_prefix)
 
     logger.info("Finished.\n")
+    return {
+        "shap": shap_dict,
+        "confusion_matrix": confusion_matrix,
+        "importance_df": importance_df
+    }
 
 @logged
-def xgb_outcome_analyze_lodo(save_path,filename_prefix=None):
+def xgb_outcome_analyze_lodo(save_path, filename_prefix=None):
     '''
     LODO 多每个细胞亚群进行一组LODO的处理
 
@@ -97,32 +101,38 @@ def xgb_outcome_analyze_lodo(save_path,filename_prefix=None):
     :param filename_prefix:
     :return:
     '''
-
+    
     results = _read_lodo_outcome(save_path, filename_prefix)
-
-    os.makedirs(f"{save_path}/output",exist_ok=True
+    
+    os.makedirs(save_path, exist_ok=True
                 )
     # 绘制箱型图
     logger.info("Starting plot_lodo_stripplots ...")
-    plot_lodo_stripplots(results, save_path=f"{save_path}/output/combined_boxplot.png")
-
+    plot_lodo_stripplots(results, save_path=save_path, filename_prefix=filename_prefix)
+    
     # 绘制对比混淆矩阵（Mean|Sigma)
     logger.info("Starting plot_lodo_confusion_matrix ...")
-    plot_lodo_confusion_matrix(results, save_path=f"{save_path}/output/average_confusion_matrix.png")
-
+    plot_lodo_confusion_matrix(results, save_path=save_path, filename_prefix=filename_prefix)
+    
     # 映射一个疾病标签用
     donor_labels = results["donor"]
-    label_mapping = results['mapping']
-    disease_label = [label_mapping.get(lab, lab) for lab in donor_labels]
-
+    label_mapping = results['mapping'][0]
+    
+    if isinstance(label_mapping, dict):
+        disease_label = [label_mapping.get(lab, lab) for lab in donor_labels]
+    else:
+        # 处理 label_mapping 不是字典的情况
+        print("label_mapping 不是字典类型")
+        print(label_mapping)
+    
     logger.info("Starting plot_stability_dendrogram ...")
     donor_mat = _donor_vectors_from_proba(results["y_proba"])
     sim = compute_donor_similarity_matrix(donor_mat, metric='cosine')
-    plot_stability_dendrogram(sim, disease_label, save_path=f"{save_path}/output/stability_dendro.png")
-
+    plot_stability_dendrogram(sim, disease_label, save_path=save_path, filename_prefix=filename_prefix)
+    
     logger.info("Starting plot_stability_clustermap ...")
-    plot_stability_clustermap(sim, disease_label, save_path=f"{save_path}/output/stability_cluster.png")
-
+    plot_stability_clustermap(sim, disease_label, save_path=save_path, filename_prefix=filename_prefix)
+    
     logger.info("Starting plot plot_consensus_dendrogram ...")
     consensus_tree, branch_supports = bootstrap_consensus_dendrogram(sim_matrix=sim, n_bootstrap=100,
                                                                      method="average", support_threshold=0.5)
@@ -130,9 +140,6 @@ def xgb_outcome_analyze_lodo(save_path,filename_prefix=None):
     D_condensed = squareform(sim)  # 对角设为0，把方阵转换成一维距离向量
     Z_real = linkage(D_condensed, method='average')  # 或 'complete', 'ward' 等
     plot_consensus_dendrogram(Z_real, disease_label, branch_supports,
-                              save_path=f"{save_path}/output/consensual_tree.png")
-
+                              save_path=save_path, filename_prefix=filename_prefix)
+    
     logger.info("Finished.\n")
-
-
-
