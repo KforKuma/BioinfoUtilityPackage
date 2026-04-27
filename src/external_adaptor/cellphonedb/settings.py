@@ -1,24 +1,42 @@
+"""CellPhoneDB 适配层的公共常量配置。"""
+
 import matplotlib.pyplot as plt
-
 from itertools import cycle
-
-
-
 
 CPDB_version = "v5.0.1"
 ktplotspy_version = "v0.3.2"
 
 DEFAULT_SEP = ">@<"
-DEFAULT_SPEC_PAT = "/|:|\\?|\\*|\\+|\\(|\\)|\\/|\\[|\\]"
+DEFAULT_SPEC_PAT = r"/|:|\?|\*|\+|\(|\)|\/|\[|\]"
 DEFAULT_CELLSIGN_ALPHA = 0.5
 DEFAULT_COLUMNS = ["interaction_group", "celltype_group"]
 
-INTERACTION_COLUMNS = ['interacting_pair', 'partner_a', 'partner_b', 'gene_a', 'gene_b', 'directionality', 'classification']
+INTERACTION_COLUMNS = [
+    "interacting_pair",
+    "partner_a",
+    "partner_b",
+    "gene_a",
+    "gene_b",
+    "directionality",
+    "classification",
+]
 
 DEFAULT_V5_COL_START = 13
-DEFAULT_V5_COL_NAMES = ["id_cp_interaction","interacting_pair","partner_a","partner_b",
-                        "gene_a","gene_b","secreted","receptor_a","receptor_b","annotation_strategy",
-                        "is_integrin","directionality","classification"]
+DEFAULT_V5_COL_NAMES = [
+    "id_cp_interaction",
+    "interacting_pair",
+    "partner_a",
+    "partner_b",
+    "gene_a",
+    "gene_b",
+    "secreted",
+    "receptor_a",
+    "receptor_b",
+    "annotation_strategy",
+    "is_integrin",
+    "directionality",
+    "classification",
+]
 
 DEFAULT_COL_START = 11
 DEFAULT_CLASS_COL = 12
