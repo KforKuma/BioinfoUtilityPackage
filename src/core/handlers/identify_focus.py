@@ -1,185 +1,293 @@
+import gc
+import os
+import sys
+from typing import Any
+
 import anndata
 import pandas as pd
-import numpy as np
+from anndata import AnnData
 
-import os, gc
 from src.core.adata.subset_analyze_pipeline import adata_subset_analyze_pipeline
 
 import logging
 from src.utils.hier_logger import logged
 
+sys.stdout.reconfigure(encoding="utf-8")
+
 logger = logging.getLogger(__name__)
 
 
+def _parse_subset_value(value: Any) -> list[str]:
+    """将 focus 文件中的 `Subsets` 字段解析为字符串列表。"""
+    if isinstance(value, list):
+        return [str(item).strip().strip("'").strip('"') for item in value if str(item).strip()]
+    if pd.isna(value):
+        return []
+    text = str(value).strip().strip("[]")
+    if not text:
+        return []
+    return [item.strip().strip("'").strip('"') for item in text.split(",") if item.strip()]
+
+
+def _parse_bool_like(value: Any) -> bool:
+    """将常见的布尔表达转换为 `bool`。"""
+    if isinstance(value, str):
+        value_lower = value.strip().lower()
+        if value_lower in ("true", "t", "1", "yes", "y"):
+            return True
+        if value_lower in ("false", "f", "0", "no", "n", ""):
+            return False
+        return False
+    return bool(value)
+
+
 @logged
-def make_a_focus(adata, filename,
-                 cat_key="Celltype", type_key="Subset_Identity", resubset=False):
-    if not filename.endswith("csv"):
-        raise ValueError("Please recheck filename, must end with .csv")
-    
-    df = adata.obs.astype(object).copy()
-    df = df[[cat_key, type_key]]
-    
-    # 防止 Categorical 报错，转换为纯 Python list
+def make_a_focus(
+        adata: AnnData,
+        filename: str,
+        cat_key: str = "Celltype",
+        type_key: str = "Subset_Identity",
+        resubset: bool = False,
+) -> pd.DataFrame:
+    """根据 `adata.obs` 中的分类关系生成 focus 表。
+
+    Args:
+        adata: 输入的 AnnData 对象。
+        filename: 输出 CSV 文件路径。
+        cat_key: `adata.obs` 中表示大类群的列名。
+        type_key: `adata.obs` 中表示 cell subtype/subpopulation 的列名。
+        resubset: 是否在 focus 表中将 `Resubset` 设为 True。
+
+    Returns:
+        生成后的 focus DataFrame。
+
+    Example:
+        ```python
+        focus_df = make_a_focus(
+            adata=adata,
+            filename="focus.csv",
+            cat_key="Celltype",
+            type_key="Subset_Identity",
+            resubset=False,
+        )
+        ```
+    """
+    if not filename.endswith(".csv"):
+        raise ValueError("`filename` must end with '.csv'.")
+    if cat_key not in adata.obs.columns:
+        raise KeyError(f"`cat_key`: '{cat_key}' does not exist in `adata.obs`.")
+    if type_key not in adata.obs.columns:
+        raise KeyError(f"`type_key`: '{type_key}' does not exist in `adata.obs`.")
+
+    df = adata.obs.astype(object).copy()[[cat_key, type_key]]
     df[cat_key] = df[cat_key].tolist()
     df[type_key] = df[type_key].tolist()
-    
-    # group by 并合并 Subsets，同时去除重复并保持顺序
+
     df_grouped = (
         df.groupby(cat_key, as_index=False)
-        .agg(lambda x: list(dict.fromkeys(v for v in x if pd.notna(v))))
+        .agg(lambda x: list(dict.fromkeys(value for value in x if pd.notna(value))))
     )
-    
-    # rename
-    df_grouped.rename(columns={cat_key: "Name", type_key: 'Subsets'}, inplace=True)
-    
-    # 假设 df['genes'] 是列表
-    df_grouped['Subsets'] = df_grouped['Subsets'].apply(lambda x: ",".join(map(str, x)) if isinstance(x, list) else x)
-    
-    # add extra columns
+    df_grouped.rename(columns={cat_key: "Name", type_key: "Subsets"}, inplace=True)
+    df_grouped["Subsets"] = df_grouped["Subsets"].apply(
+        lambda values: ",".join(map(str, values)) if isinstance(values, list) else values
+    )
     df_grouped["Resubset"] = resubset
     df_grouped["Marker_class"] = df_grouped["Name"]
-    
-    # save
     df_grouped.to_csv(filename, index=False)
-    
+
+    logger.info(f"[make_a_focus] Focus table was saved to: {filename}")
     return df_grouped
 
 
-class IdentifyFocus():
-    def __init__(self, focus_file, adata):
-        '''
-        根据 focus_file 中的亚群信息，对 adata 进行亚群拆分，并进行后续分析
-        focus_file 的格式包含以下四列：
-        Name : str
-        Subsets : list of str
-        Resubset : bool
-        Marker_class : str
-        
-        :param focus_file:
-        :param adata:
-        '''
+class IdentifyFocus:
+    """根据 focus 表对 AnnData 进行子集拆分和自动化分析。"""
+
+    def __init__(self, focus_file: str, adata: AnnData):
+        """初始化 IdentifyFocus 对象。
+
+        Args:
+            focus_file: focus 文件路径，支持 `.csv`、`.xlsx`、`.xls`。
+            adata: 待处理的 AnnData 对象。
+
+        Example:
+            ```python
+            focus = IdentifyFocus(focus_file="focus.csv", adata=adata)
+            ```
+
+        Notes:
+            focus 文件需要至少包含四列：
+            `Name`、`Subsets`、`Resubset`、`Marker_class`。
+        """
         self.adata = adata
         self.logger = logging.getLogger(self.__class__.__name__)
+        self.focus = self._load_focus_file(focus_file)
+
+    @logged
+    def _load_focus_file(self, focus_file: str) -> pd.DataFrame:
+        """读取并标准化 focus 文件。"""
         if focus_file.endswith(".csv"):
             focus_sheet = pd.read_csv(focus_file)
-        elif focus_file.endswith(".xlsx") or focus_file.endswith(".xls"):
-            excelFile = pd.ExcelFile(focus_file)
-            focus_sheet = excelFile.parse(excelFile.sheet_names[0])
+        elif focus_file.endswith((".xlsx", ".xls")):
+            excel_file = pd.ExcelFile(focus_file)
+            focus_sheet = excel_file.parse(excel_file.sheet_names[0])
         else:
-            raise ValueError("focus_file must be csv, xlsx, xls format.")
-        # 去除方括号并拆分基因集
-        focus_sheet['Subsets'] = (
-            focus_sheet['Subsets']
-            .str.strip('[]')  # 去除外部方括号
-            .str.split(',')  # 拆分为列表
+            raise ValueError("`focus_file` must end with '.csv', '.xlsx', or '.xls'.")
+
+        required_columns = {"Name", "Subsets", "Resubset", "Marker_class"}
+        missing_columns = required_columns - set(focus_sheet.columns)
+        if missing_columns:
+            raise KeyError(f"Required columns are missing from the focus file: {sorted(missing_columns)}.")
+
+        focus_sheet = focus_sheet.copy()
+        focus_sheet["Subsets"] = focus_sheet["Subsets"].apply(_parse_subset_value)
+        self.logger.info(
+            f"[IdentifyFocus._load_focus_file] Focus file was loaded with {len(focus_sheet)} rows."
         )
-        # 去除每个元素中的多余引号和空格
-        focus_sheet['Subsets'] = focus_sheet['Subsets'].apply(
-            lambda gene_list: [gene.strip().strip("'").strip('"').strip() for gene in gene_list]
-        )
-        self.focus = focus_sheet
-        print(self.focus)
-    
+        return focus_sheet
+
     @logged
-    def filter_and_save_subsets(self,
-                                h5ad_prefix,  # 建议使用时间控制版本
-                                save_addr,  # 取消预设值以避免储存在意外的地方
-                                obs_key="Subset_Identity"):
+    def filter_and_save_subsets(
+            self,
+            h5ad_prefix: str,
+            save_addr: str,
+            obs_key: str = "Subset_Identity",
+    ) -> None:
+        """按 focus 表中定义的 cell subtype/subpopulation 拆分并保存 h5ad 子集。
+
+        Args:
+            h5ad_prefix: 输出 h5ad 文件前缀。
+            save_addr: 输出目录。
+            obs_key: `adata.obs` 中用于筛选子集的列名。
+
+        Example:
+            ```python
+            focus.filter_and_save_subsets(
+                h5ad_prefix="SubsetSplit",
+                save_addr="./subsets",
+                obs_key="Subset_Identity",
+            )
+            ```
+        """
+        if obs_key not in self.adata.obs.columns:
+            raise KeyError(f"`obs_key`: '{obs_key}' does not exist in `adata.obs`.")
+
         self.obs_key = obs_key
-        
-        os.makedirs(save_addr,exist_ok=True)
-        
-        for index, row in self.focus.iterrows():
-            name = row['Name']
-            subsets = row['Subsets']
-            
-            if subsets:
-                index_list = self.adata.obs[obs_key].isin(subsets)
-                adata_subset = self.adata[index_list]
-                self.logger.info(f"Name: {name}, Subsets: {subsets}")
-                self.logger.info(adata_subset.obs[obs_key].value_counts())
-                
-                output_path = os.path.join(save_addr, f"{h5ad_prefix}_{name}.h5ad")
-                try:
-                    adata_subset.write(output_path)
-                    self.logger.info(f"Data for {name} written to {output_path}")
-                except Exception as e:
-                    self.logger.info(f"Error saving {name} to {output_path}: {e}")
-            else:
-                self.logger.info(f"Subsets for {name} is empty, skipping.")
-    
+        os.makedirs(save_addr, exist_ok=True)
+
+        for _, row in self.focus.iterrows():
+            name = row["Name"]
+            subsets = row["Subsets"]
+
+            if not subsets:
+                self.logger.info(
+                    f"[IdentifyFocus.filter_and_save_subsets] Warning! `Subsets` is empty for focus name: '{name}'. Skipping."
+                )
+                continue
+
+            index_list = self.adata.obs[obs_key].isin(subsets)
+            adata_subset = self.adata[index_list].copy()
+            self.logger.info(
+                f"[IdentifyFocus.filter_and_save_subsets] Saving subset '{name}' with "
+                f"{adata_subset.n_obs} cells from `obs_key`: '{obs_key}'."
+            )
+
+            output_path = os.path.join(save_addr, f"{h5ad_prefix}_{name}.h5ad")
+            try:
+                adata_subset.write(output_path)
+                self.logger.info(f"[IdentifyFocus.filter_and_save_subsets] Subset was written to: {output_path}")
+            except Exception as exc:
+                self.logger.info(
+                    f"[IdentifyFocus.filter_and_save_subsets] Warning! Failed to save subset '{name}' "
+                    f"to: {output_path}. Details: {exc}"
+                )
+
     @logged
-    def process_filtered_files(self,
-                               Geneset_class,
-                               save_addr,
-                               h5ad_prefix,
-                               **kwargs):
-        for index, row in self.focus.iterrows():
-            name = row['Name']
-            val = row['Resubset']
-            
-            if isinstance(val, str):
-                val_lower = val.lower()
-                if val_lower in ("true", "t", "1"):
-                    resubset = True
-                elif val_lower in ("false", "f", "0"):
-                    resubset = False
-                else:
-                    # 非法值处理，按需求可以抛出异常或设置默认值
-                    resubset = False
-            elif isinstance(val, (int, float)):
-                # 数字类型，0 -> False, 非0 -> True
-                resubset = bool(val)
-            else:
-                # 已经是 bool 或其他类型
-                resubset = bool(val)
-            
-            self.logger.info(f"Processing cat {name}, containing types {resubset}.")
-            
+    def process_filtered_files(
+            self,
+            Geneset_class,
+            save_addr: str,
+            h5ad_prefix: str,
+            **kwargs,
+    ) -> None:
+        """对已保存的 h5ad 子集执行自动化分析流程。
+
+        Args:
+            Geneset_class: 传递给分析流程的 Geneset 对象。
+            save_addr: 子集 h5ad 所在目录，也是结果输出根目录。
+            h5ad_prefix: 子集 h5ad 文件前缀。
+            **kwargs: 透传给 `adata_subset_analyze_pipeline` 的参数。
+
+        Example:
+            ```python
+            focus.process_filtered_files(
+                Geneset_class=my_markers,
+                save_addr="./subsets",
+                h5ad_prefix="SubsetSplit",
+                use_rep="X_scVI",
+            )
+            ```
+        """
+        if not hasattr(self, "obs_key"):
+            self.obs_key = "Subset_Identity"
+            self.logger.info(
+                "[IdentifyFocus.process_filtered_files] Warning! `obs_key` is not set via "
+                "`filter_and_save_subsets()`. Falling back to 'Subset_Identity'."
+            )
+
+        for _, row in self.focus.iterrows():
+            name = row["Name"]
+            resubset = _parse_bool_like(row["Resubset"])
+
+            self.logger.info(
+                f"[IdentifyFocus.process_filtered_files] Processing focus name: '{name}' with "
+                f"`Resubset`: {resubset}."
+            )
+
             input_path = os.path.join(save_addr, f"{h5ad_prefix}_{name}.h5ad")
             if not os.path.exists(input_path):
-                self.logger.info(f"File {input_path} does not exist. Giving up reading {name} from h5ad.")
+                self.logger.info(
+                    f"[IdentifyFocus.process_filtered_files] Warning! Input file does not exist: {input_path}. Skipping."
+                )
                 continue
-            
+
             adata_subset = anndata.read_h5ad(input_path)
-            
             output_dir = os.path.join(save_addr, name)
             os.makedirs(output_dir, exist_ok=True)
-            
-            default_pars = {"resolutions_list": None,
-                            "use_rep": "X_scVI",
-                            "use_raw": True,
-                            "do_DEG_enrich": True,
-                            "DEG_enrich_key":self.obs_key,
-                            "do_subcluster": False
-                            }
-            # 因为 DEG_enrich_key 不为 leiden_res 的时候对 resolution_list 是无视的
-            # 所以可以先进性对已有 obs_key 的差异基因的计算
+
+            default_pars = {
+                "resolutions_list": None,
+                "use_rep": "X_scVI",
+                "use_raw": True,
+                "do_DEG_enrich": True,
+                "DEG_enrich_key": self.obs_key,
+                "do_subcluster": False,
+            }
             default_pars.update(**kwargs)
-            
-            adata_subset_analyze_pipeline(  #
+
+            adata_subset_analyze_pipeline(
                 adata_subset=adata_subset,
                 filename_prefix=name,
                 my_markers=Geneset_class,
                 marker_sheet=row["Marker_class"],
                 save_addr=output_dir,
-                **default_pars
+                **default_pars,
             )
-            
+
             if resubset:
-                default_pars.update({"DEG_enrich_key":"leiden_res",
-                                    "do_subcluster": True})
-                adata_subset_analyze_pipeline(  #
+                default_pars.update({
+                    "DEG_enrich_key": "leiden_res",
+                    "do_subcluster": True,
+                })
+                adata_subset_analyze_pipeline(
                     adata_subset=adata_subset,
                     filename_prefix=name,
                     my_markers=Geneset_class,
                     marker_sheet=row["Marker_class"],
                     save_addr=output_dir,
-                    **default_pars
+                    **default_pars,
                 )
-            
+
             adata_subset.write_h5ad(input_path)
-            self.logger.info(f"Finished cat {name}, h5ad saved inplace.")
+            self.logger.info(f"[IdentifyFocus.process_filtered_files] Updated h5ad was written back to: {input_path}")
             del adata_subset
             gc.collect()
