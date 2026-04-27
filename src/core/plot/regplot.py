@@ -1,77 +1,129 @@
-import seaborn as sns
+import logging
+import os
+
 import matplotlib.pyplot as plt
+import seaborn as sns
 from scipy.stats import spearmanr
 
-from src.core.plot.utils import *
+from src.core.plot.utils import matplotlib_savefig
+from src.utils.hier_logger import logged
+
+logger = logging.getLogger(__name__)
 
 
+@logged
 def plot_significant_regression_by_disease(
-        adata_sub,
-        subset_cells,
-        save_addr,
-        filename,
-        score_col="C3_C5_Signaling_score",
-        pathway_cols=None,
-        disease_col="disease",
-        alpha=0.01,
-        figsize=(4, 4),
-        s=10):
-    sns.set_style("white")  # 去掉 seaborn 默认 grid
-    
-    if pathway_cols is None:
-        pathway_cols = ['NFkB_score', 'PI3K_AKT_score', 'MAPK_ERK_score', 'Rho_GTPase_score']
-    
-    # 筛选子集
+    adata_sub,
+    subset_cells,
+    save_addr,
+    filename,
+    score_col="C3_C5_Signaling_score",
+    pathway_cols=None,
+    disease_col="disease",
+    alpha=0.01,
+    figsize=(4, 4),
+    s=10,
+):
+    """按 disease 绘制显著相关的回归线。
+
+    该函数会先在指定 cell subtype/subpopulation 中，将多个 pathway score
+    转成长表，再分别判断每个 disease 内 `score_col` 与 pathway score
+    是否达到显著相关，只有显著时才绘制回归线。
+
+    Args:
+        adata_sub: 输入 AnnData 对象。
+        subset_cells: 需要保留的 cell subtype/subpopulation 名称列表。
+        save_addr: 输出目录。
+        filename: 输出文件名。
+        score_col: 横轴评分列名。
+        pathway_cols: 纵轴通路评分列名列表。
+        disease_col: disease 分组列名。
+        alpha: 相关性显著性阈值。
+        figsize: 单个 facet 的尺寸。
+        s: 散点大小。
+
+    Returns:
+        `FacetGrid` 对象。
+
+    Example:
+        grid = plot_significant_regression_by_disease(
+            adata_sub=adata,
+            subset_cells=["Mono", "Macro"],
+            save_addr=save_addr,
+            filename="myeloid_regression",
+            score_col="C3_C5_Signaling_score",
+            pathway_cols=["NFkB_score", "MAPK_ERK_score"],
+            disease_col="disease",
+            alpha=0.01,
+        )
+        # 只有在某个 disease 内达到显著相关时，对应 facet 才会叠加回归线
+    """
+    if disease_col not in adata_sub.obs.columns:
+        raise KeyError(f"Column `{disease_col}` was not found in `adata.obs`.")
+    if score_col not in adata_sub.obs.columns:
+        raise KeyError(f"Column `{score_col}` was not found in `adata.obs`.")
+
+    pathway_cols = pathway_cols or ["NFkB_score", "PI3K_AKT_score", "MAPK_ERK_score", "Rho_GTPase_score"]
+    missing_pathways = [col for col in pathway_cols if col not in adata_sub.obs.columns]
+    if missing_pathways:
+        raise KeyError(f"Columns were not found in `adata.obs`: {missing_pathways}.")
+    if "Subset_Identity" not in adata_sub.obs.columns:
+        raise KeyError("Column `Subset_Identity` was not found in `adata.obs`.")
+
+    sns.set_style("white")
     responsive_cells = adata_sub.obs[
-        adata_sub.obs[disease_col].notna() &
-        adata_sub.obs['Subset_Identity'].isin(subset_cells)
-        ].copy()
-    
-    # Melt 数据
+        adata_sub.obs[disease_col].notna() & adata_sub.obs["Subset_Identity"].isin(subset_cells)
+    ].copy()
+    if responsive_cells.empty:
+        raise ValueError("No cells remain after filtering `subset_cells` and non-null disease labels.")
+
     plot_df = responsive_cells.melt(
         id_vars=[score_col, disease_col],
         value_vars=pathway_cols,
-        var_name='Pathway',
-        value_name='Score'
+        var_name="Pathway",
+        value_name="Score",
     )
-    # 1. 获取颜色映射表 (这能保证回归线颜色和散点颜色完全一致)
-    unique_diseases = responsive_cells[disease_col].cat.categories
-    palette = sns.color_palette("Set1", n_colors=len(unique_diseases))  # 或者你喜欢的色盘
+
+    disease_values = responsive_cells[disease_col]
+    if hasattr(disease_values, "cat"):
+        unique_diseases = disease_values.cat.categories.tolist()
+    else:
+        unique_diseases = sorted(disease_values.astype(str).unique().tolist())
+        logger.warning(
+            f"[plot_significant_regression_by_disease] Warning! Column `{disease_col}` is not categorical. "
+            "Fallback to sorted unique values."
+        )
+
+    palette = sns.color_palette("Set1", n_colors=len(unique_diseases))
     color_dict = dict(zip(unique_diseases, palette))
-    # FacetGrid
-    g = sns.FacetGrid(
+    grid = sns.FacetGrid(
         plot_df,
         col="Pathway",
         hue=disease_col,
-        hue_order=unique_diseases,  # 显式指定顺序
-        palette=color_dict,  # 使用我们定义的字典
+        hue_order=unique_diseases,
+        palette=color_dict,
         sharex=True,
         sharey=False,
         height=figsize[0],
-        aspect=1
+        aspect=1,
     )
-    
-    g.map_dataframe(
-        sns.scatterplot,
-        x=score_col,
-        y="Score",
-        alpha=0.4,
-        s=s
-    )
-    
-    # 每个 facet 单独画显著回归
-    for ax, pw in zip(g.axes.flat, pathway_cols):
-        
-        ax.grid(False)  # 去掉 grid
-        
-        pw_df = plot_df[plot_df['Pathway'] == pw]
-        disease_list = list(pw_df[disease_col].unique())
-        
-        for disease_name, sub_df in pw_df.groupby(disease_col, observed=False):
-            
-            rho, p = spearmanr(sub_df[score_col], sub_df['Score'], nan_policy='omit')
-            
-            if p < alpha:
+    grid.map_dataframe(sns.scatterplot, x=score_col, y="Score", alpha=0.4, s=s)
+
+    for ax, pathway in zip(grid.axes.flat, pathway_cols):
+        ax.grid(False)
+        pathway_df = plot_df[plot_df["Pathway"] == pathway]
+        disease_list = list(pathway_df[disease_col].dropna().unique())
+
+        for disease_name, sub_df in pathway_df.groupby(disease_col, observed=False):
+            if len(sub_df) < 3:
+                logger.warning(
+                    f"[plot_significant_regression_by_disease] Warning! Too few cells for disease '{disease_name}' "
+                    f"in pathway '{pathway}'. Skip regression."
+                )
+                continue
+
+            rho, p_value = spearmanr(sub_df[score_col], sub_df["Score"], nan_policy="omit")
+            if p_value < alpha:
                 sns.regplot(
                     x=score_col,
                     y="Score",
@@ -79,26 +131,24 @@ def plot_significant_regression_by_disease(
                     scatter=False,
                     ci=None,
                     ax=ax,
-                    line_kws={'color': color_dict[disease_name], 'lw': 2}  # 强制线条颜色同步
+                    line_kws={"color": color_dict[disease_name], "lw": 2},
                 )
-                
-                idx = disease_list.index(disease_name)
-                
+                disease_index = disease_list.index(disease_name)
                 ax.text(
                     0.05,
-                    0.9 - 0.1 * idx,
-                    f"{disease_name}: ρ={rho:.2f}",
+                    0.9 - 0.1 * disease_index,
+                    f"{disease_name}: rho={rho:.2f}",
                     transform=ax.transAxes,
                     color=color_dict[disease_name],
-                    fontsize=12
+                    fontsize=12,
                 )
-    
-    g.add_legend(title=disease_col)
-    g.set_axis_labels("C3a/C5a Receptor Score", "Downstream Pathway Score")
-    g.set_titles("{col_name}")
-    
+
+    grid.add_legend(title=disease_col)
+    grid.set_axis_labels("C3a/C5a Receptor Score", "Downstream Pathway Score")
+    grid.set_titles("{col_name}")
     plt.tight_layout()
-    
-    fig = g.fig  # 获取 figure
+
     abs_fig_path = os.path.join(save_addr, filename)
-    matplotlib_savefig(fig, abs_fig_path)
+    matplotlib_savefig(grid.fig, abs_fig_path, close_after=False)
+    plt.close(grid.fig)
+    return grid

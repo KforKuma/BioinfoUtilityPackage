@@ -1,30 +1,72 @@
+import logging
+import os
 import re
-import anndata
-import pandas as pd
-import numpy as np
-import scanpy as sc
+from typing import Mapping, Optional, Sequence
 
-import seaborn as sns
 import matplotlib
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import scanpy as sc
+import seaborn as sns
 from matplotlib.patches import Patch
-matplotlib.use('Agg')  # 使用无GUI的后端
 
-from src.core.plot.utils import *
-from src.core.handlers.plot_wrapper import *
-
-import logging
+from src.core.handlers.plot_wrapper import ScanpyPlotWrapper
+from src.core.plot.utils import jitter_color, matplotlib_savefig
 from src.utils.hier_logger import logged
+
+matplotlib.use("Agg")
+
 logger = logging.getLogger(__name__)
 
 
 @logged
-def process_resolution_umaps(adata, output_dir, resolutions ,use_raw=True ,**kwargs):
+def process_resolution_umaps(adata, output_dir, resolutions, use_raw=True, **kwargs):
+    """批量绘制不同 Leiden resolution 的 UMAP 对比图。
+
+    Args:
+        adata: 输入 AnnData 对象。
+        output_dir: 输出目录。
+        resolutions: 需要展示的 resolution 列表，例如 `[0.2, 0.5, 1.0]`。
+        use_raw: 是否优先使用 `adata.raw`。
+        **kwargs: 透传给 `scanpy.pl.umap` 的参数。
+
+    Returns:
+        None
+
+    Example:
+        process_resolution_umaps(
+            adata=adata,
+            output_dir=save_addr,
+            resolutions=[0.2, 0.5, 1.0],
+            use_raw=False,
+            legend_loc="on data",
+        )
+        # 输出图可用于直观比较不同 Leiden resolution 下的聚类分辨率
     """
-    生成 UMAP 图像，用于不同 Leiden 分辨率对比。
-    """
+    if "X_umap" not in adata.obsm:
+        raise KeyError("Key `X_umap` was not found in `adata.obsm`.")
+    if resolutions is None or len(resolutions) == 0:
+        raise ValueError("Argument `resolutions` must not be empty.")
+
+    color_keys = []
+    for resolution in resolutions:
+        color_key = f"leiden_res{resolution}"
+        if color_key in adata.obs.columns:
+            color_keys.append(color_key)
+        else:
+            logger.warning(
+                f"[process_resolution_umaps] Warning! Column `{color_key}` was not found in `adata.obs`. Skip it."
+            )
+
+    if not color_keys:
+        raise ValueError("No valid Leiden resolution columns were found in `adata.obs`.")
+
+    if use_raw and getattr(adata, "raw", None) is None:
+        logger.warning("[process_resolution_umaps] Warning! `use_raw` is True but `adata.raw` is not available. Fallback to processed data.")
+        use_raw = False
+
     umap_plot = ScanpyPlotWrapper(sc.pl.umap)
-    color_keys = [f"leiden_res{res}" for res in resolutions]
     umap_plot(
         save_addr=output_dir,
         filename="Res_Comparison",
@@ -32,114 +74,159 @@ def process_resolution_umaps(adata, output_dir, resolutions ,use_raw=True ,**kwa
         color=color_keys,
         legend_loc="on data",
         use_raw=use_raw,
-        **kwargs
+        **kwargs,
     )
+
 
 @logged
 def plot_QC_umap(adata, save_addr, filename_prefix):
+    """按 QC 指标批量绘制 UMAP。
+
+    该函数会自动在 `adata.obs` 中搜索与 organelle、cell cycle phase、
+    counts / tissue / disease 等相关的列，并分组绘制 UMAP。
+
+    Args:
+        adata: 输入 AnnData 对象。
+        save_addr: 输出目录。
+        filename_prefix: 输出文件名前缀。
+
+    Returns:
+        dict，记录每个主题实际使用了哪些 `obs` 列。
+
+    Example:
+        used_keys = plot_QC_umap(
+            adata=adata,
+            save_addr=save_addr,
+            filename_prefix="SampleA",
+        )
+        # 返回值 used_keys 可帮助检查哪些 QC 相关列被实际识别并用于绘图
+    """
+    if "X_umap" not in adata.obsm:
+        raise KeyError("Key `X_umap` was not found in `adata.obsm`.")
+
     umap_plot = ScanpyPlotWrapper(sc.pl.umap)
-    
-    # 先构造 key_dict
     key_dict = {
-        "organelles": [i for i in adata.obs.columns if re.search(r'mt|mito|rb|ribo', i)],
-        "phase": [i for i in adata.obs.columns if re.search(r'phase', i)],
-        "counts": [i for i in adata.obs.columns if re.search(r'disease|tissue', i)]
+        "organelles": [col for col in adata.obs.columns if re.search(r"mt|mito|rb|ribo", col, re.IGNORECASE)],
+        "phase": [col for col in adata.obs.columns if re.search(r"phase", col, re.IGNORECASE)],
+        "counts": [col for col in adata.obs.columns if re.search(r"count|disease|tissue", col, re.IGNORECASE)],
     }
-    
-    # 新字典才安全
+
     cleaned = {}
-    
-    for k, cols in key_dict.items():
-        if not cols:
-            continue
-        
-        # 过滤掉 bool 和 object 列
-        new_cols = []
-        for c in cols:
-            dtype = adata.obs[c].dtype
-            if pd.api.types.is_bool_dtype(dtype):
+    for group_name, cols in key_dict.items():
+        valid_cols = []
+        for col in cols:
+            dtype = adata.obs[col].dtype
+            if pd.api.types.is_bool_dtype(dtype) or pd.api.types.is_object_dtype(dtype):
                 continue
-            if pd.api.types.is_object_dtype(dtype):
-                continue
-            new_cols.append(c)
-        
-        if new_cols:
-            cleaned[k] = new_cols
-    
-    # 展平成 key_list
-    key_list = [c for cols in cleaned.values() for c in cols]
+            valid_cols.append(col)
+        if valid_cols:
+            cleaned[group_name] = valid_cols
+
+    key_list = [col for cols in cleaned.values() for col in cols]
     if len(key_list) == 0:
-        raise ValueError("[plot_QC_umap] No QC obs_key found; cannot draw UMAP.")
-    
-    logger.info(f"Find satisfied obs key: {key_list}.")
-    
-    # 一个 category 画一次
-    for name, cols in cleaned.items():
+        raise ValueError("No suitable QC-related `obs` columns were found for UMAP plotting.")
+
+    logger.info(f"[plot_QC_umap] Selected QC-related `obs` columns: {key_list}")
+    for group_name, cols in cleaned.items():
         umap_plot(
             save_addr=save_addr,
-            filename=f"{filename_prefix}_UMAP_{name}",
+            filename=f"{filename_prefix}_UMAP_{group_name}",
             adata=adata,
-            color=cols
+            color=cols,
         )
+    return cleaned
+
 
 @logged
 def plot_hierarchical_umap(
-        adata,
-        save_addr,
-        filename,
-        hierarchy_dict,
-        color_key='Subset_Identity',
-        special_celltype_colors={'Proliferative Cell': (0, 0, 0)},
-        figsize=(20, 10),
-        umap_size=50,
-        legend_cols=3,
-        jitter_scale=0.15,
-        random_seed=42,
-        save=True,
-        plot=False
+    adata,
+    save_addr,
+    filename,
+    hierarchy_dict,
+    color_key="Subset_Identity",
+    special_celltype_colors=None,
+    figsize=(20, 10),
+    umap_size=50,
+    legend_cols=3,
+    jitter_scale=0.15,
+    random_seed=42,
+    save=True,
+    plot=False,
 ):
-    """
-    绘制带有分级图例的 UMAP。
+    """绘制带分层图例的 UMAP。
 
-    参数:
-    - adata: AnnData 对象。
-    - hierarchy_dict: 字典类型，例如 {'MajorType': ['Subset1', 'Subset2']}。
-    - color_key: 储存在 adata.obs 中的列名。
-    - special_celltype_colors: 需要指定特殊颜色的类。
-    - figsize: 画布大小。
-    - umap_size: 点的大小。
-    - legend_cols: 图例显示的列数。
+    Args:
+        adata: 输入 AnnData 对象。
+        save_addr: 输出目录。
+        filename: 输出文件名。
+        hierarchy_dict: 形如 `{major_type: [subset1, subset2]}` 的层级字典。
+        color_key: `adata.obs` 中用于着色的列名。
+        special_celltype_colors: 指定某些大类的固定颜色。
+        figsize: 画布大小。
+        umap_size: UMAP 点大小。
+        legend_cols: 图例列数。
+        jitter_scale: 同一大类下子群颜色扰动幅度。
+        random_seed: 颜色扰动随机种子。
+        save: 是否保存图像。
+        plot: 是否显示图像。
+
+    Returns:
+        子群颜色映射字典。
+
+    Example:
+        hierarchy = {
+            "T cell": ["CD4 T", "CD8 T", "Treg"],
+            "Myeloid": ["Mono", "Macro", "DC"],
+        }
+        subset_colors = plot_hierarchical_umap(
+            adata=adata,
+            save_addr=save_addr,
+            filename="hierarchical_umap",
+            hierarchy_dict=hierarchy,
+            color_key="Subset_Identity",
+            special_celltype_colors={"Proliferative Cell": (0, 0, 0)},
+        )
+        # 返回的 subset_colors 可复用于其他图，保证层级配色一致
     """
+    if "X_umap" not in adata.obsm:
+        raise KeyError("Key `X_umap` was not found in `adata.obsm`.")
+    if color_key not in adata.obs.columns:
+        raise KeyError(f"Column `{color_key}` was not found in `adata.obs`.")
+    if not isinstance(hierarchy_dict, Mapping) or len(hierarchy_dict) == 0:
+        raise ValueError("Argument `hierarchy_dict` must be a non-empty dictionary.")
+
+    special_celltype_colors = special_celltype_colors or {"Proliferative Cell": (0, 0, 0)}
     rng = np.random.default_rng(random_seed)
     subset_colors = {}
     abs_fig_path = os.path.join(save_addr, filename)
-    
-    # 1. 生成调色板
-    # 排除特殊指定的类，剩下的用 tab10/20 分配基础色
-    normal_celltypes = [ct for ct in hierarchy_dict if ct not in special_celltype_colors]
-    base_palette = sns.color_palette("tab10", n_colors=len(normal_celltypes))
-    
-    base_idx = 0
+
+    normal_celltypes = [celltype for celltype in hierarchy_dict if celltype not in special_celltype_colors]
+    base_palette = sns.color_palette("tab10", n_colors=max(len(normal_celltypes), 1))
+
+    base_index = 0
     for celltype, subsets in hierarchy_dict.items():
         if celltype in special_celltype_colors:
             color = special_celltype_colors[celltype]
             for subset in subsets:
                 subset_colors[subset] = color
         else:
-            base_color = base_palette[base_idx % len(base_palette)]
+            base_color = base_palette[base_index % len(base_palette)]
             for subset in subsets:
-                subset_colors[subset] = jitter_color(base_color, scale=jitter_scale)
-            base_idx += 1
-    
-    # 2. 初始化画布
+                subset_colors[subset] = jitter_color(base_color, scale=jitter_scale, rng=rng)
+            base_index += 1
+
+    missing_subsets = [subset for subsets in hierarchy_dict.values() for subset in subsets if subset not in adata.obs[color_key].astype(str).unique()]
+    if missing_subsets:
+        logger.warning(
+            f"[plot_hierarchical_umap] Warning! Some subsets in `hierarchy_dict` were not found in `{color_key}`: "
+            f"{missing_subsets}"
+        )
+
     fig = plt.figure(figsize=figsize)
-    # 左侧 UMAP (占 70% 宽度)
     ax_umap = fig.add_axes([0.0, 0.0, 0.70, 1.0])
-    # 右侧图例 (占 24% 宽度)
     ax_leg = fig.add_axes([0.75, 0.0, 0.24, 1.0])
-    ax_leg.axis('off')
-    
-    # 3. 绘制 UMAP
+    ax_leg.axis("off")
+
     sc.pl.umap(
         adata,
         color=color_key,
@@ -147,40 +234,35 @@ def plot_hierarchical_umap(
         ax=ax_umap,
         size=umap_size,
         alpha=0.8,
-        legend_loc='none',
-        show=False
+        legend_loc="none",
+        show=False,
     )
-    
-    # 4. 生成分级图例
+
     legend_elements = []
     for celltype, subsets in hierarchy_dict.items():
-        # 添加大类小标题 (白色背景占位)
-        legend_elements.append(Patch(facecolor='white', edgecolor='none', label=celltype))
+        legend_elements.append(Patch(facecolor="white", edgecolor="none", label=celltype))
         for subset in subsets:
             legend_elements.append(Patch(facecolor=subset_colors[subset], label=f"  {subset}"))
-    
-    leg = ax_leg.legend(
+
+    legend = ax_leg.legend(
         handles=legend_elements,
-        loc='center',
+        loc="center",
         frameon=False,
         fontsize=9,
         ncol=legend_cols,
-        title='Cell Type Hierarchy',
+        title="Cell Type Hierarchy",
         title_fontsize=10,
         handletextpad=0.5,
-        columnspacing=1.0
+        columnspacing=1.0,
     )
-    
-    # 5. 修饰图例：加粗大类标题
-    for text in leg.get_texts():
+    for text in legend.get_texts():
         if not text.get_text().startswith("  "):
             text.set_fontweight("bold")
-    
-    # 6. 保存
+
     if save:
-        matplotlib_savefig(fig, abs_fig_path)
-    
+        matplotlib_savefig(fig, abs_fig_path, close_after=False)
     if plot:
         plt.show()
     else:
         plt.close(fig)
+    return subset_colors
