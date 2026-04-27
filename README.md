@@ -1,56 +1,60 @@
 **Bioinfo-Utility-Package**
 
-An integrated package mainly devoted for anndata/scanpy workflow, helps you:
+This is an integrated utility package primarily designed for AnnData / Scanpy workflows. It aims to assist with the following tasks:
+1.	Performing routine statistical analyses, especially those that are somewhat tedious to implement from scratch; 
+2.	Managing cell identity annotation and refinement — a process that can become particularly time-consuming when data quality is suboptimal; 
+3.	Streamlining plotting workflows and figure export; 
+4.	Facilitating seamless data exchange between internal environments and external tools (e.g., CellPhoneDB). 
+________________________________________
+**Key Features**
 
-(1) perform statistics calculation that you usually need, but could be a little tricky;
+Handlers (src/core/handlers)
+•	ScanpyPlotWrapper
+A wrapper utility that automatically saves all generated plots. 
+•	ObsEditor
+During iterative clustering and re-annotation, cell identities often need to be repeatedly adjusted or transferred between objects.
+This tool helps keep your code clean, structured, and more readable. 
+•	Geneset
+Designed to improve the usability and maintainability of gene signatures.
+Hardcoding gene sets directly in scripts is neither elegant nor maintainable, yet ideas often need to be recorded quickly.
+This utility enables standardized reading, updating, and storage of gene sets, avoiding scattered variables such as my_marker_dict. 
+________________________________________
+**Cell Abundance Analysis Tools (src/stats)**
 
-(2) manipulate cellular identifications, this could takes lots of time especially when the quality of data is not satisfied enough;
+•	Multiple simulation strategies for generating cell abundance data, along with corresponding evaluation functions 
+•	Various differential abundance analysis methods, including an integrated meta-method (RCE) 
+•	Associated visualization functions 
+________________________________________
+**AnnData Toolbox (src/core/adata)**
 
-(3) deal with your plot drawing and saving;
+Provides convenient, high-level interfaces for standard analysis workflows, including:
+•	Differential expression (DEG) analysis 
+•	Dimensionality reduction and clustering 
+•	Integrated plotting utilities 
+In addition, several commonly used functions in existing workflows (e.g., score_genes, downsampling) have been optimized and extended with additional functionality.
+________________________________________
+**External Adapters (src/external_adaptor)**
 
-(4) plug your data in and out of some external tools, like CPDB.
+Provides interfaces for connecting AnnData objects to external analysis tools.
+These workflows are adapted from existing implementations with practical modifications.
+Currently supported tools include:
+•	pySCENIC 
+•	CellPhoneDB v5 
+•	CellRank 
+________________________________________
+**Recent Updates**
 
+This update focuses on:
+•	The development of differential abundance testing methods 
+•	A simulation framework based on cell tag units, rather than neighborhood or hypersphere-based structures 
+For typical scenarios with reference cell types, we recommend trying the CLR-LMM approach.
+However, in our experiments, the RCE method achieved the best balance between statistical power and false positive rate (FPR).
+Users are encouraged to benchmark and compare different methods on their own (simulated) datasets.
+________________________________________
+**Installation**
 
-**Features**
+This project is currently under active development.
+For now, you can simply import it directly into your environment.
+(Yes, it’s that simple—for now 🙂)
+________________________________________
 
-- *ScanpyPlotWrapper* class: a wrapper helps u save every plot
-
-
-- *ObsEditor* class:
-
-  sometimes u need to adjust cell identities repetitively, copy idents from one object to the other.
-
-  This helps ur code get readable.
-
-  
-- *Geneset* class: for better reusing gene signatures.
-
-  Writing down gene signatures in the code is an eyesore, but sometimes u just pop up an idea.
-
-  This helps u read, update, and save a good format of gene signatures. No more `my_marker_dict` everywhere.
-
-- Anndata toolbox
-
-  Easiest ways for invoking some most standardised protocol, like finding DEG, or dim-reduction plus clustering.
-
-  Some better adjust for existing code, like `score_genes` or downsample. And more.
-
-- Adaptors for your AnnData to external function, currently including pyscenic, cellphonedb v5, and xgboost.
-
-
- **Recent Updates**
- 
- Major update in developing differential abundance testing method and data simulation tools with unit of cell tag (rather than neighbors/hypersphere structure).
-
- CLR-LMM is recomended, but also welcome to test different methods on your (simulative) data.
-
-**Installation Instructions**
-
-Currently under construction. So just go import lol.
-
-<pre>```
-   (\_ _/)
-   ( •_• )  Gimme a star
-  / >🍪   / and I'll give u a cookie
-```
-</pre>
