@@ -16,25 +16,57 @@ logger = logging.getLogger(__name__)
 
 @logged_class
 class ScCodaEngine:
+    """缓存式 scCODA 丰度统计引擎。
+
+    scCODA 会对完整组成矩阵建模，因此本类先将长表转换为 AnnData，再一次性拟合
+    所有 cell subtype/subpopulation，并缓存每个亚群的对比结果。
+
+    Example:
+        >>> res = run_scCODA(
+        ...     df_all=abundance_df,
+        ...     cell_type="CD4_Tcm",
+        ...     formula="disease + tissue",
+        ...     main_variable="disease",
+        ...     ref_label="HC",
+        ...     group_label="sample_id",
+        ...     num_results=2000,
+        ...     num_burnin=1000,
+        ... )
+        >>> res["contrast_table"][["Coef.", "P>|z|", "direction"]]
+        # 查看 scCODA 后验 beta 转换出的 GLM 风格对比表。
+    """
+
     def __init__(self):
-        """
-        轻量化初始化，仅准备容器。
+        """轻量化初始化，仅准备缓存容器。
         """
         self.method_name = "scCODA"
         self.last_data_hash = None
         self.cached_results = {}  # 存储 {cell_type: result_dict}
     
     def _get_data_hash(self, df_all: pd.DataFrame, formula: str, alpha: float) -> str:
+        """计算缓存哈希。
+
+        Args:
+            df_all: 输入长表。
+            formula: scCODA 公式。
+            alpha: 保留参数，当前不写入 hash，避免只改阈值时重复采样。
+
+        Returns:
+            数据与公式组合出的缓存键。
         """
-        计算哈希，包含数据、公式及关键超参数。
-        """
+        # alpha 不写入 hash，避免只调整显著性阈值时重复执行昂贵的 HMC 采样。
         content_hash = hashlib.md5(pd.util.hash_pandas_object(df_all).values).hexdigest()
         return f"{content_hash}_{formula}"
-            # alpha 不用硬编码到 hash 里
     
     def _prepare_data(self, df_all: pd.DataFrame, group_label: str):
-        """
-        利用你提供的逻辑，将长表转换为 scCODA 所需的 AnnData。
+        """将长表丰度数据转换为 scCODA 所需的 AnnData。
+
+        Args:
+            df_all: 长表丰度数据，包含 ``group_label``、``cell_type`` 和 ``count``。
+            group_label: 样本唯一标识列。
+
+        Returns:
+            带有 ``obs`` 元数据的 AnnData-like 对象。
         """
         # 1. Pivot 宽表
         cell_counts = (
@@ -50,8 +82,7 @@ class ScCodaEngine:
         # 2. 转换对象
         data_test = ccd.from_pandas(cell_counts, covariate_columns=[group_label])
         
-        # 3. 合并元数据
-        # 提取除 count 和 cell_type 以外的所有元数据列
+        # 合并元数据是为了让 scCODA 公式可以访问 disease/tissue 等样本级协变量。
         meta_cols = [c for c in df_all.columns if c not in ["count", "cell_type"]]
         sample_meta = (
             df_all[meta_cols]
@@ -68,8 +99,17 @@ class ScCodaEngine:
         return data_test
     
     def _extract_contrast_table(self, sim_results, cell_type: str, ref_label: str, main_variable: str, alpha: float):
-        """
-        还原 GLM 风格的对照表，动态匹配参考系。
+        """从 scCODA 后验 beta 中还原 GLM 风格对比表。
+
+        Args:
+            sim_results: scCODA 采样结果。
+            cell_type: 目标 cell subtype/subpopulation。
+            ref_label: 主变量参考组。
+            main_variable: 主变量名，当前主要用于保留调用语义。
+            alpha: 显著性阈值。
+
+        Returns:
+            以 ``other`` 为索引的对比表。
         """
         posterior_beta = sim_results.posterior['beta'].sel(cell_type=cell_type)
         covariates = posterior_beta.coords['covariate'].values
@@ -87,7 +127,7 @@ class ScCodaEngine:
             coef = np.mean(samples)
             std_err = np.std(samples)
             
-            # 统计推断
+            # 用后验均值和标准差近似 z 检验，便于与其他 engine 的输出列对齐。
             if std_err > 1e-10:
                 z_val = coef / std_err
                 p_val = 2 * (1 - stats.norm.cdf(abs(z_val)))
@@ -139,14 +179,28 @@ class ScCodaEngine:
                  group_label: str = "sample_id", alpha: float = 0.05,
                  num_results=2000,num_burnin=1000,
                  **kwargs) -> Dict[str, Any]:
-        """
-        入口：先看缓存，没有就跑全量，最后只取你要的那个 cell_type。
+        """运行或复用 scCODA 全量采样，并返回目标亚群结果。
+
+        Args:
+            df_all: 长表丰度数据。
+            cell_type: 目标 cell subtype/subpopulation。
+            formula: scCODA 公式。
+            main_variable: 主要解释变量，保留给对比表解析。
+            ref_label: 主变量参考组。
+            group_label: 样本唯一标识列。
+            alpha: 显著性阈值。
+            num_results: HMC 采样结果数量。
+            num_burnin: burn-in 数量。
+            **kwargs: 预留兼容参数。
+
+        Returns:
+            标准 ``make_result`` 字典。
         """
         current_hash = self._get_data_hash(df_all, formula, alpha)
         
         # 1. 检查缓存是否失效
         if current_hash != self.last_data_hash:
-            print(f"Cache miss or expired. Running scCODA for all cell types...")
+            print("[ScCodaEngine.__call__] Cache miss or expired. Running scCODA for all cell types.")
             self.cached_results = {}  # 清空旧缓存
             
             # 跑全量逻辑

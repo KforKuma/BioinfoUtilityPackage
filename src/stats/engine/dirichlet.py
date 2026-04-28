@@ -25,6 +25,20 @@ logger = logging.getLogger(__name__)
 # -----------------------
 
 def _neg_loglik_and_grad(flat_params, Y, X, K, P, offset=None, lambda_=1e-4):
+    """计算 Dirichlet 回归负对数似然和梯度。
+
+    Args:
+        flat_params: 展平后的 beta 参数，形状为 ``(K - 1) * P``。
+        Y: sample x cell_type 的组成比例矩阵。
+        X: 设计矩阵。
+        K: cell subtype/subpopulation 数量。
+        P: 设计矩阵列数。
+        offset: 可选 offset 矩阵，用于 donor BLUP 校正。
+        lambda_: ridge 惩罚强度。
+
+    Returns:
+        ``(neg_ll, grad)``，分别为负对数似然和展平梯度。
+    """
     n = Y.shape[0]
     B = flat_params.reshape((K - 1, P))
     
@@ -69,6 +83,22 @@ def _neg_loglik_and_grad_DM(
         flat_params, Y, X, K, P, C, N, offset=None,
         lambda_ridge=1e-4
 ):
+    """计算 Dirichlet-Multinomial 回归负对数似然和梯度。
+
+    Args:
+        flat_params: 展平参数，最后一个元素是 ``log(alpha_sum)``。
+        Y: sample x cell_type 的组成比例矩阵。
+        X: 设计矩阵。
+        K: cell subtype/subpopulation 数量。
+        P: 设计矩阵列数。
+        C: sample x cell_type 的 count 矩阵。
+        N: 每个样本的总 count。
+        offset: 可选 offset 矩阵。
+        lambda_ridge: 只加在 beta 参数上的 ridge 惩罚强度。
+
+    Returns:
+        ``(neg_ll, grad_flat)``，分别为负对数似然和展平梯度。
+    """
     n = Y.shape[0]
     
     # 参数拆解
@@ -126,9 +156,21 @@ def _neg_loglik_and_grad_DM(
 
 
 def _compute_donor_blups(df_all, celltypes, epsilon=1e-6, clip_val=5.0):
-    """
-    Compute donor-level BLUPs on logit(prop) scale for each cell type.
-    Returned offsets are clipped to [-clip_val, clip_val].
+    """计算 donor 层面的 BLUP offset。
+
+    Args:
+        df_all: 长表丰度数据，需包含 ``cell_type``、``prop`` 和 ``donor_id``。
+        celltypes: 需要计算 offset 的 cell subtype/subpopulation 列表。
+        epsilon: logit 变换前的比例裁剪值，避免 ``logit(0)`` 和 ``logit(1)``。
+        clip_val: offset 绝对值上限。
+
+    Returns:
+        行为 donor、列为 cell subtype/subpopulation 的 offset DataFrame。
+
+    Example:
+        >>> blup_df = _compute_donor_blups(abundance_df, ["CD4_Tcm", "CD8_Teff"])
+        >>> blup_df.loc["donor_01", "CD4_Tcm"]
+        # 用作 Dirichlet 回归的 donor-level offset，并被限制在 [-5, 5]。
     """
     blup_dict = {}
     
@@ -151,16 +193,27 @@ def _compute_donor_blups(df_all, celltypes, epsilon=1e-6, clip_val=5.0):
         except Exception:
             continue
     
-    # donor × cell_type offset matrix
+    # donor x cell_type offset matrix
     offset_df = pd.DataFrame(blup_dict).fillna(0.0)
     
-    # ✅ 核心修改：限制 offset 的数值范围
+    # 限制 offset 的范围，是为了防止小样本 donor 的极端 BLUP 主导优化。
     offset_df = offset_df.clip(lower=-clip_val, upper=clip_val)
     
     return offset_df
 
 
 def _smart_init(Y, X, K, P):
+    """用 ALR 近似解初始化 Dirichlet 回归参数。
+
+    Args:
+        Y: sample x cell_type 的组成比例矩阵。
+        X: 设计矩阵。
+        K: cell subtype/subpopulation 数量。
+        P: 设计矩阵列数。
+
+    Returns:
+        展平后的 beta 初始值。若最小二乘失败，则返回全 0 初始化。
+    """
     # Log-Ratio transformation (ALR) with respect to last column
     # y_ij = log(Y_ij / Y_iK)
     Y_ref = Y[:, -1][:, None]
@@ -173,8 +226,8 @@ def _smart_init(Y, X, K, P):
         # Use simple least squares
         beta_init_T, _, _, _ = np.linalg.lstsq(X, Y_alr, rcond=None)
         beta_init = beta_init_T.T
-    except:
-        pass  # Fallback to zeros
+    except Exception:
+        pass  # 最小二乘失败时保留零初始化，保证优化器还能继续尝试。
     return beta_init.ravel()
 # ==============================================================================
 # 2. 激进版主函数: run_Dirichlet_Wald
@@ -188,11 +241,39 @@ def run_Dirichlet_Wald(df_all: pd.DataFrame,
                        maxiter: int = 1000,
                        alpha: float = 0.05,
                        verbose: bool = False) -> Dict[str, Any]:
-    """
-    鲁棒版 Dirichlet_Wald：
-    1. 强制返回空 DataFrame 替代 None，防止下游评估脚本崩溃。
-    2. 集成了 BLUPs 供体校正逻辑。
-    3. 加入参数与梯度的数值夹断 (Clipping)。
+    """运行 Dirichlet 回归 Wald 检验。
+
+    该实现面向 cell subtype/subpopulation 组成数据：先把 count 长表转为
+    sample x cell_type 宽表，再用 Dirichlet 回归拟合 ``formula`` 对组成比例的影响。
+    为了兼容小样本和零计数，函数保留三个稳健性设计：失败时返回空对比表、可选
+    donor BLUP offset、以及参数和梯度 clipping。
+
+    Args:
+        df_all: 长表丰度数据，至少包含 ``group_label``、``cell_type``、``count``、
+            ``prop``、``donor_id`` 和公式中的列。
+        cell_type: 目标 cell subtype/subpopulation。
+        formula: patsy 右侧公式，例如 ``"disease + tissue"``。
+        ref_label: disease 对比的参考组。
+        group_label: 样本标识列。
+        maxiter: BFGS 最大迭代次数。
+        alpha: 显著性阈值。
+        verbose: 是否显示优化器输出。
+
+    Returns:
+        标准 ``make_result`` 字典。即使失败，也尽量返回空 DataFrame 作为
+        ``contrast_table``，减少下游 AttributeError。
+
+    Example:
+        >>> res = run_Dirichlet_Wald(
+        ...     df_all=abundance_df,
+        ...     cell_type="CD8_Teff",
+        ...     formula="disease + tissue",
+        ...     ref_label="HC",
+        ...     group_label="sample_id",
+        ...     maxiter=1000,
+        ... )
+        >>> res["extra"].get("success")
+        # 查看优化器是否报告收敛；contrast_table 保存 disease/tissue 对比。
     """
     method_name = "Dirichlet_Wald"
     extra = {}
@@ -203,6 +284,14 @@ def run_Dirichlet_Wald(df_all: pd.DataFrame,
         'Coef.', 'Std.Err', 'z', 'P>|z|', 'direction', 'significant'
     ])
     empty_contrast.index.name = 'other'
+    required_cols = {group_label, "cell_type", "count", "prop", "donor_id"}
+    missing_cols = required_cols - set(df_all.columns)
+    if missing_cols:
+        return make_result(method=method_name, cell_type=cell_type,
+                           p_val=1.0, p_type='Minimal',
+                           contrast_table=empty_contrast.copy(),
+                           extra={"error": f"Missing required columns: {sorted(missing_cols)}"},
+                           alpha=alpha)
     
     # 1) Pivot Data
     wide = df_all.pivot_table(index=group_label, columns="cell_type", values="count",
@@ -220,6 +309,10 @@ def run_Dirichlet_Wald(df_all: pd.DataFrame,
     
     
     best_ref = find_stable_reference(wide)
+    if best_ref == cell_type and K >= 2:
+        # ALR 的最后一列是隐式参考类，目标亚群不能放在最后，否则没有对应参数行。
+        non_target = [ct for ct in celltypes if ct != cell_type]
+        best_ref = non_target[0]
     if celltypes[-1] != best_ref:
         if K < 2:
             return make_result(method=method_name, cell_type=cell_type,
@@ -390,8 +483,29 @@ def run_Dirichlet_Wald_with_LFC(
         coef_threshold: float = 0.2,  # 新增 LFC 阈值参数
         **kwargs
 ) -> Dict[str, Any]:
-    """
-    运行 Dirichlet Wald 检验并应用 LFC 过滤。
+    """运行 Dirichlet Wald 检验并应用效应量阈值过滤。
+
+    Args:
+        df_all: 长表丰度数据。
+        cell_type: 目标 cell subtype/subpopulation。
+        formula: patsy 右侧公式。
+        coef_threshold: ``Coef.`` 的绝对值阈值。
+        **kwargs: 透传给 ``run_Dirichlet_Wald`` 的参数，例如 ``ref_label``、
+            ``group_label`` 和 ``alpha``。
+
+    Returns:
+        标准 ``make_result`` 字典，显著性需同时满足 p 值和效应量阈值。
+
+    Example:
+        >>> res = run_Dirichlet_Wald_with_LFC(
+        ...     abundance_df,
+        ...     cell_type="Treg",
+        ...     formula="disease + tissue",
+        ...     ref_label="HC",
+        ...     coef_threshold=0.2,
+        ... )
+        >>> res["contrast_table"]["significant"]
+        # True 表示该对比达到统计和效应量双阈值。
     """
     # 假设 run_Dirichlet_Wald 是你现有的原始函数
     res = run_Dirichlet_Wald(df_all, cell_type, formula=formula, **kwargs)
@@ -422,10 +536,43 @@ def run_Dirichlet_Multinomial_Wald(df_all: pd.DataFrame,
                                    maxiter: int = 1000,
                                    alpha: float = 0.05,
                                    verbose: bool = False) -> Dict[str, Any]:
-    """
-    稳健版：估计 alpha_sum (Overdispersion)。通常 P 值较保守，但更真实。
+    """运行 Dirichlet-Multinomial Wald 检验。
+
+    该版本额外估计 ``alpha_sum`` 以表达 overdispersion，因此 p 值通常比普通
+    Dirichlet Wald 更保守，但在 count 波动明显时更贴近真实不确定性。
+
+    Args:
+        df_all: 长表丰度数据。
+        cell_type: 目标 cell subtype/subpopulation。
+        formula: patsy 右侧公式。
+        ref_label: disease 参考组。
+        group_label: 样本标识列。
+        maxiter: BFGS 最大迭代次数。
+        alpha: 显著性阈值。
+        verbose: 是否显示优化器输出。
+
+    Returns:
+        标准 ``make_result`` 字典。``extra["estimated_alpha_sum"]`` 保存估计的
+        overdispersion 总浓度参数。
+
+    Example:
+        >>> res = run_Dirichlet_Multinomial_Wald(
+        ...     abundance_df,
+        ...     cell_type="Mono_CD16",
+        ...     formula="disease + tissue",
+        ...     ref_label="HC",
+        ... )
+        >>> res["extra"].get("estimated_alpha_sum")
+        # 数值越大通常表示组成比例越接近 multinomial 的低过度离散情形。
     """
     method_name = "Dirichlet_Multinomial_Wald"  # 更新名称
+    required_cols = {group_label, "cell_type", "count", "prop", "donor_id"}
+    missing_cols = required_cols - set(df_all.columns)
+    if missing_cols:
+        return make_result(method_name, cell_type, None, None,
+                           contrast_table=None,
+                           extra={"error": f"Missing required columns: {sorted(missing_cols)}"},
+                           alpha=alpha)
     
     # 1) Pivot Data
     wide = df_all.pivot_table(index=group_label, columns="cell_type", values="count",
@@ -437,6 +584,10 @@ def run_Dirichlet_Multinomial_Wald(df_all: pd.DataFrame,
         return make_result(method_name, cell_type, None,None,
                            contrast_table=None,
                            extra={"error": f"target cell_type '{cell_type}' not found"})
+    if K < 2:
+        return make_result(method_name, cell_type, None, None,
+                           contrast_table=None,
+                           extra={"error": "Need at least two cell_type columns for Dirichlet-Multinomial regression."})
     
     # Target Swap Logic
     target_idx = celltypes.index(cell_type)
@@ -622,16 +773,31 @@ def run_Dirichlet_Multinomial_Wald(df_all: pd.DataFrame,
         contrast_table = None
         extra.update({"error": str(e), "groups": groups, "estimated_alpha_sum": float(alpha_sum_est)})
     
+    p_val = contrast_table['P>|z|'].min() if contrast_table is not None and not contrast_table.empty else None
     return make_result(method=method_name,
                        cell_type=cell_type,
-                       p_val=contrast_table['P>|z|'].min(), p_type='Minimal',
+                       p_val=p_val, p_type='Minimal',
                        contrast_table=contrast_table,
-                       extra=extra)
+                       extra=extra,
+                       alpha=alpha)
 
 
 def find_stable_reference(wide_df):
-    """
-    寻找最适合作为基准的细胞：1. 非零值最多; 2. 丰度适中; 3. CV(变异系数)最低
+    """寻找适合作为 ALR 基准的 cell subtype/subpopulation。
+
+    选择逻辑优先保证非零出现率，其次在全样本存在的亚群里选择变异系数较低者。
+    这样做是为了让隐式参考列更稳定，减少 Dirichlet 优化时的数值波动。
+
+    Args:
+        wide_df: sample x cell_type count 宽表。
+
+    Returns:
+        推荐作为参考列的 cell subtype/subpopulation 名称。
+
+    Example:
+        >>> ref_ct = find_stable_reference(count_wide)
+        >>> ref_ct
+        # 通常是出现率高且跨样本波动较小的亚群。
     """
     presence = (wide_df > 0).sum(axis=0)
     # 优先选在所有样本中都存在的细胞

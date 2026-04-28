@@ -29,19 +29,25 @@ def _pairwise_perm_vs_ref(df: pd.DataFrame,
                           n_perm: int = 500,
                           alpha: float = 0.05,
                           seed: int = 0):
-    '''
-    返回成对排列检验的 DataFrame，将 ref_label 与每个其他疾病类别进行比较。
-    :param df:
-    :param cell_type:
-    :param ref_label:
-    :param pairwise_level: 进行检验的单位，sample_id, donor_id 或某种 group_id
-    :param n_perm:
-    :param alpha:
-    :param seed:
-    :return:
-    '''
+    """执行参考组对其他组的成对 block permutation 检验。
+
+    Args:
+        df: 长表丰度数据。
+        cell_type: 目标 cell subtype/subpopulation。
+        formula_fixed: 去掉主要解释变量后的协变量公式，用于残差化。
+        main_variable: 主要解释变量，例如 ``"disease"``。
+        use_reml: 混合模型是否使用 REML。
+        ref_label: 参考组标签。
+        group_label: 残差化模型中的随机截距分组列。
+        pairwise_level: 打乱标签的 block 单位，例如 ``"donor_id"``。
+        n_perm: 每个 pairwise 对比的排列次数。
+        alpha: FDR 阈值。
+        seed: 随机种子。
+
+    Returns:
+        以 ``other`` 为索引的 DataFrame；若没有可比较分组，返回空 DataFrame。
+    """
     
-    # 输入处理
     rng = np.random.default_rng(seed)
     df = df[df["cell_type"] == cell_type].copy()
     if df.empty:
@@ -61,20 +67,19 @@ def _pairwise_perm_vs_ref(df: pd.DataFrame,
     else:
         df = df.assign(resid=df["prop"].copy())
     
-    # donor → disease label
+    # block 单位到主要变量标签的映射，保证同一 donor/sample 的标签一起被置换。
     donor_col = pairwise_level
     donor_map = df.groupby(pairwise_level)[main_variable].first().to_dict()
     
     labels = list(set(donor_map.values()))
     other_labels = [lab for lab in labels if lab != ref_label]
-    other_labels.sort()  # 按照字母序
+    other_labels.sort()
     results = []
     
     # ----------------------------------------------------
     #          For each "other vs ref": run test
     # ----------------------------------------------------
     for lab in other_labels:
-        # donor filtering
         donor_items = [(d, l) for d, l in donor_map.items() if l in (ref_label, lab)]
         if len(donor_items) < 2:
             continue
@@ -84,7 +89,6 @@ def _pairwise_perm_vs_ref(df: pd.DataFrame,
         
         df_sub = df[df[donor_col].isin(donor_ids)].copy()
         
-        # observed stat (Mann–Whitney)
         groups_obs = [
             df_sub.loc[df_sub[main_variable] == ref_label, "resid"].dropna().values,
             df_sub.loc[df_sub[main_variable] == lab, "resid"].dropna().values
@@ -99,7 +103,6 @@ def _pairwise_perm_vs_ref(df: pd.DataFrame,
         except Exception:
             obs_stat = stats.kruskal(*groups_obs, nan_policy="omit").statistic
         
-        # perm stats
         perm_stats = []
         for _ in range(n_perm):
             perm = donor_labels.copy()
@@ -119,7 +122,7 @@ def _pairwise_perm_vs_ref(df: pd.DataFrame,
         perm_stats = np.array(perm_stats)
         pval = (np.sum(perm_stats >= obs_stat) + 1) / (len(perm_stats) + 1)
         
-        # effect size: Cliff's delta 非参数检验
+        # Cliff's delta 作为方向性效应量，便于与参数模型的 direction 字段对齐。
         x, y = groups_obs
         nx, ny = len(x), len(y)
         nxy = sum((xi > y).sum() for xi in x) / (nx * ny)
@@ -166,51 +169,80 @@ def run_Perm_Mixed(df_all: pd.DataFrame,
                    use_reml: bool = True,
                    alpha: float = 0.05,
                    seed: int = 0):
-    '''
+    """运行基于 block permutation 的混合丰度检验。
 
-    :param df_all:
-    :param cell_type:
-    :param formula: 仅支持 + 的处理
-    :param main_variable: 主要解释变量；默认为 None 作为 fool-proofing
-        当 formula 只是单一变量时（省略了左侧的 props，自动补全为 props ~ disease），不需要填写 main_variable；
-        当 formula 包含多个元素时，必须指定 main_variable。
-        因为函数 _pairwise_perm_vs_ref 会通过剔除 main_variable 的 formula 构建 mixedlm，取残差进行检验。
-    :param n_perm:
-    :param ref_label:
-    :param ref_label:
-    :param pairwise_level:
-    :param alpha:
-    :param seed:
-    :return:
-    '''
+    函数先对目标 cell subtype/subpopulation 的 ``prop`` 做全局 Kruskal-Wallis
+    统计量，然后在 ``pairwise_level`` 层面打乱主要变量标签，得到全局置换 p 值。
+    随后调用 ``_pairwise_perm_vs_ref``，将 ``ref_label`` 与每个其他水平逐一比较。
+
+    Args:
+        df_all: 长表丰度数据，至少包含 ``cell_type``、``prop``、``main_variable``、
+            ``group_label`` 和 ``pairwise_level``。
+        cell_type: 目标 cell subtype/subpopulation。
+        formula: 右侧公式。目前主要支持 ``+`` 拼接的公式，例如
+            ``"disease + tissue"``。
+        main_variable: 主要解释变量。单变量公式可省略；多变量公式必须指定。
+        n_perm: 全局检验和 pairwise 检验的排列次数。
+        ref_label: 参考组标签，通常为 ``"HC"``。
+        group_label: 残差化模型中的随机截距分组列。
+        pairwise_level: 置换标签的 block 层级，例如 ``"donor_id"``。
+        use_reml: MixedLM 残差化时是否使用 REML。
+        alpha: FDR 阈值。
+        seed: 随机种子，保证 HPC 上批量任务可复现。
+
+    Returns:
+        标准 ``make_result`` 字典。``p_val`` 是全局 permutation p 值，
+        ``contrast_table`` 是参考组对其他组的 pairwise 结果。
+
+    Example:
+        >>> res = run_Perm_Mixed(
+        ...     df_all=abundance_df,
+        ...     cell_type="Mono_CD14",
+        ...     formula="disease + tissue",
+        ...     main_variable="disease",
+        ...     n_perm=1000,
+        ...     ref_label="HC",
+        ...     group_label="sample_id",
+        ...     pairwise_level="donor_id",
+        ...     seed=2024,
+        ... )
+        >>> res["contrast_table"][["p_adj", "direction"]]
+        # 查看各 disease 水平相对 HC 的校正 p 值和丰度方向。
+    """
     extra = {}
     pval=None
     # 输入处理
     if "+" in formula:
         if main_variable is None:
-            raise KeyError("Main explanatory variable must be specified when formula contains more than one variable.")
+            raise KeyError("Main explanatory variable must be specified when `formula` contains more than one variable.")
     else:
         main_variable = formula
     
     formula_fixed = remove_main_variable_from_formula(formula, main_variable)
     
     if pairwise_level not in df_all.columns:
-        raise ValueError("Need column for pairwise_level.")
+        raise ValueError(f"Missing required column for `pairwise_level`: '{pairwise_level}'.")
+    if main_variable not in df_all.columns:
+        raise ValueError(f"Missing required column for `main_variable`: '{main_variable}'.")
+    required_cols = {"cell_type", "prop", group_label}
+    missing_cols = required_cols - set(df_all.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {sorted(missing_cols)}")
     
     rng = np.random.default_rng(seed)
     
     df = df_all[df_all["cell_type"] == cell_type].copy()
     if df.empty:
-        raise ValueError(f"No rows for {cell_type}.")
+        raise ValueError(f"No rows for cell_type: '{cell_type}'.")
     
     try:
         #  Step 1: 通过打乱 disease 标签，观察是否还存在同样水平的差异性
         #  K-W 法检测总体差异性
-        groups = [x["prop"].dropna().values for _, x in df.groupby("disease")]
+        groups = [x["prop"].dropna().values for _, x in df.groupby(main_variable)]
         obs_stat = stats.kruskal(*groups, nan_policy="omit").statistic
         
-        # 生成 donor 水平的 permutation（混杂）
-        donor_map = df.groupby(pairwise_level)["disease"].first().to_dict()
+        # 生成 block 水平的 permutation，保护同一 donor/sample 内的相关结构。
+        donor_map = df.groupby(pairwise_level)[main_variable].first().to_dict()
         donor_ids = np.array(list(donor_map.keys()))
         donor_labels = np.array(list(donor_map.values()))
         
@@ -221,7 +253,8 @@ def run_Perm_Mixed(df_all: pd.DataFrame,
             rng.shuffle(perm)
             perm_map = dict(zip(donor_ids, perm))
             
-            df["disease_perm"] = df["donor_id"].map(perm_map)
+            # 使用 pairwise_level 而不是硬编码 donor_id，兼容 sample_id 或自定义 block。
+            df["disease_perm"] = df[pairwise_level].map(perm_map)
             groups_perm = [
                 x["prop"].dropna().values
                 for _, x in df.groupby("disease_perm")
@@ -250,7 +283,7 @@ def run_Perm_Mixed(df_all: pd.DataFrame,
         # Step 3: 结果包装
     except Exception as e:
         contrast_table=None
-        extra["error"] = e
+        extra["error"] = str(e)
         
     return make_result(
         method="PERM_MIXED",

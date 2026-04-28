@@ -17,7 +17,26 @@ logger = logging.getLogger(__name__)
 
 @logged_class
 class PyDESeq2Manager:
+    """缓存式 PyDESeq2 丰度统计管理器。
+
+    PyDESeq2 一次会对所有 cell subtype/subpopulation 建模，因此本类在首次调用时
+    全量拟合并缓存结果，后续不同 ``cell_type`` 的请求只从缓存中提取对应行。
+
+    Example:
+        >>> res = run_PyDESeq2(
+        ...     df_all=abundance_df,
+        ...     cell_type="CD4_Tcm",
+        ...     formula="disease + tissue",
+        ...     main_variable="disease",
+        ...     ref_label="HC",
+        ...     group_label="sample_id",
+        ... )
+        >>> res["contrast_table"][["Coef.", "P>|z|", "direction"]]
+        # Coef. 已从 log2FoldChange 转换到自然对数尺度，便于和 CLR 方法比较。
+    """
+
     def __init__(self):
+        """初始化缓存容器。"""
         self.last_data_hash = None
         self.cached_results = {}  # 存储 {other_label: results_df}
         self.current_cell_type = None
@@ -25,30 +44,55 @@ class PyDESeq2Manager:
         self.method_name = "PyDESeq2"
     
     def _get_data_hash(self, df_all, formula):
-        # 结合数据特征和公式生成唯一标识
-        # 注意：df_all.values 的哈希可能较慢，这里用 shape 和采样
+        """根据输入数据和公式生成缓存键。"""
+        # 使用 pandas 行哈希是为了同时感知元数据和 count 改动，避免复用旧模型。
         content_hash = hashlib.md5(pd.util.hash_pandas_object(df_all).values).hexdigest()
         return f"{content_hash}_{formula}"
     
     def __call__(self, df_all: pd.DataFrame, cell_type: str, formula: str = "disease",
                  main_variable: str = None, ref_label: str = "HC",
                  group_label: str = "sample_id", alpha: float = 0.05, **kwargs) -> Dict[str, Any]:
+        """运行或复用 PyDESeq2 全量拟合，并提取目标亚群结果。
+
+        Args:
+            df_all: 长表丰度数据，至少包含 ``group_label``、``cell_type``、``count``
+                和公式中的设计列。
+            cell_type: 目标 cell subtype/subpopulation。
+            formula: PyDESeq2 设计公式的右侧变量，例如 ``"disease + tissue"``。
+            main_variable: 主要解释变量。多因素公式中必须指定。
+            ref_label: ``main_variable`` 的参考组。
+            group_label: 样本唯一标识列。
+            alpha: 显著性阈值。
+            **kwargs: 预留兼容参数。
+
+        Returns:
+            标准 ``make_result`` 字典。
+        """
         
         self.ref_label = ref_label
+        design_cols = parse_formula_columns(f"y ~ {formula}")
+        if main_variable is None:
+            if len(design_cols) > 1:
+                raise KeyError("Main explanatory variable must be specified when `formula` contains more than one variable.")
+            main_variable = design_cols[0]
         current_hash = self._get_data_hash(df_all, formula)
         
-        # 如果是新数据，触发全量计算
+        # PyDESeq2 全量拟合较重，缓存可以避免逐个 cell subtype/subpopulation 重复跑模型。
         if current_hash != self.last_data_hash:
             self.cached_results = self._run_full_deseq2(
-                df_all, formula, main_variable or formula, ref_label, group_label, alpha
+                df_all, formula, main_variable, ref_label, group_label, alpha
             )
             self.last_data_hash = current_hash
         
         return self._extract_result(cell_type, alpha)
     
     def _run_full_deseq2(self, df_all, formula, main_variable, ref_label, group_label, alpha):
-        # 1. 准备数据
+        """准备 count/metadata 宽表并运行 PyDESeq2 全量拟合。"""
         design_cols = parse_formula_columns(f"y ~ {formula}")
+        required_cols = {group_label, "cell_type", "count", main_variable, *design_cols}
+        missing_cols = required_cols - set(df_all.columns)
+        if missing_cols:
+            raise ValueError(f"Missing required columns: {sorted(missing_cols)}")
         
         # 聚合数据，确保每个 sample_id 只有一行（避免 MultiIndex 冲突）
         # 先提取元数据映射表 (sample_id -> disease/tissue 等)
@@ -82,14 +126,14 @@ class PyDESeq2Manager:
             quiet=True
         )
         dds.deseq2()
-        print(dds.varm["LFC"].columns)
+        print(f"[PyDESeq2Manager._run_full_deseq2] LFC columns: {list(dds.varm['LFC'].columns)}")
         
         # 3. 提取所有对比组
         # full_cache = {k: {} for k in design_cols} # TODO: 改的兼容一点
         full_cache = {"disease": {}, "tissue": {}}
         
         # --- 提取 Disease 对比 (对比各 labels vs HC) ---
-        clean_main = main_variable  # 假设传入的是干净的 "disease"
+        clean_main = main_variable
         unique_disease = [l for l in metadata[clean_main].unique() if l != ref_label]
         for other_label in unique_disease:
             stat_res = DeseqStats(dds, contrast=[clean_main, other_label, ref_label], quiet=True)
@@ -109,6 +153,7 @@ class PyDESeq2Manager:
         return full_cache
     
     def _extract_result(self, cell_type: str, alpha: float) -> Dict[str, Any]:
+        """从缓存结果中提取目标 cell subtype/subpopulation 的对比表。"""
         try:
             contrast_rows = []
             
@@ -145,7 +190,8 @@ class PyDESeq2Manager:
                     })
             
             if not contrast_rows:
-                return make_result(self.method_name, cell_type, np.nan)
+                return make_result(self.method_name, cell_type, np.nan, 'Minimal',
+                                   contrast_table=pd.DataFrame(), extra={}, alpha=alpha)
             
             # 构建最终的 contrast_table
             df_contrast = pd.DataFrame(contrast_rows + tissue_rows).set_index("other")
@@ -158,7 +204,7 @@ class PyDESeq2Manager:
             return make_result(
                 method=self.method_name,
                 cell_type=cell_type,
-                p_val=main_p,p_type='Minimal',
+                p_val=main_p, p_type='Minimal',
                 contrast_table=df_contrast,
                 extra={},
                 alpha=alpha
@@ -169,6 +215,7 @@ class PyDESeq2Manager:
                 method=self.method_name,
                 cell_type=cell_type,
                 p_val=np.nan,
+                p_type='Minimal',
                 extra={
                     "error": repr(e),
                 },
