@@ -13,9 +13,21 @@ from src.core.plot.utils import matplotlib_savefig
 
 
 def draw_lorenz(freq_series, label, ax=None):
-    '''
-    现在支持显式传入 ax 对象。如果不传，则回退到当前活动坐标轴。
-    '''
+    """绘制单组 TCR usage Lorenz 曲线。
+
+    Args:
+        freq_series: TCR V gene 频率序列。
+        label: 曲线标签。
+        ax: 可选 matplotlib Axes；不传时使用当前活动坐标轴。
+
+    Returns:
+        ``None``，直接在 ``ax`` 上绘图。
+
+    Example:
+        >>> fig, ax = plt.subplots()
+        >>> draw_lorenz(usage_df["freq"], label="CD4_Tcm", ax=ax)
+        # 曲线越偏离对角线，TCR usage 越集中。
+    """
     if ax is None:
         ax = plt.gca()
     
@@ -36,6 +48,27 @@ def plot_lorenz(
         freq_col: str = "freq",
         figsize=(4, 4),
 ):
+    """绘制多个 group 的 TCR usage Lorenz 曲线。
+
+    Args:
+        tcr_usage_df: usage 宽表，通常使用 group 作为 index，列为 MultiIndex。
+        save_addr: 图像输出目录。
+        filename: 输出文件名。
+        groups: 需要绘制的 group 列表。
+        chain: TCR 链名称，例如 ``"TRAV"`` 或 ``"TRBV"``。
+        freq_col: 频率列名。
+        figsize: 图大小。
+
+    Example:
+        >>> plot_lorenz(
+        ...     tcr_usage_wide,
+        ...     save_addr="figures",
+        ...     filename="trav_lorenz.png",
+        ...     groups=["CD4_Tcm", "CD8_Teff"],
+        ...     chain="TRAV",
+        ... )
+        # 比较不同 cell subtype/subpopulation 的 TCR usage 集中程度。
+    """
     # 1. 显式创建 fig 和 ax
     fig, ax = plt.subplots(figsize=figsize)
     
@@ -62,6 +95,18 @@ def plot_lorenz(
     
 
 def plot_simpson_index(simpson_mat, save_addr, filename,figsize=(6, 7)):
+    """绘制 Simpson index 热图。
+
+    Args:
+        simpson_mat: 行列均已整理好的 Simpson index 矩阵。
+        save_addr: 图像输出目录。
+        filename: 输出文件名。
+        figsize: 图大小。
+
+    Example:
+        >>> plot_simpson_index(simpson_pivot, "figures", "simpson.png")
+        # 颜色越深表示 TCR usage skewness 越强。
+    """
     plt.figure(figsize=figsize)
     ax = sns.heatmap(
         simpson_mat,
@@ -79,16 +124,52 @@ def plot_simpson_index(simpson_mat, save_addr, filename,figsize=(6, 7)):
     
 
 def color_to_rgb_tuple(hex_color):
+    """将十六进制颜色转换为 RGB tuple。
+
+    Args:
+        hex_color: 形如 ``"#ff0000"`` 的颜色字符串。
+
+    Returns:
+        ``(r, g, b)`` 整数 tuple。
+
+    Example:
+        >>> color_to_rgb_tuple("#ff0000")
+        (255, 0, 0)
+    """
     hex_color = hex_color.lstrip('#')
     return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
 
 
 def rgb_tuple_to_hex(rgb):
+    """将 RGB tuple 转换为十六进制颜色。
+
+    Args:
+        rgb: ``(r, g, b)`` 整数 tuple。
+
+    Returns:
+        十六进制颜色字符串。
+
+    Example:
+        >>> rgb_tuple_to_hex((255, 0, 0))
+        '#ff0000'
+    """
     return '#%02x%02x%02x' % rgb
 
 
 def blend_color(c1, c2):
-    """RGB 平均出中间色"""
+    """对两个 RGB 颜色取平均，生成 Sankey link 中间色。
+
+    Args:
+        c1: 第一个十六进制颜色。
+        c2: 第二个十六进制颜色。
+
+    Returns:
+        混合后的十六进制颜色。
+
+    Example:
+        >>> blend_color("#ff0000", "#0000ff")
+        '#7f007f'
+    """
     r1, g1, b1 = color_to_rgb_tuple(c1)
     r2, g2, b2 = color_to_rgb_tuple(c2)
     return rgb_tuple_to_hex((
@@ -103,6 +184,21 @@ def generate_tcr_sankey_colors(
     top5_trbv,
     other_color: str = "#BBBBBB"
 ):
+    """生成 TCR Sankey 图的节点和连线配色函数。
+
+    Args:
+        top5_trav: 重点显示的 TRAV 基因列表。
+        top5_trbv: 重点显示的 TRBV 基因列表。
+        other_color: 非 top 基因的默认颜色。
+
+    Returns:
+        ``(trav_color_map, trbv_color_map, get_trav_color, get_trbv_color, link_color)``。
+
+    Example:
+        >>> _, _, get_a, get_b, link = generate_tcr_sankey_colors(["TRAV1"], ["TRBV5"])
+        >>> link("TRAV1", "TRBV5")
+        # 返回 alpha/beta 节点颜色混合后的连线颜色。
+    """
     red_palette = ["#ff9999", "#ff6666", "#ff4d4d", "#ff1a1a", "#e60000"]
     blue_palette = ["#9999ff", "#6666ff", "#4d4dff", "#1a1aff", "#0000e6"]
 
@@ -139,22 +235,41 @@ def plot_tcr_sankey(
     auto_top_n: int = 5,
     save=True, do_return=False
 ):
-    """
-    使用 adata.obs 中的 TRAV / TRBV 调用结果绘制 Sankey 图
+    """使用 ``adata.obs`` 中的 TRAV/TRBV call 绘制 Sankey 图。
 
-    Parameters
-    ----------
-    adata : AnnData
-    tcr_alpha_col : str
-    tcr_beta_col : str
-    unassigned_omit : bool
-        是否剔除 Unassigned
-    auto_top_n : int
-        自动选前 n 个 TRAV / TRBV
+    Args:
+        adata: AnnData 对象，``adata.obs`` 中需包含 alpha/beta call 列。
+        save_addr: 图像输出目录；``save=True`` 时必填。
+        filename: 输出文件名前缀；``save=True`` 时必填。
+        tcr_alpha_col: TRAV call 列名。
+        tcr_beta_col: TRBV call 列名。
+        unassigned_omit: 是否剔除 ``"Unassigned"`` 组合。
+        auto_top_n: 自动高亮前 N 个 TRAV/TRBV。
+        save: 是否保存 png/pdf。
+        do_return: 是否返回 plotly Figure。
+
+    Returns:
+        当 ``do_return=True`` 时返回 plotly Figure，否则返回 ``None``。
+
+    Example:
+        >>> fig = plot_tcr_sankey(
+        ...     adata,
+        ...     tcr_alpha_col="TRAV_call",
+        ...     tcr_beta_col="TRBV_call",
+        ...     save_addr="figures",
+        ...     filename="tcr_sankey",
+        ...     do_return=True,
+        ... )
+        >>> fig
+        # 展示 TRAV 到 TRBV 的组合 usage 流向。
     """
     if save:
         if save_addr is None or filename is None:
             raise ValueError("Save address must be provided if `save=True`.")
+    required_cols = {tcr_alpha_col, tcr_beta_col}
+    missing_cols = required_cols - set(adata.obs.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required obs columns: {sorted(missing_cols)}")
     
     df = adata.obs[[tcr_alpha_col, tcr_beta_col]].copy()
     df = df.dropna(subset=[tcr_alpha_col, tcr_beta_col])
@@ -170,6 +285,8 @@ def plot_tcr_sankey(
             (df_count[tcr_alpha_col] != "Unassigned")
             & (df_count[tcr_beta_col] != "Unassigned")
         ]
+    if df_count.empty:
+        raise ValueError("No TCR alpha-beta pairs remain after filtering.")
 
     # ------------------------------------------------------------------
     # 自动选择 top TRAV / TRBV

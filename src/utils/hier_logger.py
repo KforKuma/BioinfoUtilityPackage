@@ -16,9 +16,21 @@ logging.basicConfig(
 
 
 class HierLogger(logging.Logger):
+    """带缩进层级的 Logger。
+
+    该 Logger 通过 ``ContextVar`` 记录当前调用层级，让被 ``logged`` 装饰的函数
+    在嵌套调用时输出更容易阅读的缩进日志。
+
+    Example:
+        >>> log = logging.getLogger("demo")
+        >>> log.info("[demo] Message")
+        # 会按照当前调用层级自动缩进。
+    """
+
     indent_str = "  "
     
     def info(self, msg, *args, **kwargs):
+        """输出带当前层级缩进的 info 日志。"""
         lvl = _current_level.get()
         # 保持缩进逻辑
         indented_msg = f"{self.indent_str * lvl}{msg}"
@@ -38,17 +50,30 @@ logger = logging.getLogger("myhier")
 # --- 工具函数 ---
 
 def _get_func_name(func):
-    """安全获取函数或可调用对象的名称"""
+    """安全获取函数或可调用对象名称。
+
+    Args:
+        func: 函数、方法或可调用对象。
+
+    Returns:
+        优先返回 ``__qualname__``，其次返回 ``__name__``。
+
+    Example:
+        >>> _get_func_name(len)
+        'len'
+    """
     # 优先获取 qualname (带类名前缀)，其次 name，最后转字符串
     return getattr(func, '__qualname__', getattr(func, '__name__', str(func)))
 
 
 def enter():
+    """进入一层日志缩进。"""
     lvl = _current_level.get()
     _current_level.set(lvl + 1)
 
 
 def exit():
+    """退出一层日志缩进，最低保持在 0。"""
     lvl = _current_level.get()
     _current_level.set(max(0, lvl - 1))
 
@@ -56,7 +81,22 @@ def exit():
 # --- 核心装饰器改进 ---
 
 def logged(func):
-    """通用函数装饰器：支持层级缩进和安全名称访问"""
+    """为函数添加进入/离开日志。
+
+    Args:
+        func: 需要装饰的函数。
+
+    Returns:
+        包装后的函数。
+
+    Example:
+        >>> @logged
+        ... def work():
+        ...     return 1
+        >>> work()
+        1
+        # 日志会显示 [work] entering 和 [work] leaving。
+    """
     
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
@@ -64,22 +104,34 @@ def logged(func):
         func_logger = logging.getLogger(func.__module__)
         func_name = _get_func_name(func)
         
-        func_logger.info(f"▶ entering {func_name}")
+        func_logger.info(f"[{func_name}] entering")
         enter()
         try:
             result = func(*args, **kwargs)
             return result
         finally:
             exit()
-            func_logger.info(f"◀ leaving {func_name}")
+            func_logger.info(f"[{func_name}] leaving")
     
     return wrapper
 
 
 def logged_class(cls):
-    """
-    类装饰器：为类中所有方法添加具有层级感的日志。
-    改进：处理了方法包装逻辑，确保其与层次结构兼容。
+    """为类中公开方法添加层级日志。
+
+    Args:
+        cls: 需要装饰的类。
+
+    Returns:
+        原类对象，公开可调用属性会被 ``logged`` 包装。
+
+    Example:
+        >>> @logged_class
+        ... class Runner:
+        ...     def run(self):
+        ...         return "ok"
+        >>> Runner().run()
+        'ok'
     """
     # 遍历类的所有属性，而不仅仅是函数
     for name in dir(cls):

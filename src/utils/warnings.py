@@ -10,19 +10,24 @@ def deprecated(
         alternative: str | None = None,
         message: str | None = None,
 ):
-    """
-    Mark a function, method, or class as deprecated.
+    """标记函数、方法或类已废弃。
 
-    Parameters
-    ----------
-    since : str, optional
-        Version in which the object was deprecated.
-    removal : str, optional
-        Version in which the object is expected to be removed.
-    alternative : str, optional
-        Suggested alternative API.
-    message : str, optional
-        Custom deprecation message (overrides auto-generated message).
+    Args:
+        since: 开始废弃的版本。
+        removal: 预计移除版本。
+        alternative: 推荐替代 API。
+        message: 自定义 warning 文本；提供时会覆盖自动生成文本。
+
+    Returns:
+        装饰器函数。
+
+    Example:
+        >>> @deprecated(since="0.2", alternative="new_func")
+        ... def old_func():
+        ...     return 1
+        >>> old_func()
+        1
+        # 调用时会触发 DeprecationWarning。
     """
     
     def decorator(obj):
@@ -51,7 +56,7 @@ def deprecated(
             )
             return obj(*args, **kwargs)
         
-        # 类也能工作（__init__ 被 wrapper 包住）
+        # 返回 wrapper 而不改对象主体，便于兼容函数、方法和简单类调用。
         return wrapper
     
     return decorator

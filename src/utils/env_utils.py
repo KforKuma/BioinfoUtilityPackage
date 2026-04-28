@@ -12,7 +12,20 @@ def _run_with_timeout(
         cmd: list[str],
         timeout: int = 300
 ) -> tuple[bool, str]:
-    """Run command with timeout and capture output."""
+    """在超时时间内运行命令并捕获输出。
+
+    Args:
+        cmd: 命令参数列表。
+        timeout: 超时时间，单位秒。
+
+    Returns:
+        ``(success, output)``。失败时 ``output`` 为错误信息。
+
+    Example:
+        >>> ok, output = _run_with_timeout(["python", "--version"], timeout=10)
+        >>> ok
+        True
+    """
     try:
         process = subprocess.Popen(
             cmd,
@@ -45,6 +58,24 @@ def ensure_package(
     version: str | None = None,
     timeout: int = 300,
 ) -> bool:
+    """确保当前 Python 环境可导入指定包，缺失时尝试 pip 安装。
+
+    该函数主要用于 notebook/交互式环境的轻量兜底。HPC 批量任务中建议优先使用
+    已固定的环境，而不是在运行时安装依赖。
+
+    Args:
+        install_name: pip 安装名。
+        import_name: import 使用的模块名；为 ``None`` 时用 ``install_name`` 推断。
+        version: 可选版本号或版本约束，例如 ``"1.0.0"`` 或 ``">=1.0"``。
+        timeout: pip 安装超时时间，单位秒。
+
+    Returns:
+        若最终可以导入则返回 ``True``，否则返回 ``False``。
+
+    Example:
+        >>> ensure_package("scikit-posthocs", import_name="scikit_posthocs")
+        # 缺失时会尝试安装；安装失败则返回 False。
+    """
     import_name = import_name or install_name.replace("-", "_")
 
     try:
@@ -60,7 +91,7 @@ def ensure_package(
     else:
         pkg_spec = install_name
 
-    print(f"⚙️  Installing package: {pkg_spec}")
+    print(f"[ensure_package] Installing package: {pkg_spec}")
 
     success, output = _run_with_timeout(
         [sys.executable, "-m", "pip", "install", pkg_spec],
@@ -68,25 +99,34 @@ def ensure_package(
     )
 
     if not success:
-        print(f"❌ Failed to install {pkg_spec}: {output}")
+        print(f"[ensure_package] Warning! Failed to install {pkg_spec}: {output}")
         return False
 
     try:
         importlib.import_module(import_name)
-        print(f"✅ Successfully installed {pkg_spec}")
+        print(f"[ensure_package] Successfully installed {pkg_spec}")
         return True
     except ImportError:
-        print(f"❌ Package installed but cannot be imported: {import_name}")
+        print(f"[ensure_package] Warning! Package installed but cannot be imported: {import_name}")
         return False
 
 
 
 def count_element_list_occurrence(list_of_lists: Iterable[Iterable]) -> dict:
-    '''
-    跨列表元素统计，常用于多个列表之间的基因出现的频率统计
-    :param list_of_lists: 多个列表的列表
-    :return: 返回计数字典
-    '''
+    """统计元素出现在多少个子列表中。
+
+    同一子列表内的重复元素只计一次，适合统计多个基因列表之间的出现频率。
+
+    Args:
+        list_of_lists: 多个可迭代对象组成的集合。
+
+    Returns:
+        ``{element: occurrence_count}`` 字典。
+
+    Example:
+        >>> count_element_list_occurrence([["A", "A", "B"], ["B", "C"]])
+        {'A': 1, 'B': 2, 'C': 1}
+    """
     from collections import defaultdict
     counter = defaultdict(int)
     for unique_list in list_of_lists:
@@ -96,12 +136,39 @@ def count_element_list_occurrence(list_of_lists: Iterable[Iterable]) -> dict:
 
 
 def sanitize_filename(filename: str) -> str:
+    """替换文件名中不适合 Windows 路径的字符。
+
+    Args:
+        filename: 原始文件名。
+
+    Returns:
+        清理后的文件名。
+
+    Example:
+        >>> sanitize_filename("A/B:C?.txt")
+        'A_B_C_.txt'
+    """
     import re
     return re.sub(r'[<>:"/\\|?*]', '_', filename)
 
 
 def call_with_compatible_args(func, *args, **kwargs):
-    # 获取函数签名
+    """仅用目标函数支持的关键字参数调用函数。
+
+    Args:
+        func: 目标函数。
+        *args: 位置参数。
+        **kwargs: 候选关键字参数。
+
+    Returns:
+        ``func(*args, **filtered_kwargs)`` 的返回值。
+
+    Example:
+        >>> def func(a, b=1):
+        ...     return a + b
+        >>> call_with_compatible_args(func, 2, b=3, unused=True)
+        5
+    """
     sig = inspect.signature(func)
     accepted_params = sig.parameters
     
