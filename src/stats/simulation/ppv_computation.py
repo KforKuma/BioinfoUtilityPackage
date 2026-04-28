@@ -7,9 +7,29 @@ logger = logging.getLogger(__name__)
 
 @logged
 def calculate_ppv_by_coef(df, bin_size=0.2):
+    """按估计效应量分箱计算 PPV。
+
+    Args:
+        df: 评估结果表，至少包含 ``Est_Coef``、``True_Significant`` 和
+            ``Est_Significant``。
+        bin_size: ``abs(Est_Coef)`` 的分箱宽度。
+
+    Returns:
+        PPV 汇总表，包含每个效应量区间内的 true positive 数、预测阳性数、
+        平均估计效应量和 PPV。
+
+    Example:
+        >>> ppv = calculate_ppv_by_coef(eval_df, bin_size=0.25)
+        >>> ppv[["coef_bin", "PPV"]].head()
+        # 用于观察估计效应量越大时预测阳性的可信度是否提高。
     """
-    根据估计的系数大小 (Est_Coef) 计算 PPV 表。
-    """
+    required_cols = {"Est_Coef", "True_Significant", "Est_Significant"}
+    missing_cols = required_cols - set(df.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {sorted(missing_cols)}")
+    if bin_size <= 0:
+        raise ValueError("`bin_size` must be greater than 0.")
+
     df = df.copy()
     
     # 1. 取估计系数的绝对值（因为 PPV 通常不分正负效应，只看强度）
@@ -22,8 +42,10 @@ def calculate_ppv_by_coef(df, bin_size=0.2):
     
     # 3. 对 Est_Coef 进行分箱
     max_coef = df['abs_est_coef'].max()
-    bins = np.arange(0, max_coef + bin_size, bin_size)
-    df['coef_bin'] = pd.cut(df['abs_est_coef'], bins=bins)
+    if pd.isna(max_coef):
+        return pd.DataFrame(columns=['coef_bin', 'tp_count', 'total_pred_pos', 'avg_est_coef', 'PPV'])
+    bins = np.arange(0, max(max_coef, bin_size) + bin_size, bin_size)
+    df['coef_bin'] = pd.cut(df['abs_est_coef'], bins=bins, include_lowest=True)
     
     # 4. 按分箱聚合
     ppv_table = df.groupby('coef_bin', observed=True).agg(

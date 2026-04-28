@@ -17,11 +17,37 @@ logger = logging.getLogger(__name__)
 
 #################
 @logged
-def get_refined_noise_estimates(df_real):
-    """使用混合模型提取最精确的方差分量"""
-    # 1. 准备 CLR 空间数据
+def get_refined_noise_estimates(df_real: pd.DataFrame) -> Dict[str, float]:
+    """从真实丰度数据中估计 donor 和 sample 层面的 CLR 噪声。
+
+    函数先将长表 count 转换为 sample x cell_type 宽表，再进入 CLR 空间。
+    对每个 cell subtype/subpopulation 优先拟合 ``CLR ~ disease + tissue + (1|donor)``
+    的混合模型；如果 LMM 失败，则回退到 OLS 残差，并对 donor 方差做一个保守修正。
+
+    Args:
+        df_real: 真实长表丰度数据，至少包含 ``donor_id``、``sample_id``、
+            ``disease``、``tissue``、``cell_type`` 和 ``count``。
+
+    Returns:
+        包含 ``donor_noise_sd`` 和 ``sample_noise_sd`` 的字典，可直接传给
+        simulation 模块的模拟函数。
+
+    Example:
+        >>> noise = get_refined_noise_estimates(real_count_df)
+        >>> noise["donor_noise_sd"], noise["sample_noise_sd"]
+        # 用于 simulate_LogisticNormal_hierarchical 或 simulate_CLR_resample_data。
+    """
+    required_cols = {"donor_id", "sample_id", "disease", "tissue", "cell_type", "count"}
+    missing_cols = required_cols - set(df_real.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {sorted(missing_cols)}")
+
+    # 先进入 CLR 空间，是为了让噪声估计与 CLR/LMM 类方法的模拟尺度一致。
     df_wide = df_real.pivot_table(index=['donor_id', 'sample_id', 'disease', 'tissue'],
                                   columns='cell_type', values='count', fill_value=0)
+    if df_wide.empty:
+        raise ValueError("Input data contains no count rows after pivoting.")
+
     # 增加伪计数并转换 CLR
     vals = df_wide.values + 1.0
     clr_vals = np.log(vals) - np.log(vals).mean(axis=1, keepdims=True)
@@ -40,8 +66,9 @@ def get_refined_noise_estimates(df_real):
             r_var = model.scale
             donor_vols.append(np.sqrt(max(d_var, 0)))
             resid_vols.append(np.sqrt(max(r_var, 0)))
-        except:
+        except Exception as e:
             # OLS Fallback 并进行方差偏见修正
+            # LMM 在小样本或奇异方差时容易失败，OLS 残差提供可继续模拟的保守估计。
             model_ols = sm.OLS(df_clr[ct], sm.add_constant(
                 pd.get_dummies(df_clr[['disease', 'tissue']], drop_first=True, dtype=float))).fit()
             s_noise = df_clr.assign(res=model_ols.resid).groupby('donor_id')['res'].std().median()
@@ -57,13 +84,40 @@ def get_refined_noise_estimates(df_real):
 
 @logged
 def get_all_simulation_params(df_real, collected_results, ref_disease="HC", ref_tissue="nif"):
-    # A. 提取核心精确噪声
+    """汇总三类模拟函数所需的参数字典。
+
+    Args:
+        df_real: 真实长表丰度数据。
+        collected_results: ``collect_DM_results`` 的输出，至少包含 ``all_coefs`` 和
+            ``disease_levels``。
+        ref_disease: 参考 disease 水平，默认 ``"HC"``。
+        ref_tissue: 参考 tissue 水平，默认 ``"nif"``。
+
+    Returns:
+        包含 ``ln_params``、``dm_params`` 和 ``resample_params`` 的字典，分别对应
+        Logistic-Normal、Dirichlet-Multinomial 和 CLR resampling 模拟函数。
+
+    Example:
+        >>> collected = collect_DM_results(count_df, cell_types, run_Dirichlet_Multinomial_Wald)
+        >>> params = get_all_simulation_params(count_df, collected)
+        >>> simulate_DM_data(**params["dm_params"])
+        # 生成与真实数据噪声和效应量大致对齐的模拟丰度长表。
+    """
+    required_cols = {"donor_id", "sample_id", "disease", "tissue", "cell_type", "count"}
+    missing_cols = required_cols - set(df_real.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {sorted(missing_cols)}")
+    if "disease_levels" not in collected_results:
+        raise ValueError("Missing required key in `collected_results`: 'disease_levels'.")
+
     refined_noise = get_refined_noise_estimates(df_real)
     
     # B. 计算 baseline_mu_scale (用于 LN 模拟)
     # 取参考组各细胞类型平均比例在 CLR 空间的标准差
     ref_mask = (df_real['disease'] == ref_disease) & (df_real['tissue'] == ref_tissue)
     ct_props = df_real[ref_mask].groupby('cell_type')['count'].sum() + 1
+    if ct_props.empty:
+        raise ValueError(f"No reference samples found for disease: '{ref_disease}' and tissue: '{ref_tissue}'.")
     clr_baseline = np.log(ct_props) - np.log(ct_props).mean()
     baseline_mu_scale = float(clr_baseline.std())
     
@@ -73,11 +127,13 @@ def get_all_simulation_params(df_real, collected_results, ref_disease="HC", ref_
     # 计算测序深度 (Total Count) 统计量
     sample_sums = df_real.groupby('sample_id')['count'].sum()
     total_count_mean = float(sample_sums.mean())
-    total_count_sd = min(float(sample_sums.std()),500)
+    total_count_sd = min(float(sample_sums.std()), 500)
     
     # D. 深度对齐各个字典
-    n_samples_per_donor = int(
-        np.ceil(df_real["sample_id"].nunique() / df_real["donor_id"].nunique()))
+    n_donors = df_real["donor_id"].nunique()
+    if n_donors == 0:
+        raise ValueError("No donor_id values found in input data.")
+    n_samples_per_donor = int(np.ceil(df_real["sample_id"].nunique() / n_donors))
     
     # 1. 对齐 LogisticNormal 参数
     ln_params = {

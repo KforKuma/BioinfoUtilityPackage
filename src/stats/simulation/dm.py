@@ -39,6 +39,59 @@ def simulate_DM_data(
         donor_noise_sd: float = 0.3,
         random_state: int = 1234
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """生成 Dirichlet-Multinomial 组成丰度模拟数据。
+
+    该模拟器以 Dirichlet alpha 作为底层组成参数，再从 multinomial 中采样 count。
+    它适合生成对 Dirichlet/Dirichlet-Multinomial engine 友好的模拟数据，也会返回
+    一张 refined ground truth 表，用于评估各方法对真实注入效应的恢复能力。
+
+    Args:
+        n_donors: donor 数量。
+        n_samples_per_donor: 每个 donor 的 sample 数量。
+        n_celltypes: cell subtype/subpopulation 数量。
+        baseline_alpha_scale: baseline Dirichlet alpha 总量尺度。
+        disease_effect_size: disease 主效应的 log 尺度大小。
+        tissue_effect_size: tissue 主效应的 log 尺度大小。
+        interaction_effect_size: disease x tissue 交互效应大小。
+        inflamed_cell_frac: 受 tissue/interaction 影响的亚群比例。
+        sampling_bias_strength: 样本级采样偏差强度。
+        disease_levels: disease 水平，首个元素作为参考组。
+        tissue_levels: tissue 水平，首个元素作为参考组。
+        total_count_mean: 每个 sample 的测序深度均值。
+        total_count_sd: 每个 sample 的测序深度标准差。
+        min_count: 每个 sample 的最小测序深度。
+        donor_noise_sd: donor 级别 alpha 扰动强度。
+        random_state: 随机种子。
+
+    Returns:
+        ``(df_long, df_true_refined)``。``df_long`` 是模拟出的长表 count 数据；
+        ``df_true_refined`` 是按实际观测 LFC 修正后的 ground truth。
+
+    Example:
+        >>> df_sim, df_truth = simulate_DM_data(
+        ...     n_donors=12,
+        ...     n_samples_per_donor=3,
+        ...     n_celltypes=40,
+        ...     disease_effect_size=0.5,
+        ...     tissue_effect_size=0.6,
+        ...     disease_levels=("HC", "CD", "UC"),
+        ...     tissue_levels=("nif", "if"),
+        ...     random_state=2024,
+        ... )
+        >>> df_sim.head()
+        # donor_id/sample_id/disease/tissue/cell_type/count/total_count/prop
+        >>> df_truth.query("True_Significant").head()
+        # 用于评估模拟数据中被注入且可观察到的真实差异。
+    """
+    if n_donors <= 0 or n_samples_per_donor <= 0 or n_celltypes <= 1:
+        raise ValueError("`n_donors`, `n_samples_per_donor`, and `n_celltypes` must be positive; `n_celltypes` must be greater than 1.")
+    if len(disease_levels) < 2:
+        raise ValueError("`disease_levels` must contain at least two levels.")
+    if len(tissue_levels) < 2:
+        raise ValueError("`tissue_levels` must contain at least two levels.")
+    if not 0 <= inflamed_cell_frac <= 1:
+        raise ValueError("`inflamed_cell_frac` must be between 0 and 1.")
+
     rng = np.random.default_rng(random_state)
     cell_type_names = [f"CT{i + 1}" for i in range(n_celltypes)]
     
@@ -90,8 +143,8 @@ def simulate_DM_data(
             
             alpha = np.maximum(alpha, 1e-6)
             
-            # 采样
-            N =  np.maximum(rng.normal(total_count_mean, total_count_sd), min_count)
+            # multinomial 的 n 必须是整数；显式 round/int 便于不同 numpy 版本兼容。
+            N = int(max(round(rng.normal(total_count_mean, total_count_sd)), min_count))
             p = rng.dirichlet(alpha)
             counts = rng.multinomial(n=N, pvals=p)
             
@@ -126,11 +179,46 @@ def build_DM_effects_with_main_effect(
         disease_effect_size, tissue_effect_size, interaction_effect_size,
         inflamed_cell_frac, rng
 ):
+    """构建 DM 模拟所需的主效应、组织效应和交互效应。
+
+    该函数会为 disease main effect、tissue main effect 和 disease x tissue
+    interaction 分别构建 log 尺度效应向量。效应方向允许增加或减少；交互项的
+    ground truth 使用全局 ``ref_disease x ref_tissue`` 作为参照组，保留原始语义。
+
+    Args:
+        cell_type_names: cell subtype/subpopulation 名称列表。
+        disease_levels: disease 水平，首个元素为参考组。
+        tissue_levels: tissue 水平，首个元素为参考组。
+        disease_effect_size: disease 主效应大小。
+        tissue_effect_size: tissue 主效应大小。
+        interaction_effect_size: 交互效应大小。
+        inflamed_cell_frac: 受 tissue/interaction 影响的亚群比例。
+        rng: ``numpy.random.Generator`` 实例。
+
+    Returns:
+        ``(disease_main_effects_dict, tissue_effect_vec, interaction_effects_dict,
+        df_true_effect)``。
+
+    Example:
+        >>> rng = np.random.default_rng(1)
+        >>> effects, tissue_vec, inter, truth = build_DM_effects_with_main_effect(
+        ...     ["CT1", "CT2", "CT3"],
+        ...     ("HC", "CD"),
+        ...     ("nif", "if"),
+        ...     0.4,
+        ...     0.6,
+        ...     0.8,
+        ...     0.3,
+        ...     rng,
+        ... )
+        >>> truth[["cell_type", "contrast_factor", "True_Effect"]].head()
+        # 记录每个亚群和对比的真实注入效应。
     """
-    DM 模型的效应生成函数，现在包含独立的 Disease Main Effect 和双向效应（增加或减少）。
-    同时，使用全局基线 HC x nif 修正了 True Effect Table 中的交互作用参照组。
-    """
+    if len(tissue_levels) < 2:
+        raise ValueError("`tissue_levels` must contain at least two levels.")
     n_celltypes = len(cell_type_names)
+    if n_celltypes == 0:
+        raise ValueError("`cell_type_names` must not be empty.")
     ref_disease = disease_levels[0]  # HC
     ref_tissue = tissue_levels[0]  # nif
     other_tissue = tissue_levels[1]  # if

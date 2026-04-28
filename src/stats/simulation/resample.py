@@ -33,6 +33,59 @@ def simulate_CLR_resample_data(
         pseudocount=1.0,
         random_state=1234
 ):
+    """基于真实样本 CLR 背景重采样生成模拟丰度数据。
+
+    该模拟器先从真实参考组 ``ref_disease x ref_tissue`` 中抽取 baseline CLR logits，
+    再叠加 donor/sample 噪声和注入效应，最后按真实 sample 的测序深度分布进行
+    multinomial 采样。它通常更贴近真实数据结构，适合作为相对保守的模拟方案。
+
+    Args:
+        count_df: 真实长表 count 数据，至少包含 ``sample_id``、``donor_id``、
+            ``disease``、``tissue``、``cell_type`` 和 ``count``。
+        n_donors: 模拟 donor 数量。
+        n_samples_per_donor: 每个 donor 的 sample 数量。
+        n_celltypes: 模拟 cell subtype/subpopulation 数量；可从真实亚群中抽样或重复抽样。
+        disease_effect_size: disease 主效应大小。
+        tissue_effect_size: tissue 主效应大小。
+        interaction_effect_size: 交互效应大小。
+        inflamed_cell_frac: 受 tissue/interaction 影响的亚群比例。
+        donor_noise_sd: donor 层面 CLR shift 标准差。
+        sample_noise_sd: sample 层面 CLR 噪声标准差。
+        disease_levels: disease 水平，首个元素作为参考组。
+        tissue_levels: tissue 水平，首个元素作为参考组。
+        pseudocount: 从真实 count 转 CLR logits 前加入的伪计数。
+        random_state: 随机种子。
+
+    Returns:
+        ``(df_long, df_true_refined)``，分别为模拟长表和按实际观察 LFC 修正后的
+        ground truth。
+
+    Example:
+        >>> df_sim, df_truth = simulate_CLR_resample_data(
+        ...     count_df=real_count_df,
+        ...     n_donors=20,
+        ...     n_samples_per_donor=4,
+        ...     n_celltypes=30,
+        ...     disease_levels=("HC", "CD", "UC"),
+        ...     tissue_levels=("nif", "if"),
+        ...     random_state=42,
+        ... )
+        >>> df_sim[["sample_id", "cell_type", "count", "prop"]].head()
+        # 与真实参考样本背景相近的模拟组成数据。
+    """
+    required_cols = {"sample_id", "donor_id", "disease", "tissue", "cell_type", "count"}
+    missing_cols = required_cols - set(count_df.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {sorted(missing_cols)}")
+    if n_donors <= 0 or n_samples_per_donor <= 0 or n_celltypes <= 1:
+        raise ValueError("`n_donors`, `n_samples_per_donor`, and `n_celltypes` must be positive; `n_celltypes` must be greater than 1.")
+    if len(disease_levels) < 2:
+        raise ValueError("`disease_levels` must contain at least two levels.")
+    if len(tissue_levels) < 2:
+        raise ValueError("`tissue_levels` must contain at least two levels.")
+    if not 0 <= inflamed_cell_frac <= 1:
+        raise ValueError("`inflamed_cell_frac` must be between 0 and 1.")
+
     rng = np.random.default_rng(random_state)
     n_sim_samples = n_donors * n_samples_per_donor
     
@@ -75,7 +128,7 @@ def simulate_CLR_resample_data(
         ].index
     
     if len(baseline_sample_ids) == 0:
-        raise ValueError(f"基线样本池为空。请确保数据中包含 {ref_disease} & {ref_tissue}。")
+        raise ValueError(f"Baseline sample pool is empty. Expected disease: '{ref_disease}' and tissue: '{ref_tissue}'.")
     
     # 提取 count 矩阵并根据 selected_orig_indices 进行切片/重组
     # 注意：这里我们提取了指定维度的 Logits 背景
@@ -141,7 +194,8 @@ def simulate_CLR_resample_data(
     exp_logits = np.exp(logits_matrix)
     proportions = exp_logits / np.sum(exp_logits, axis=1, keepdims=True)
     
-    sim_depths = rng.choice(sample_totals.values, size=n_sim_samples, replace=True)
+    # multinomial 需要整数测序深度；真实数据若被读成 float，这里统一兜底转换。
+    sim_depths = rng.choice(sample_totals.values, size=n_sim_samples, replace=True).astype(int)
     counts_matrix = np.array([
         rng.multinomial(n=sim_depths[i], pvals=proportions[i])
         for i in range(n_sim_samples)
@@ -169,13 +223,45 @@ def build_CLR_effects_and_table(
         disease_effect_size, tissue_effect_size, interaction_effect_size,
         inflamed_cell_frac, rng
 ):
-    """
-    修正后的 CLR 效应生成函数：
-    1. 支持不同疾病影响不同的细胞集
-    2. 将交互作用与组织主效应细胞集解耦
-    3. 修复显著性判定逻辑
+    """构建 CLR resampling 模拟所需的效应向量和 ground truth 表。
+
+    当前逻辑保留三个语义：不同 disease 可影响不同亚群；interaction 与 tissue
+    主效应的影响亚群解耦；显著性判定基于主效应和交互效应的叠加结果。
+
+    Args:
+        cell_types: 模拟 cell subtype/subpopulation 名称列表。
+        disease_levels: disease 水平，首个元素作为参考组。
+        tissue_levels: tissue 水平，首个元素作为参考组。
+        disease_effect_size: disease 主效应大小。
+        tissue_effect_size: tissue 主效应大小。
+        interaction_effect_size: interaction 效应大小。
+        inflamed_cell_frac: 受 tissue/interaction 影响的亚群比例。
+        rng: ``numpy.random.Generator`` 实例。
+
+    Returns:
+        ``(disease_main_effects_dict, tissue_effect, interaction_effects_dict,
+        df_true_effect)``。
+
+    Example:
+        >>> rng = np.random.default_rng(3)
+        >>> disease_eff, tissue_eff, inter_eff, truth = build_CLR_effects_and_table(
+        ...     ["CT1", "CT2", "CT3"],
+        ...     ("HC", "CD"),
+        ...     ("nif", "if"),
+        ...     0.5,
+        ...     0.8,
+        ...     0.4,
+        ...     0.2,
+        ...     rng,
+        ... )
+        >>> truth.query("True_Significant").head()
+        # 返回每个真实注入差异的方向和效应大小。
     """
     n_celltypes = len(cell_types)
+    if n_celltypes == 0:
+        raise ValueError("`cell_types` must not be empty.")
+    if len(tissue_levels) < 2:
+        raise ValueError("`tissue_levels` must contain at least two levels.")
     ref_disease = disease_levels[0]  # HC
     ref_tissue = tissue_levels[0]  # nif
     other_tissue = tissue_levels[1]  # if

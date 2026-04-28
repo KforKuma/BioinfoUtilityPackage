@@ -35,6 +35,54 @@ def simulate_LogisticNormal_hierarchical(
         tissue_levels=("nif", "if"),
         random_state=1234
 ):
+    """生成 Logistic-Normal Multinomial 层次模拟数据。
+
+    该模拟器在 logit/CLR-like 空间中叠加 baseline、donor 随机效应、disease
+    主效应、tissue 主效应、interaction 以及 sample 噪声，随后通过 softmax 转为
+    组成比例并进行 multinomial 采样。它更适合评估 LMM/CLR 类方法。
+
+    Args:
+        n_donors: donor 数量。
+        n_samples_per_donor: 每个 donor 的 sample 数量。
+        n_celltypes: cell subtype/subpopulation 数量。
+        baseline_mu_scale: baseline logits 的标准差。
+        disease_effect_size: disease 主效应大小。
+        tissue_effect_size: tissue 主效应大小。
+        interaction_effect_size: disease x tissue 交互效应大小。
+        inflamed_cell_frac: 受 tissue/interaction 影响的亚群比例。
+        donor_noise_sd: donor 层面随机效应标准差。
+        sample_noise_sd: sample 层面噪声标准差。
+        total_count_mean: 每个 sample 的测序深度均值。
+        total_count_sd: 每个 sample 的测序深度标准差。
+        min_count: 每个 sample 的最小测序深度。
+        disease_levels: disease 水平，首个元素作为参考组。
+        tissue_levels: tissue 水平，首个元素作为参考组。
+        random_state: 随机种子。
+
+    Returns:
+        ``(df_long, df_true_refined)``，分别为模拟丰度长表和可观察 ground truth。
+
+    Example:
+        >>> df_sim, df_truth = simulate_LogisticNormal_hierarchical(
+        ...     n_donors=10,
+        ...     n_samples_per_donor=4,
+        ...     n_celltypes=30,
+        ...     disease_effect_size=0.5,
+        ...     tissue_effect_size=0.8,
+        ...     random_state=7,
+        ... )
+        >>> df_sim.groupby("sample_id")["count"].sum().head()
+        # 检查每个 sample 的模拟测序深度。
+    """
+    if n_donors <= 0 or n_samples_per_donor <= 0 or n_celltypes <= 1:
+        raise ValueError("`n_donors`, `n_samples_per_donor`, and `n_celltypes` must be positive; `n_celltypes` must be greater than 1.")
+    if len(disease_levels) < 2:
+        raise ValueError("`disease_levels` must contain at least two levels.")
+    if len(tissue_levels) < 2:
+        raise ValueError("`tissue_levels` must contain at least two levels.")
+    if not 0 <= inflamed_cell_frac <= 1:
+        raise ValueError("`inflamed_cell_frac` must be between 0 and 1.")
+
     rng = np.random.default_rng(random_state)
     ref_disease = disease_levels[0]
     ref_tissue = tissue_levels[0]
@@ -121,7 +169,7 @@ def simulate_LogisticNormal_hierarchical(
     proportions = softmax(logits, axis=1)
     
     total_counts = np.maximum(
-        rng.normal(total_count_mean, total_count_sd, n_samples).astype(int), min_count
+        np.rint(rng.normal(total_count_mean, total_count_sd, n_samples)).astype(int), min_count
     )
     
     # 采样
@@ -150,6 +198,35 @@ def simulate_LogisticNormal_hierarchical(
 @logged
 def build_true_effect_table(cell_types, ref_disease, ref_tissue, disease_effects, tissue_effect,
                             interaction_effects, other_tissue):
+    """构建 Logistic-Normal 模拟的真实效应表。
+
+    Args:
+        cell_types: cell subtype/subpopulation 名称列表。
+        ref_disease: disease 参考组。
+        ref_tissue: tissue 参考组。
+        disease_effects: disease 主效应字典。
+        tissue_effect: tissue 主效应向量。
+        interaction_effects: interaction 效应字典。
+        other_tissue: 非参考 tissue 水平。
+
+    Returns:
+        每个 cell subtype/subpopulation 和对比组合的 ground truth DataFrame。
+
+    Example:
+        >>> truth = build_true_effect_table(
+        ...     ["CT1", "CT2"],
+        ...     "HC",
+        ...     "nif",
+        ...     {"CD": np.array([0.5, 0.0])},
+        ...     np.array([0.0, -0.4]),
+        ...     {"CD": np.array([0.2, 0.0])},
+        ...     "if",
+        ... )
+        >>> truth[truth["True_Significant"]]
+        # 用于评估估计结果是否命中真实注入效应。
+    """
+    if len(cell_types) == 0:
+        raise ValueError("`cell_types` must not be empty.")
     true_effects = []
     for other_disease, E_vec in disease_effects.items():
         for i, ct_name in enumerate(cell_types):

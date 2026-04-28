@@ -3,9 +3,45 @@ import pandas as pd
 
 
 def refine_ground_truth_by_observation(df_long, df_true_effect, lfc_threshold=0.2):
+    """根据模拟后的实际观测 LFC 修正 ground truth 可检测性。
+
+    注入效应不一定能在最终 count/prop 中形成足够大的可观测差异，尤其是组成数据
+    会受到其他 cell subtype/subpopulation 的挤压。因此本函数按模拟结果重新计算
+    每个 truth 对比的观测 LFC，并生成 ``Is_Detectable_True`` 作为评估基准。
+
+    Args:
+        df_long: 模拟长表，至少包含 ``cell_type``、``disease``、``tissue`` 和 ``prop``。
+        df_true_effect: 原始 ground truth 表，至少包含 ``cell_type``、
+            ``contrast_group``、``contrast_ref``、``contrast_factor``、
+            ``True_Effect`` 和 ``True_Significant``。
+        lfc_threshold: 观测 ``abs(log2FC)`` 达到该阈值才视为可检测。
+
+    Returns:
+        增加 ``Observed_LFC`` 和 ``Is_Detectable_True`` 的 ground truth DataFrame。
+
+    Example:
+        >>> refined = refine_ground_truth_by_observation(df_sim, df_truth, lfc_threshold=0.2)
+        >>> refined[["cell_type", "Observed_LFC", "Is_Detectable_True"]].head()
+        # 评估统计方法时建议使用 Is_Detectable_True 作为更现实的真值标签。
+    """
+    required_long_cols = {"cell_type", "disease", "tissue", "prop"}
+    missing_long_cols = required_long_cols - set(df_long.columns)
+    if missing_long_cols:
+        raise ValueError(f"Missing required columns in `df_long`: {sorted(missing_long_cols)}")
+    required_truth_cols = {
+        "cell_type", "contrast_group", "contrast_ref", "contrast_factor",
+        "True_Effect", "True_Significant"
+    }
+    missing_truth_cols = required_truth_cols - set(df_true_effect.columns)
+    if missing_truth_cols:
+        raise ValueError(f"Missing required columns in `df_true_effect`: {sorted(missing_truth_cols)}")
+    if lfc_threshold < 0:
+        raise ValueError("`lfc_threshold` must be non-negative.")
+
+    df_long = df_long.copy()
     df_refined = df_true_effect.copy()
     
-    # 构造状态键
+    # 构造状态键，用于 interaction 对比的组合参照系。
     df_long['status_key'] = df_long['disease'].astype(str) + " x " + df_long['tissue'].astype(str)
     
     # 预计算各类中位数

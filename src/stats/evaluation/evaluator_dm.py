@@ -24,6 +24,39 @@ def collect_DM_results(
         tissue_levels: Tuple[str, str] = ("nif", "if"),
         disease_levels: Tuple[str, str] = ("HC", "Colitis", "BD", "CD", "UC"),
 ) -> Dict[str, pd.DataFrame]:
+    """收集 Dirichlet-Multinomial 方法在多个亚群上的系数结果。
+
+    该函数用于从真实数据或种子数据中估计后续模拟所需的效应量。它逐个运行
+    ``run_DM_func``，从 ``contrast_table`` 中识别 disease、tissue 和 interaction
+    三类对比，并整理为长表。
+
+    Args:
+        df_count: 长表 count 数据，格式与 stats engine 输入一致。
+        cell_types_list: 需要评估的 cell subtype/subpopulation 名称列表。
+        run_DM_func: 兼容 ``run_Dirichlet_Multinomial_Wald`` 调用签名的函数。
+        formula: 传给 ``run_DM_func`` 的右侧公式。
+        tissue_levels: ``(ref_tissue, other_tissue)``，默认 ``("nif", "if")``。
+        disease_levels: disease 水平，首个元素视为参考组。
+
+    Returns:
+        字典，包含 ``all_coefs`` 长表和 ``disease_levels``。``all_coefs`` 的列包括
+        ``cell_type``、``factor``、``contrast_other``、``LogFC_Coef`` 和 ``PValue``。
+
+    Example:
+        >>> collected = collect_DM_results(
+        ...     df_count=count_df,
+        ...     cell_types_list=count_df["cell_type"].unique(),
+        ...     run_DM_func=run_Dirichlet_Multinomial_Wald,
+        ...     formula="disease + C(tissue, Treatment(reference='nif'))",
+        ... )
+        >>> collected["all_coefs"].head()
+        # 用于 estimate_DM_parameters 推断模拟效应量。
+    """
+    required_cols = {"cell_type", "count"}
+    missing_cols = required_cols - set(df_count.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {sorted(missing_cols)}")
+
     all_coefs = []
     ref_tissue, other_tissue = tissue_levels
     
@@ -31,9 +64,12 @@ def collect_DM_results(
         try:
             res = run_DM_func(df_all=df_count, cell_type=cell_type, formula=formula, verbose=False)
             
-            if 'error' in res['extra']: continue
+            if 'error' in res.get('extra', {}):
+                continue
             
             contrast_df: pd.DataFrame = res["contrast_table"]
+            if contrast_df is None or contrast_df.empty:
+                continue
             extra = res['extra']
             
             for other, row in contrast_df.iterrows():
@@ -52,7 +88,7 @@ def collect_DM_results(
                 
                 if is_inter:
                     factor_type = 'interaction'
-                elif other in extra['groups']:
+                elif other in extra.get('groups', []):
                     factor_type = 'disease'
                 elif other == other_tissue:
                     factor_type = 'tissue'
@@ -66,7 +102,7 @@ def collect_DM_results(
                     'LogFC_Coef': coef,
                     'PValue': pval
                 })
-        except Exception as e:
+        except Exception:
             continue
     
     return {'all_coefs': pd.DataFrame(all_coefs), 'disease_levels': disease_levels}
@@ -74,8 +110,34 @@ def collect_DM_results(
 
 @logged
 def estimate_DM_parameters(collected_results: Dict[str, pd.DataFrame], alpha=0.05) -> Dict[str, float]:
+    """根据 DM 结果估计模拟函数的效应量参数。
+
+    Args:
+        collected_results: ``collect_DM_results`` 返回的字典。
+        alpha: 判定显著信号的 p 值阈值。
+
+    Returns:
+        包含 ``disease_effect_size``、``tissue_effect_size``、
+        ``interaction_effect_size`` 和 ``inflamed_cell_frac`` 的参数字典。
+
+    Example:
+        >>> params = estimate_DM_parameters(collected)
+        >>> params["tissue_effect_size"], params["inflamed_cell_frac"]
+        # 可作为 simulate_DM_data 或 simulate_LogisticNormal_hierarchical 的输入。
+    """
+    if "all_coefs" not in collected_results:
+        raise ValueError("Missing required key in `collected_results`: 'all_coefs'.")
     df_coefs = collected_results['all_coefs']
+    if df_coefs.empty:
+        return {
+            'disease_effect_size': 0.0,
+            'tissue_effect_size': 0.0,
+            'interaction_effect_size': 0.0,
+            'inflamed_cell_frac': 0.05,
+        }
     total_cell_types = df_coefs['cell_type'].nunique()
+    if total_cell_types == 0:
+        total_cell_types = 1
     
     # 过滤显著信号
     df_signal = df_coefs[df_coefs['PValue'] < alpha].copy()
@@ -110,7 +172,7 @@ def estimate_DM_parameters(collected_results: Dict[str, pd.DataFrame], alpha=0.0
     if interaction_cell_frac < 0.1:  # 如果原始数据基本没检测到交互项
         # 选择 A: 取消
         params['interaction_effect_size'] = 0.0
-        print("Warning: No interaction signal detected in seed data. Skipping interaction simulation.")
+        print("[estimate_DM_parameters] Warning! No interaction signal detected in seed data. Skipping interaction simulation.")
     else:
         # 选择 B: 动态注入
         # 交互项强度不应低于主效应的某个比例，否则在数学上就被噪声盖过了
@@ -122,25 +184,32 @@ def estimate_DM_parameters(collected_results: Dict[str, pd.DataFrame], alpha=0.0
 
 @logged
 def filter_rare_celltypes(count_df, zero_threshold=0.25, verbose=True):
-    """
-    过滤在超过一定比例 sample 中不存在的 cell types
+    """过滤在过多 sample 中缺失的 cell subtype/subpopulation。
 
-    Parameters
-    ----------
-    count_df : pd.DataFrame
-        原始 count dataframe
-    zero_threshold : float
-        允许为0的最大 sample 比例 (默认0.25)
-    verbose : bool
-        是否打印统计信息
+    Args:
+        count_df: 长表 count 数据，至少包含 ``sample_id``、``cell_type`` 和 ``count``。
+        zero_threshold: 允许 count 为 0 的最大 sample 比例。
+        verbose: 是否打印过滤摘要。打印内容使用英文，并带函数名前缀。
 
-    Returns
-    -------
-    filtered_df : pd.DataFrame
-        过滤后的 dataframe
-    summary : pd.DataFrame
-        每个 cell_type 的 zero 统计
+    Returns:
+        ``(filtered_df, summary)``。``filtered_df`` 是过滤后的长表；``summary``
+        是每个 cell subtype/subpopulation 的 zero count 统计。
+
+    Example:
+        >>> filtered_df, summary = filter_rare_celltypes(
+        ...     count_df,
+        ...     zero_threshold=0.25,
+        ...     verbose=True,
+        ... )
+        >>> summary.loc["CT1", "zero_fraction"]
+        # 用于判断该亚群是否适合进入模拟参数估计。
     """
+    required_cols = {"sample_id", "cell_type", "count"}
+    missing_cols = required_cols - set(count_df.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {sorted(missing_cols)}")
+    if not 0 <= zero_threshold <= 1:
+        raise ValueError("`zero_threshold` must be between 0 and 1.")
     
     # 构建矩阵
     mat = count_df.pivot_table(
@@ -165,11 +234,9 @@ def filter_rare_celltypes(count_df, zero_threshold=0.25, verbose=True):
     filtered_df = count_df[count_df["cell_type"].isin(keep_celltypes)].copy()
     
     if verbose:
-        print("===== Cell Type Zero Summary =====")
-        print(summary.head(20))
-        print()
-        print(f"Total cell types: {summary.shape[0]}")
-        print(f"Remaining cell types: {len(keep_celltypes)}")
-        print(f"Filtered out: {summary.shape[0] - len(keep_celltypes)}")
-    
+        print(f"[filter_rare_celltypes] Cell type zero summary:\n{summary.head(20)}")
+        print(f"[filter_rare_celltypes] Total cell types: {summary.shape[0]}")
+        print(f"[filter_rare_celltypes] Remaining cell types: {len(keep_celltypes)}")
+        print(f"[filter_rare_celltypes] Filtered out: {summary.shape[0] - len(keep_celltypes)}")
+
     return filtered_df, summary
