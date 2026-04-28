@@ -2,7 +2,7 @@ import gc
 import logging
 import os
 import re
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 import anndata
 import pandas as pd
@@ -26,8 +26,8 @@ class ObsEditor:
         adata: 需要包装的 `AnnData` 对象。
 
     Example:
-        editor = ObsEditor(adata)
-        adata_cd4 = editor.slice_with_key("Subset_Identity", "CD4+ Th17")
+        adata_obs = ObsEditor(adata)
+        adata_cd4 = adata_obs.slice_with_key("Subset_Identity", "CD4+ Th17")
 
     Notes:
         1. `obs` 中的列如无特别说明，通常理解为 cell subtype 或
@@ -190,7 +190,7 @@ class ObsEditor:
             过滤后的 `AnnData` 对象。
 
         Example:
-            adata_subset = ObsEditorClass.slice_with_key("Subset_Identity", "CD4+ Th17")
+            adata_subset_obs = adata_obs.slice_with_key("Subset_Identity", "CD4+ Th17")
         """
         if obs_key not in self._adata.obs.columns:
             raise KeyError(f"Column `{obs_key}` was not found in `adata.obs`.")
@@ -227,8 +227,8 @@ class ObsEditor:
             target_obs_key: 目标输出列名。
 
         Example:
-            ObsEditorClass.assign_cluster_identities(
-                annotator=["T_cell", "B_cell", "Mono"],
+            adata_obs.assign_cluster_identities(
+                annotator=["T_cell", "B_cell", "Mono","B_cell","T_cell"], # 省略了 leiden_res0_5 = 0, 1, 2, 3 的 key
                 anno_obs_key="leiden_res0_5",
                 target_obs_key="Subset_Identity"
             )
@@ -276,6 +276,7 @@ class ObsEditor:
 
     def copy_all_ident(self, adata_from: AnnData, from_obs_key: str, to_obs_key: str) -> None:
         """从另一个 `AnnData` 拷贝指定注释列。
+        用于将精细化注释的亚群文件（中的注释信息）重新回归到储存全部细胞的文件中
 
         Args:
             adata_from: 来源 `AnnData` 对象，其 `obs.index` 需与当前对象存在交集。
@@ -283,7 +284,7 @@ class ObsEditor:
             to_obs_key: 目标列名。
 
         Example:
-            ObsEditor.copy_all_ident(adata_T, "Subset_Identity", "Subset_Identity")
+            adata_obs.copy_all_ident(adata_T, "Subset_Identity", "Subset_Identity")
         """
         if not isinstance(adata_from, AnnData):
             raise TypeError("Argument `adata_from` must be an AnnData object.")
@@ -342,7 +343,56 @@ class ObsEditor:
             self.logger.info(
                 f"[change_one_ident_fast] Replaced {replaced_count} cells in `{obs_key}` from '{old}' to '{new}'."
             )
+    
+    @logged
+    def change_idents(self, obs_key: str, ident_map: Mapping[Any, Any]) -> None:
+        """批量替换指定 obs 列中的取值。
 
+        Args:
+            obs_key: 目标 `obs` 列名。
+            ident_map: 旧值到新值的映射，例如
+                {"BD": "BD", "HC": "Others", "UC": "Others", "CD": "Others"}。
+        
+        Example:
+            adata_obs = change_idents(obs_key = "disease",
+                                      ident_map = {"BD": "BD",
+                                                   "HC": "Others",
+                                                   "UC": "Others",
+                                                   "CD": "Others",},
+)
+        """
+        if obs_key not in self._adata.obs.columns:
+            raise KeyError(f"Column `{obs_key}` was not found in `adata.obs`.")
+        
+        if not ident_map:
+            self.logger.warning("[change_idents] Empty ident_map was provided.")
+            return
+        
+        series = self._adata.obs[obs_key]
+        
+        if pd.api.types.is_categorical_dtype(series):
+            new_categories = set(ident_map.values()) - set(series.cat.categories)
+            if new_categories:
+                self._adata.obs[obs_key] = series.cat.add_categories(list(new_categories))
+                series = self._adata.obs[obs_key]
+        
+        mask = series.isin(ident_map.keys())
+        replaced_count = int(mask.sum())
+        
+        if replaced_count == 0:
+            self.logger.warning(
+                f"[change_idents] Warning! No cells were matched for `{obs_key}` "
+                f"with values: {list(ident_map.keys())}."
+            )
+            return
+        
+        self._adata.obs.loc[mask, obs_key] = series.loc[mask].replace(ident_map)
+        
+        self.logger.info(
+            f"[change_idents] Replaced {replaced_count} cells in `{obs_key}` "
+            f"using mapping: {dict(ident_map)}."
+        )
+    
     @logged
     def update_assignment(
         self,
