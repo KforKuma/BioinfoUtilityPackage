@@ -3,6 +3,24 @@ import pandas as pd
 
 
 def combine_metrics(df):
+    """合并不同 contrast factor 的模拟评估指标。
+
+    Args:
+        df: 包含 ``Method``、``scale_factor``、``TP``、``FP`` 和 ``FN`` 的结果表。
+
+    Returns:
+        按 ``Method`` 和 ``scale_factor`` 汇总后的整体 Power/FPR 表。
+
+    Example:
+        >>> combined = combine_metrics(metrics_df)
+        >>> combined[["Method", "scale_factor", "Power", "FPR"]].head()
+        # 用于绘制全局方法表现，而不是分 disease/tissue/interaction 展示。
+    """
+    required_cols = {"Method", "scale_factor", "TP", "FP", "FN"}
+    missing_cols = required_cols - set(df.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {sorted(missing_cols)}")
+
     # 1. 按照 Method 和 scale_factor 分组，累加基础计数
     combined = df.groupby(['Method', 'scale_factor'])[['TP', 'FP', 'FN']].sum().reset_index()
     
@@ -30,6 +48,33 @@ def compute_ratio_df(
         prop_col="prop",
         eps=1e-6
 ):
+    """计算两个 cell subtype/subpopulation 比例的 ratio 和 log2 ratio。
+
+    Args:
+        df: 标准长表丰度数据。
+        celltype_pair: ``(A, B)``，表示计算 ``A / B``。
+        sample_col: 样本列名。
+        disease_col: 分组列名。
+        celltype_col: cell subtype/subpopulation 列名。
+        prop_col: 比例列名。
+        eps: 防止除零的伪计数。
+
+    Returns:
+        每个 sample 一行的 ratio 表，包含 ``ratio`` 和 ``log2_ratio``。
+
+    Example:
+        >>> ratio_df = compute_ratio_df(
+        ...     count_df,
+        ...     celltype_pair=("CD4 Tmem GZMK+", "CD4 Tmem"),
+        ... )
+        >>> ratio_df[["ratio", "log2_ratio"]].head()
+        # 可传给 plot_ratio_scatter 可视化亚群比例变化。
+    """
+    required_cols = {sample_col, disease_col, celltype_col, prop_col}
+    missing_cols = required_cols - set(df.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {sorted(missing_cols)}")
+
     A, B = celltype_pair
     
     df_sub = df[df[celltype_col].isin([A, B])]

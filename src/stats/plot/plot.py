@@ -22,6 +22,23 @@ logger = logging.getLogger(__name__)
 
 @logged
 def plot_residual_boxplot(df, subset, group_key, sample_key, save_addr):
+    """绘制目标 cell subtype/subpopulation 的 residual boxplot。
+
+    Args:
+        df: 包含 residual 和分组列的 DataFrame。
+        subset: 当前 cell subtype/subpopulation 名称，用于标题和文件名。
+        group_key: x 轴分组列。
+        sample_key: hue 分组列。
+        save_addr: 图像输出目录。
+
+    Example:
+        >>> plot_residual_boxplot(resid_df, "CD4_Tcm", "disease", "sample_id", "figures")
+        # 保存 CD4_Tcm residual 在不同 disease/sample 下的箱线图。
+    """
+    required_cols = {"residual", group_key, sample_key}
+    missing_cols = required_cols - set(df.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {sorted(missing_cols)}")
     fig, ax = plt.subplots(figsize=(6, 4))
     
     # 绘制 boxplot
@@ -39,6 +56,23 @@ def plot_residual_boxplot(df, subset, group_key, sample_key, save_addr):
 
 @logged
 def plot_confidence_interval(posthoc_df, subset, save_addr, method):
+    """绘制 Tukey/Dunn post-hoc 置信区间或差异图。
+
+    Args:
+        posthoc_df: post-hoc 结果表，需包含 ``meandiff``、``lower``、``upper``、
+            ``group1`` 和 ``group2``。
+        subset: cell subtype/subpopulation 名称。
+        save_addr: 图像输出目录。
+        method: ``"Tukey"``、``"Dunn"`` 或 ``"Combined"``。
+
+    Example:
+        >>> plot_confidence_interval(tukey_df, "B_memory", "figures", "Tukey")
+        # 保存参考 post-hoc 结果的置信区间图。
+    """
+    required_cols = {"meandiff", "lower", "upper", "group1", "group2"}
+    missing_cols = required_cols - set(posthoc_df.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {sorted(missing_cols)}")
     # 按 meandiff 由大到小排序
     tukey_df = posthoc_df.sort_values("meandiff", ascending=False).reset_index(drop=True)
     
@@ -103,6 +137,23 @@ def plot_confidence_interval(posthoc_df, subset, save_addr, method):
 
 @logged
 def plot_better_residual(df, tukey_df, group_key, subset, save_addr):
+    """绘制 residual 均值柱状图并标注 Tukey 显著性。
+
+    Args:
+        df: 包含 residual 和分组列的 DataFrame。
+        tukey_df: Tukey 结果表。
+        group_key: 分组列名。
+        subset: cell subtype/subpopulation 名称。
+        save_addr: 图像输出目录。
+
+    Example:
+        >>> plot_better_residual(resid_df, tukey_df, "disease", "Treg", "figures")
+        # 保存各 disease 组 residual 平均值及显著性标注。
+    """
+    required_cols = {"residual", group_key}
+    missing_cols = required_cols - set(df.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {sorted(missing_cols)}")
     # 计算每组的平均残差
     grouped = df.groupby(group_key)["residual"].mean().reset_index()
     grouped = grouped.sort_values("residual")  # 按 residual 从小到大排序
@@ -168,6 +219,22 @@ def plot_better_residual(df, tukey_df, group_key, subset, save_addr):
 
 @logged
 def plot_de_novo_ANOVA(df, group_key, subset, save_addr):
+    """对百分比数据执行 ANOVA/Tukey 并绘制分组柱状图。
+
+    Args:
+        df: 包含 ``percent`` 和分组列的 DataFrame。
+        group_key: 分组列名。
+        subset: cell subtype/subpopulation 名称。
+        save_addr: 图像输出目录。
+
+    Example:
+        >>> plot_de_novo_ANOVA(count_df, "disease", "CD8_Teff", "figures")
+        # 保存各 disease 组平均百分比和 Tukey 显著性标注。
+    """
+    required_cols = {"percent", group_key}
+    missing_cols = required_cols - set(df.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {sorted(missing_cols)}")
     # 计算 mean 和 sem
     summary = df.groupby(group_key)["percent"].agg(['mean', 'sem']).reset_index()
     sorted_summary = summary.sort_values("mean").reset_index(drop=True)
@@ -231,18 +298,30 @@ def plot_de_novo_ANOVA(df, group_key, subset, save_addr):
 
 @logged
 def perform_pca_clustering_on_residuals(df, group_key, save_addr, auto_choose_k_func):
+    """对 residual 矩阵执行 PCA、KMeans 聚类并绘图。
+
+    Args:
+        df: 包含 ``Subset_Identity``、``group_key`` 和 ``residual`` 的 DataFrame。
+        group_key: 分组列名。
+        save_addr: 图像输出目录。
+        auto_choose_k_func: 接收 PCA DataFrame 并返回最佳 k 的函数。
+
+    Returns:
+        ``(pca_df, resid_scaled_row, subset_to_cluster, explained_var)``。
+
+    Example:
+        >>> pca_df, scaled, cluster_map, var = perform_pca_clustering_on_residuals(
+        ...     resid_df,
+        ...     group_key="disease",
+        ...     save_addr="figures",
+        ...     auto_choose_k_func=lambda x: 3,
+        ... )
+        # 用 residual profile 聚类 cell subtype/subpopulation。
     """
-    对 residual 进行标准化、PCA、聚类、绘图（fig, ax 风格）。
-    参数:
-        df: 包含 'Subset_Identity', 'disease_group', 'residual' 列的 DataFrame
-        save_addr: 保存图像的基础路径
-        auto_choose_k_func: 接收 DataFrame 并返回最佳 k 的函数
-    返回:
-        pca_df: 包含 PC1, PC2, cluster 的 DataFrame，索引为 Subset_Identity
-        resid_scaled_row: 归一化后的 pivot 表（含 residual 值）
-        subset_to_cluster: dict，subset → cluster label
-        explained_var: PCA 每个主成分的解释度
-    """
+    required_cols = {"Subset_Identity", group_key, "residual"}
+    missing_cols = required_cols - set(df.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {sorted(missing_cols)}")
     
     # pivot + 缺失填补
     resid_pivot = df.groupby(["Subset_Identity", group_key])["residual"].mean().unstack().fillna(0)
@@ -304,12 +383,16 @@ def perform_pca_clustering_on_residuals(df, group_key, save_addr, auto_choose_k_
 
 @logged
 def plot_residual_heatmap(resid_scaled_row, subset_to_cluster, save_addr):
-    """
-    根据 residual 矩阵和 cluster 信息绘制热图。
-    参数:
-        resid_scaled_row: 标准化后的 residual pivot 表
-        subset_to_cluster: subset → cluster 的映射 dict
-        save_addr: 输出图像目录
+    """根据 residual 矩阵和 cluster 信息绘制热图。
+
+    Args:
+        resid_scaled_row: 标准化后的 residual pivot 表。
+        subset_to_cluster: cell subtype/subpopulation 到 cluster 的映射。
+        save_addr: 图像输出目录。
+
+    Example:
+        >>> plot_residual_heatmap(scaled_residuals, cluster_map, "figures")
+        # 保存按 cluster 排序的 residual heatmap。
     """
     df = resid_scaled_row.copy()
     df["cluster"] = df.index.map(subset_to_cluster)
@@ -357,6 +440,22 @@ def plot_residual_heatmap(resid_scaled_row, subset_to_cluster, save_addr):
 
 @logged
 def plot_simulation_benchmarks(df, save_addr, filename):
+    """绘制不同方法在 effect size 缩放下的 Power/FPR。
+
+    Args:
+        df: 模拟评估汇总表，包含 ``contrast_factor``、``scale_factor``、
+            ``Power``、``FPR`` 和 ``Method``。
+        save_addr: 图像输出目录。
+        filename: 输出文件名。
+
+    Example:
+        >>> plot_simulation_benchmarks(metrics_df, "figures", "benchmark.png")
+        # 每个 contrast factor 一行，左轴 Power、右轴 FPR。
+    """
+    required_cols = {"contrast_factor", "scale_factor", "Power", "FPR", "Method"}
+    missing_cols = required_cols - set(df.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {sorted(missing_cols)}")
     # 设置风格
     sns.set_theme(style="whitegrid")
     factors = df['contrast_factor'].unique()
@@ -397,6 +496,22 @@ def plot_simulation_benchmarks(df, save_addr, filename):
 
 @logged
 def plot_simulation_with_inflam_prop(df_plot_combined, save_addr, filename):
+    """按 inflamed cell fraction 分层绘制模拟 Power/FPR。
+
+    Args:
+        df_plot_combined: 包含 ``inflam``、``Method``、``scale_factor``、
+            ``Power`` 和 ``FPR`` 的汇总表。
+        save_addr: 图像输出目录。
+        filename: 输出文件名。
+
+    Example:
+        >>> plot_simulation_with_inflam_prop(metrics_df, "figures", "inflam.png")
+        # 比较不同 inflamed fraction 下方法表现。
+    """
+    required_cols = {"inflam", "Method", "scale_factor", "Power", "FPR"}
+    missing_cols = required_cols - set(df_plot_combined.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {sorted(missing_cols)}")
     sns.set_theme(style="whitegrid")
     abs_file_path = os.path.join(save_addr, filename)
     
@@ -439,6 +554,23 @@ def plot_simulation_with_inflam_prop(df_plot_combined, save_addr, filename):
 def plot_simulation_with_inflam_marginalized(
         df_plot_combined, save_addr, filename, max_scale_factor=5.0, ci_type="se"
 ):
+    """边际化 inflamed fraction 后绘制模拟 Power/FPR。
+
+    Args:
+        df_plot_combined: 模拟汇总表。
+        save_addr: 图像输出目录。
+        filename: 输出文件名。
+        max_scale_factor: 展示的最大 effect size 缩放倍数。
+        ci_type: ``"se"`` 或其他 seaborn 支持的 CI 类型。
+
+    Example:
+        >>> plot_simulation_with_inflam_marginalized(metrics_df, "figures", "marginal.png")
+        # 按 Method 汇总展示总体稳健性。
+    """
+    required_cols = {"Method", "scale_factor", "Power", "FPR"}
+    missing_cols = required_cols - set(df_plot_combined.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {sorted(missing_cols)}")
     sns.set_theme(style="whitegrid")
     abs_file_path = os.path.join(save_addr, filename)
     
@@ -492,10 +624,23 @@ def plot_simulation_with_inflam_marginalized(
 
 @logged
 def plot_volcano_stratified_label(df, save_path="volcano_stratified.png", p_threshold=0.05, coef_threshold=1.0, bins=6):
+    """绘制按 ``ref`` 分面的 volcano plot，并自动分层标注强信号。
+
+    Args:
+        df: 结果表，包含 ``Coef.``、``P>|z|``、``ref`` 和 ``cell_type``。
+        save_path: 输出图片路径。
+        p_threshold: p 值阈值。
+        coef_threshold: 效应量阈值。
+        bins: 标注时按 ``-log10(p)`` 分层的数量。
+
+    Example:
+        >>> plot_volcano_stratified_label(real_res, "volcano.png", p_threshold=0.05)
+        # 每个 ref 分面里标注最强的 cell subtype/subpopulation。
     """
-    修复 ValueError: The truth value of a Series is ambiguous.
-    确保即便有重复索引，也能准确提取单个标量进行绘图。
-    """
+    required_cols = {"Coef.", "P>|z|", "ref", "cell_type"}
+    missing_cols = required_cols - set(df.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {sorted(missing_cols)}")
     df = df.copy()
     
     # 1. 数值化与异常值处理
@@ -566,11 +711,26 @@ def plot_volcano_stratified_label(df, save_path="volcano_stratified.png", p_thre
     
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"Stratified volcano plot fixed and saved to {save_path}")
+    print(f"[plot_volcano_stratified_label] Stratified volcano plot saved to {save_path}")
 
 
 @logged
 def plot_ppv_with_counts(ppv_table, save_addr, filename):
+    """绘制 PPV 与预测阳性数量的双轴图。
+
+    Args:
+        ppv_table: ``calculate_ppv_by_coef`` 生成的 PPV 表。
+        save_addr: 图像输出目录。
+        filename: 输出文件名。
+
+    Example:
+        >>> plot_ppv_with_counts(ppv_table, "figures", "ppv_counts.png")
+        # 柱形表示预测阳性数量，折线表示 PPV。
+    """
+    required_cols = {"coef_bin", "tp_count", "total_pred_pos", "PPV"}
+    missing_cols = required_cols - set(ppv_table.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {sorted(missing_cols)}")
     # 设置风格
     sns.set_theme(style="white", rc={"axes.facecolor": (0, 0, 0, 0)})
     fig, ax1 = plt.subplots(figsize=(14, 7))
@@ -639,6 +799,22 @@ def plot_ppv_with_counts(ppv_table, save_addr, filename):
 
 @logged
 def plot_multi_layer_ppv(df_combined, save_addr, filename, max_x=2.0):
+    """绘制多层/多方法 PPV 曲线。
+
+    Args:
+        df_combined: 包含 ``layer``、``coef_bin``、``total_pred_pos`` 和 ``PPV`` 的表。
+        save_addr: 图像输出目录。
+        filename: 输出文件名。
+        max_x: 展示的最大效应量 bin 中点。
+
+    Example:
+        >>> plot_multi_layer_ppv(ppv_layers, "figures", "multi_ppv.png", max_x=2.0)
+        # 对比多个方法或层级下 PPV 随估计效应量变化的趋势。
+    """
+    required_cols = {"layer", "coef_bin", "total_pred_pos", "PPV"}
+    missing_cols = required_cols - set(df_combined.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {sorted(missing_cols)}")
     df = df_combined.copy()
     
     # 1. 提取 Bin 中点
@@ -758,12 +934,22 @@ def plot_multi_layer_ppv(df_combined, save_addr, filename, max_x=2.0):
 
 @logged
 def plot_significance_heatmap(df, term_order=None, save_path="significance_heatmap.png", p_threshold=None):
+    """绘制 cell subtype/subpopulation x term 的显著性热图。
+
+    Args:
+        df: 结果表，包含 ``cell_type``、``Coef.``、``P>|z|`` 和 ``significant``。
+        term_order: 可选 term 展示顺序。
+        save_path: 输出图片路径。
+        p_threshold: 若提供，则按 p 值阈值标注星号；否则使用 ``significant`` 列。
+
+    Example:
+        >>> plot_significance_heatmap(real_res, term_order=["disease", "tissue"])
+        # 展示每个亚群对不同条件项的效应方向和显著性。
     """
-    图2：显著性热图。
-    - 移除了顶部的空白。
-    - 手动指定了 Term 的展示顺序。
-    - cbar 放在正右侧。
-    """
+    required_cols = {"cell_type", "Coef.", "P>|z|", "significant"}
+    missing_cols = required_cols - set(df.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {sorted(missing_cols)}")
     df = df.copy()
     if "term" not in df.columns:
         df["term"] = df.index
@@ -827,7 +1013,7 @@ def plot_significance_heatmap(df, term_order=None, save_path="significance_heatm
     # 记得 bbox_inches='tight' 否则右侧 cbar 会看不见
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"Significance heatmap saved to {save_path}")
+    print(f"[plot_significance_heatmap] Significance heatmap saved to {save_path}")
 
 
 @logged
@@ -841,6 +1027,28 @@ def plot_ratio_scatter(
         jitter=0.15,
         figsize=(6, 4)
 ):
+    """绘制两个 cell subtype/subpopulation 比例的散点图。
+
+    Args:
+        plot_df: ``compute_ratio_df`` 输出或同结构 DataFrame。
+        save_addr: 图像输出目录。
+        filename: 输出文件名前缀。
+        cell_pair: ``(A, B)``，表示 ``A/B``。
+        disease_col: x 轴分组列。
+        y_scale: ``"log2"`` 使用 ``log2_ratio``，否则使用 ``ratio``。
+        clr_lmm_result: 可选 CLR-LMM 结果，用于添加显著性连线。
+        alpha: 保留绘图参数。
+        jitter: x 轴散点抖动。
+        figsize: 图大小。
+
+    Example:
+        >>> plot_ratio_scatter(ratio_df, "figures", "cd4_ratio", ("CD4_Tcm", "CD4_Tem"))
+        # 保存 disease 分组下 A/B 比值的散点图。
+    """
+    required_cols = {disease_col, "log2_ratio" if y_scale == "log2" else "ratio"}
+    missing_cols = required_cols - set(plot_df.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {sorted(missing_cols)}")
     A, B = cell_pair
     
     # ------------------------
@@ -888,12 +1096,12 @@ def plot_ratio_scatter(
         
         for other, row in ct.iterrows():
             if row["ref"] not in plot_df[disease_col].values:
-                print(f"{row['ref']} not found in plot_df.")
+                print(f"[plot_ratio_scatter] Warning! Reference group '{row['ref']}' not found in plot_df.")
                 # print(plot_df[disease_col][0:10])
                 continue
             
             if row["significant"] == 'False':
-                print(f"{row['significant']} not significant.")
+                print("[plot_ratio_scatter] Warning! Non-significant contrast skipped.")
                 continue
             
             # print(row["other"])
@@ -928,6 +1136,24 @@ def plot_stacked_barplot(
         figsize=(12, 6),
         cmap="tab20"
 ):
+    """绘制每个样本或分组的 stacked composition barplot。
+
+    Args:
+        count_df: 长表 count 数据，至少包含 ``by_col``、``cell_type`` 和 ``count``。
+        save_addr: 图像输出目录。
+        filename: 输出文件名。
+        by_col: x 轴聚合列，默认 ``sample_id``。
+        figsize: 图大小。
+        cmap: matplotlib colormap 名称。
+
+    Example:
+        >>> plot_stacked_barplot(count_df, "figures", "composition.png", by_col="sample_id")
+        # 展示每个 sample 的 cell subtype/subpopulation 组成。
+    """
+    required_cols = {by_col, "cell_type", "count"}
+    missing_cols = required_cols - set(count_df.columns)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {sorted(missing_cols)}")
     df = count_df.copy()
     
     # 计算比例（避免 merge）

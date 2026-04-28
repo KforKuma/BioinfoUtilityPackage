@@ -18,9 +18,25 @@ logger = logging.getLogger(__name__)
 
 def _calculate_performance_metrics(df_all_sims: pd.DataFrame,
                                    alpha: float = 0.05) -> pd.DataFrame:
+    """计算模拟评估结果的 Power 和 FPR。
+
+    Args:
+        df_all_sims: 单次或多次模拟的估计结果表，至少包含 ``contrast_factor``、
+            ``True_Significant``、``Est_Significant`` 或 ``Est_PValue``。
+        alpha: 当 ``Est_Significant`` 不存在时，用该阈值从 p 值重新判断显著性。
+
+    Returns:
+        按 ``contrast_factor`` 汇总的性能表，包含 ``TP``、``FP``、``FN``、
+        ``Power`` 和 ``FPR``。
+
+    Example:
+        >>> metrics = _calculate_performance_metrics(results_df, alpha=0.05)
+        >>> metrics[["contrast_factor", "Power", "FPR"]]
+        # 用于比较不同统计方法在模拟真值下的表现。
     """
-    计算基于多次模拟结果的性能指标 (Power, FPR)。
-    """
+    if df_all_sims.empty:
+        return pd.DataFrame(columns=["contrast_factor", "TP", "FP", "FN", "Power", "FPR"])
+
     # --- 新增：强制类型转换，确保是布尔型 ---
     for col in ['True_Significant', 'Est_Significant', 'Est_PValue']:
         if col in df_all_sims.columns:
@@ -70,17 +86,27 @@ def _collect_simulation_results(
         formula: str,
         **kwargs
 ) -> pd.DataFrame:
-    """
-    收集单个模拟数据集的统计结果，并与真实效应表合并。
+    """收集单个模拟数据集的统计结果并合并 ground truth。
 
     Args:
-        df_sim: 模拟的计数数据 (长格式)。
-        df_true_effect: 模拟的真实效应查找表。
-        run_stats_func: 实际运行统计分析的函数 (如 run_Dirichlet_Wald)。
-        formula: 传递给统计函数的模型公式 (e.g., "disease + C(tissue, ...)")。
+        df_sim: 模拟 count 长表。
+        df_true_effect: 模拟真实效应表。
+        run_stats_func: 实际运行统计分析的函数，例如 ``run_Dirichlet_Wald``。
+        formula: 传递给统计函数的模型公式。
+        **kwargs: 透传给统计函数的参数。
 
     Returns:
-        DataFrame, 包含所有细胞类型、所有对比的真实效应和统计估计值。
+        包含所有 cell subtype/subpopulation、所有对比的真实效应和统计估计值。
+
+    Example:
+        >>> results_df = _collect_simulation_results(
+        ...     df_sim,
+        ...     df_truth,
+        ...     run_stats_func=run_LMM,
+        ...     formula="disease + tissue",
+        ...     main_variable="disease",
+        ... )
+        >>> results_df[["True_Significant", "Est_PValue", "Est_Significant"]].head()
     """
     
     # 获取唯一的细胞类型列表
@@ -101,8 +127,7 @@ def _collect_simulation_results(
             contrast_table = stats_res["contrast_table"]
         
         except Exception as e:
-            # 如果统计分析失败，记录错误并跳过该细胞类型
-            print(f"Warning: Stats failed for {ct_name}. Error: {e}")
+            print(f"[_collect_simulation_results] Warning! Stats failed for cell_type '{ct_name}'. Error: {e}")
             continue
         
         # 2. 提取该细胞类型的真实效应行
@@ -146,10 +171,28 @@ def _extract_contrast_results(contrast_table: pd.DataFrame,
                               target_other: str,
                               alpha: float = 0.05
                               ) -> dict:
+    """从 contrast_table 中提取指定 ``other`` 的估计结果。
+
+    Args:
+        contrast_table: stats engine 输出的对比表。
+        target_other: 需要匹配的 ``other`` 标签。
+        alpha: 当表中没有 ``significant`` 列时使用的阈值。
+
+    Returns:
+        包含 ``Est_Coef``、``Est_PValue``、``Est_Direction`` 和
+        ``Est_Significant`` 的字典。
+
+    Example:
+        >>> est = _extract_contrast_results(res["contrast_table"], "CD")
+        >>> est["Est_PValue"]
     """
-    从统计模型的 contrast_table 中提取特定对比的结果 (Coef, PValue, direction, significant)。
-    已修正索引查找逻辑，并增加了 P 值列名的 fallback 机制 (P>|z| -> p_adj -> pval)。
-    """
+    if contrast_table is None or contrast_table.empty:
+        return {
+            'Est_Coef': np.nan,
+            'Est_PValue': np.nan,
+            'Est_Direction': 'None',
+            'Est_Significant': False
+        }
     
     # 1. 重置索引以便按列名访问 'other'
     df_reset = contrast_table.reset_index()
@@ -211,11 +254,21 @@ def _extract_contrast_results(contrast_table: pd.DataFrame,
 
 
 def _extract_addition_results(contrast_table, group_name):
+    """提取 addition/interaction 语义下的组合对比结果。
+
+    Args:
+        contrast_table: stats engine 输出的对比表。
+        group_name: 组合标签，例如 ``"UC x if"``。
+
+    Returns:
+        估计结果字典。如果无法匹配，则返回非显著默认值。
+
+    Example:
+        >>> _extract_addition_results(contrast_table, "UC x if")
+        # 若没有组合项，会尝试把 disease 和 tissue 主效应相加。
     """
-    专门为 Addition 语义设计的提取器。
-    它不仅尝试查找 'UC x if' 这个索引，如果找不到，
-    则尝试在长表中进行累加。
-    """
+    if contrast_table is None or contrast_table.empty:
+        return {'Est_Coef': 0.0, 'Est_PValue': 1.0, 'Est_Significant': False, 'Est_Direction': 'None'}
     # 尝试直接匹配（如果你的统计方法已经算好了组合对比）
     if group_name in contrast_table.index:
         res = contrast_table.loc[group_name]
@@ -244,10 +297,18 @@ def _extract_addition_results(contrast_table, group_name):
             combined_coef = c1 + c2
             # P值在这里很难手动合并，通常取最不显著的一个（保守做法）
             pval_candidates = ['P>|z|', 'p_adj', 'pval']
+            pval_colname = None
             for col in pval_candidates:
                 if col in contrast_table.columns:
                     pval_colname = col
                     break
+            if pval_colname is None:
+                return {
+                    'Est_Coef': combined_coef,
+                    'Est_PValue': np.nan,
+                    'Est_Significant': False,
+                    'Est_Direction': 'other_greater' if combined_coef > 0 else 'ref_greater'
+                }
             combined_p = min(contrast_table.loc[d_part, pval_colname],
                              contrast_table.loc[t_part, pval_colname])
             
@@ -269,15 +330,35 @@ def evaluate_effect_size_scaling(
         base_params=None,
         **kwargs
 ):
-    """
-    连续调整 effect_size 并收集性能指标的循环函数。
-    支持自定义模拟器 sim_func。
+    """按 effect size 缩放因子评估单个统计方法。
+
+    Args:
+        scale_factors: effect size 缩放倍数列表。
+        sim_func: 模拟函数，需返回 ``(df_sim, df_true_effect)``。
+        run_stats_func: 统计方法函数。
+        formula: 传给统计方法的公式。
+        base_params: 模拟基础参数；为 ``None`` 时使用内置默认值。
+        **kwargs: 传给统计方法的额外参数。
+
+    Returns:
+        每个 ``scale_factor`` 下按 contrast factor 汇总的 Power/FPR 表。
+
+    Example:
+        >>> metrics = evaluate_effect_size_scaling(
+        ...     scale_factors=[0.5, 1.0, 2.0],
+        ...     sim_func=simulate_DM_data,
+        ...     run_stats_func=run_Dirichlet_Multinomial_Wald,
+        ...     formula="disease + tissue",
+        ... )
+        >>> metrics.head()
     """
     
     
     # 1. 初始化模拟器和基础参数
     if sim_func is None:
-        raise ValueError("Please provide a simulation function (sim_func).")
+        raise ValueError("Please provide a simulation function via `sim_func`.")
+    if run_stats_func is None:
+        raise ValueError("Please provide a stats function via `run_stats_func`.")
     
     if base_params is None:
         # 这是一个通用的基础模板，会根据 sim_func 的需求自动过滤
@@ -297,7 +378,7 @@ def evaluate_effect_size_scaling(
         }
     
     all_metrics = []
-    print(f"Starting evaluation: Sim[{sim_func.__name__}] -> Stats[{run_stats_func.__name__}]")
+    print(f"[evaluate_effect_size_scaling] Starting evaluation: Sim[{sim_func.__name__}] -> Stats[{run_stats_func.__name__}]")
     
     for k in tqdm(scale_factors):
         # 2. 整体缩放 effect_size
@@ -316,7 +397,7 @@ def evaluate_effect_size_scaling(
         full_stats_params = {**current_params, **kwargs}
         stats_filtered_kwargs = filter_kwargs_for_func(run_stats_func, full_stats_params)
         
-        print(f"\n[Scale {k}] Params for {run_stats_func.__name__}: {stats_filtered_kwargs}")
+        print(f"[evaluate_effect_size_scaling] Scale {k}. Params for {run_stats_func.__name__}: {stats_filtered_kwargs}")
         
         results_df = _collect_simulation_results(
             df_sim=df_sim,
@@ -327,7 +408,9 @@ def evaluate_effect_size_scaling(
         )
         
         # 收缩
-        sig_ratio = sum(results_df["Est_PValue"] < 0.05) / results_df.shape[0]
+        if results_df.empty or "Est_PValue" not in results_df.columns:
+            continue
+        sig_ratio = sum(results_df["Est_PValue"] < 0.05) / max(results_df.shape[0], 1)
         if sig_ratio < 0.5:
             alpha_adj = 0.05
         else:
@@ -344,7 +427,7 @@ def evaluate_effect_size_scaling(
         all_metrics.append(metrics)
     
     # 合并所有结果
-    final_df = pd.concat(all_metrics, ignore_index=True)
+    final_df = pd.concat(all_metrics, ignore_index=True) if all_metrics else pd.DataFrame()
     return final_df
 
 
@@ -357,24 +440,38 @@ def evaluate_effect_size_scaling_with_raw(
         stats_params,
         formula,
 ):
-    """
-    Evaluate statistical performance across effect size scaling factors.
+    """按 effect size 缩放因子评估统计方法并保留原始结果。
 
-    Returns
-    -------
-    summary_df : pd.DataFrame
-        Power / FPR summary across scales
-    raw_df : pd.DataFrame
-        Per-gene / per-cell raw results for PPV analysis
+    Args:
+        scale_factors: effect size 缩放倍数。
+        sim_func: 模拟函数。
+        run_stats_func: 统计方法函数。
+        sim_params: 模拟函数基础参数。
+        stats_params: 统计函数参数。
+        formula: 统计公式。
+
+    Returns:
+        ``(summary_df, raw_df)``。前者是 Power/FPR 汇总，后者保留每个
+        cell subtype/subpopulation 的逐项估计，适合 PPV 分析。
+
+    Example:
+        >>> summary, raw = evaluate_effect_size_scaling_with_raw(
+        ...     [0.5, 1.0],
+        ...     simulate_LogisticNormal_hierarchical,
+        ...     run_CLR_LMM,
+        ...     sim_params,
+        ...     stats_params,
+        ...     "disease + tissue",
+        ... )
     """
     
     all_summary_metrics = []
     all_raw_results = []
     
-    print(f"Starting Effect Size Scaling Evaluation: {sim_func.__name__}")
+    print(f"[evaluate_effect_size_scaling_with_raw] Starting effect size scaling evaluation: {sim_func.__name__}")
     
     if not any("effect_size" in key for key in sim_params.keys()):
-        raise ValueError("Base 'effect_size' must be provided.")
+        raise ValueError("At least one key containing 'effect_size' must be provided in `sim_params`.")
     
     for k in tqdm(scale_factors):
         # 1. 显式缩放 effect sizes
@@ -400,7 +497,9 @@ def evaluate_effect_size_scaling_with_raw(
         results_df["scale_factor"] = k
         
         # 收缩
-        sig_ratio = sum(results_df["Est_PValue"] < 0.05) / results_df.shape[0]
+        if results_df.empty or "Est_PValue" not in results_df.columns:
+            continue
+        sig_ratio = sum(results_df["Est_PValue"] < 0.05) / max(results_df.shape[0], 1)
         if sig_ratio < 0.5:
             alpha_adj = 0.05
         else:
@@ -419,8 +518,8 @@ def evaluate_effect_size_scaling_with_raw(
         metrics["scale_factor"] = k
         all_summary_metrics.append(metrics)
     
-    final_summary_df = pd.concat(all_summary_metrics, ignore_index=True)
-    final_raw_df = pd.concat(all_raw_results, ignore_index=True)
+    final_summary_df = pd.concat(all_summary_metrics, ignore_index=True) if all_summary_metrics else pd.DataFrame()
+    final_raw_df = pd.concat(all_raw_results, ignore_index=True) if all_raw_results else pd.DataFrame()
     
     return final_summary_df, final_raw_df
 
@@ -432,6 +531,28 @@ def _collect_simulation_meta_results(
         formula: str,
         **kwargs
 ):
+    """收集 meta engine 及其子方法的模拟估计结果。
+
+    Args:
+        df_sim: 模拟 count 长表。
+        df_true_effect: 模拟真实效应表。
+        run_stats_func: meta engine 函数，通常为 ``run_Meta_Ensemble_adaptive``。
+        formula: 传给 meta engine 的公式。
+        **kwargs: 透传参数。
+
+    Returns:
+        ``{"meta": df, "dmw": df, "clr": df, "deseq2": df}``，每个 DataFrame
+        都是统一的逐对比估计结果。
+
+    Example:
+        >>> storage = _collect_simulation_meta_results(
+        ...     df_sim,
+        ...     df_truth,
+        ...     run_Meta_Ensemble_adaptive,
+        ...     "disease + tissue",
+        ... )
+        >>> storage["meta"].head()
+    """
     cell_types = df_sim['cell_type'].unique().tolist()
     storage = {'meta': [], 'dmw': [], 'clr': [], 'deseq2': []}
     
@@ -450,7 +571,7 @@ def _collect_simulation_meta_results(
                     "raw_results") else None
             }
         except Exception as e:
-            print(f"Warning: Meta-Stats execution failed for {ct_name}. Error: {e}")
+            print(f"[_collect_simulation_meta_results] Warning! Meta-stats execution failed for cell_type '{ct_name}'. Error: {e}")
             continue
         
         df_true_ct = df_true_effect[df_true_effect['cell_type'] == ct_name].copy()
@@ -506,14 +627,35 @@ def evaluate_effect_size_meta_scaling(
         base_params=None,
         **kwargs
 ):
-    """
-    连续调整 effect_size 并收集性能指标的循环函数。
-    支持自定义模拟器 sim_func。
+    """按 effect size 缩放因子评估 meta engine 及其子方法。
+
+    Args:
+        scale_factors: effect size 缩放倍数列表。
+        sim_func: 模拟函数，需返回 ``(df_sim, df_true_effect)``。
+        run_meta_func: meta engine 函数。
+        formula: 传给 meta engine 的公式。
+        base_params: 模拟基础参数；为 ``None`` 时使用默认模板。
+        **kwargs: 传给 meta engine 的额外参数。
+
+    Returns:
+        字典，键为 ``meta``、``dmw``、``clr`` 和 ``deseq2``，值为对应方法在各
+        scale factor 下的 Power/FPR 汇总表。
+
+    Example:
+        >>> out = evaluate_effect_size_meta_scaling(
+        ...     scale_factors=[0.5, 1.0],
+        ...     sim_func=simulate_DM_data,
+        ...     run_meta_func=run_Meta_Ensemble_adaptive,
+        ...     formula="disease + tissue",
+        ... )
+        >>> out["meta"].head()
     """
     
     # 1. 初始化模拟器和基础参数
     if sim_func is None:
-        raise ValueError("Please provide a simulation function (sim_func).")
+        raise ValueError("Please provide a simulation function via `sim_func`.")
+    if run_meta_func is None:
+        raise ValueError("Please provide a meta stats function via `run_meta_func`.")
     
     if base_params is None:
         # 这是一个通用的基础模板，会根据 sim_func 的需求自动过滤
@@ -538,7 +680,7 @@ def evaluate_effect_size_meta_scaling(
         'clr': [],
         'deseq2': []
     }
-    print(f"Starting evaluation: Sim[{sim_func.__name__}] -> Stats[{run_meta_func.__name__}]")
+    print(f"[evaluate_effect_size_meta_scaling] Starting evaluation: Sim[{sim_func.__name__}] -> Stats[{run_meta_func.__name__}]")
     
     for k in tqdm(scale_factors):
         # 2. 整体缩放 effect_size
@@ -557,7 +699,7 @@ def evaluate_effect_size_meta_scaling(
         full_stats_params = {**current_params, **kwargs}
         stats_filtered_kwargs = filter_kwargs_for_func(run_meta_func, full_stats_params)
         
-        print(f"\n[Scale {k}] Params for {run_meta_func.__name__}: {stats_filtered_kwargs}")
+        print(f"[evaluate_effect_size_meta_scaling] Scale {k}. Params for {run_meta_func.__name__}: {stats_filtered_kwargs}")
         
         results_df_dict = _collect_simulation_meta_results(
             df_sim=df_sim,
@@ -567,7 +709,9 @@ def evaluate_effect_size_meta_scaling(
             **stats_filtered_kwargs
         )
         for key, value in results_df_dict.items():
-            sig_ratio = sum(results_df_dict[key]["Est_PValue"] < 0.05)/results_df_dict[key].shape[0]
+            if value.empty:
+                continue
+            sig_ratio = sum(results_df_dict[key]["Est_PValue"] < 0.05) / max(results_df_dict[key].shape[0], 1)
             if sig_ratio < 0.4:
                 alpha_adj = 0.05
             else:
@@ -578,6 +722,8 @@ def evaluate_effect_size_meta_scaling(
             
         # 5. 计算性能指标
         for key in results_df_dict.keys():
+            if results_df_dict[key].empty:
+                continue
             metrics = _calculate_performance_metrics(results_df_dict[key], alpha=0.05)
             # 6. 记录当前的倍数因子
             metrics['scale_factor'] = k
@@ -586,8 +732,8 @@ def evaluate_effect_size_meta_scaling(
     # 合并所有结果
     final_df_dict = {}
     for key in metrics_storage.keys():
-        final_df = pd.concat(metrics_storage[key], ignore_index=True)
-        final_df_dict.update({key:final_df})
+        final_df = pd.concat(metrics_storage[key], ignore_index=True) if metrics_storage[key] else pd.DataFrame()
+        final_df_dict.update({key: final_df})
     
     return final_df_dict
 

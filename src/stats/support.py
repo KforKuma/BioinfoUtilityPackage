@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 import inspect
+import re
 
 import numpy as np
 import pandas as pd
@@ -14,14 +15,28 @@ logger = logging.getLogger(__name__)
 
 @logged
 def _from_adata_make_count(adata_obs, meta, batch_key="orig.ident", type_key="Subset_Identity"):
-    '''
+    """从 AnnData obs 风格表中生成 cell subtype/subpopulation count 长表。
 
-    :param adata:
-    :param meta: 至少包含 unit_key 列的 pd.DataFrame，储存了分组和采样的详细信息
-    :param batch_key:
-    :param type_key:
-    :return: count_group_df，一个包含至少 unit_key, type_key, count 的 pd.DataFrame，其他列来自 meta 表格的合并
-    '''
+    Args:
+        adata_obs: ``adata.obs`` 或同结构 DataFrame。
+        meta: 样本级元数据，至少包含 ``batch_key``。
+        batch_key: 样本/批次列名。
+        type_key: cell subtype/subpopulation 列名。
+
+    Returns:
+        包含 ``batch_key``、``type_key``、``count``、``percent``、``log_count``、
+        ``logit_percent`` 和 ``total_count`` 的长表。
+
+    Example:
+        >>> count_df = _from_adata_make_count(
+        ...     adata.obs,
+        ...     meta,
+        ...     batch_key="orig.ident",
+        ...     type_key="Subset_Identity",
+        ... )
+        >>> count_df[["orig.ident", "Subset_Identity", "count", "percent"]].head()
+        # 后续 make_input 会再把这些列重命名成 stats engine 统一列名。
+    """
     count_dataframe = (
         adata_obs[[batch_key, type_key]]
         .groupby([batch_key, type_key])
@@ -40,14 +55,25 @@ def _from_adata_make_count(adata_obs, meta, batch_key="orig.ident", type_key="Su
 
 @logged
 def _from_adata_make_meta(adata_obs, group_key="orig.ident"):
-    '''
-    生成一个用来进行下游分析 meta 文件，包含必要控制的变量。
+    """从 obs 中推断样本级 metadata。
 
-    :param adata:
-    :return:
-    '''
+    Args:
+        adata_obs: ``adata.obs`` 或同结构 DataFrame。
+        group_key: 样本/批次列名。
+
+    Returns:
+        每个 ``group_key`` 一行的 metadata。若某个字符串列在同一样本内有多个值，
+        该样本对应值会被置为 ``None``，避免误用不唯一元数据。
+
+    Example:
+        >>> meta = _from_adata_make_meta(adata.obs, group_key="orig.ident")
+        >>> meta.head()
+        # 可作为 _from_adata_make_count 的 meta 输入。
+    """
     # 选出字符串列（object 或 string）
-    string_cols = [c for c in adata_obs.columns if type(adata_obs[c][0]) == str]
+    if adata_obs.empty:
+        raise ValueError("`adata_obs` must not be empty.")
+    string_cols = [c for c in adata_obs.columns if isinstance(adata_obs[c].iloc[0], str)]
     
     # 确保 group_key 也在结果里
     if group_key not in string_cols:
@@ -72,13 +98,27 @@ def _from_adata_make_meta(adata_obs, group_key="orig.ident"):
 
 @logged
 def input_prepare(adata_obs, meta_file=None, batch_key="orig.ident", type_key="Subset_Identity"):
-    '''
-    :param adata:
-    :param meta_file: 包含样本制作信息的表格，兼容 csv 和 xlsx，默认 header=True index=False
-    :param batch_key:
-    :param type_key:
-    :return:
-    '''
+    """准备丰度统计输入长表。
+
+    Args:
+        adata_obs: ``adata.obs`` 或同结构 DataFrame。
+        meta_file: 可选样本 metadata 文件，支持 ``.csv`` 和 ``.xlsx``。
+        batch_key: 样本/批次列名。
+        type_key: cell subtype/subpopulation 列名。
+
+    Returns:
+        合并 metadata 后的 count 长表。
+
+    Example:
+        >>> count_df = input_prepare(
+        ...     adata.obs,
+        ...     meta_file="sample_meta.csv",
+        ...     batch_key="orig.ident",
+        ...     type_key="Subset_Identity",
+        ... )
+        >>> count_df.columns
+        # 包含 count、percent 和 total_count 等下游字段。
+    """
     # 读取 meta 信息
     if meta_file is None:
         meta = _from_adata_make_meta(adata_obs, batch_key)
@@ -89,7 +129,7 @@ def input_prepare(adata_obs, meta_file=None, batch_key="orig.ident", type_key="S
         elif meta_file.lower().endswith("xlsx"):
             meta = pd.read_excel(meta_file)
         else:
-            raise ValueError("[input_prepare] Meta file must ends with 'csv' or 'xlsx'.")
+            raise ValueError("`meta_file` must end with 'csv' or 'xlsx'.")
     
     # ⚡ 保证关键列都是字符串
     for key in [batch_key, type_key]:
@@ -105,18 +145,27 @@ def input_prepare(adata_obs, meta_file=None, batch_key="orig.ident", type_key="S
 
 @logged
 def make_input(adata_obs, **kwargs):
-    '''
-    :param adata:
-    :param meta_file: 包含样本制作信息的表格，兼容 csv 和 xlsx，默认 header=True index=False
-    :param batch_key:
-    :param type_key:
-    :return: pd.DataFrame，包含:
-             sample_id, donor_id, disease,
-             tissue, presort,cell_type,
-             sampling_depth,
-             prop, count, total_count
-    '''
-    # ⚡ 保证关键列都是字符串
+    """将 obs 风格数据转换为 stats engine 标准输入。
+
+    Args:
+        adata_obs: ``adata.obs`` 或同结构 DataFrame。
+        **kwargs: 原始列名映射。默认会把 ``orig.ident`` 映射为 ``sample_id``，
+            ``Subset_Identity`` 映射为 ``cell_type``。
+
+    Returns:
+        标准长表，包含 ``sample_id``、``donor_id``、``disease``、``tissue``、
+        ``presort``、``cell_type``、``prop``、``count`` 和 ``total_count``。
+
+    Example:
+        >>> meta = make_input(
+        ...     adata.obs,
+        ...     donor_id="Patient",
+        ...     tissue="tissue-type",
+        ...     cell_type="Subset_Identity",
+        ... )
+        >>> meta[["sample_id", "cell_type", "count", "prop"]].head()
+        # 可直接传入 run_LMM、run_Dirichlet_Wald 等函数。
+    """
     
     default_params = {
         "sample_id": "orig.ident",
@@ -149,6 +198,24 @@ def make_result(method: str,
                 contrast_table: pd.DataFrame = None,
                 extra: dict | None = None,
                 alpha: float = 0.05) -> dict[str, Any]:
+    """构造 stats engine 的统一返回结构。
+
+    Args:
+        method: 方法名。
+        cell_type: 目标 cell subtype/subpopulation。
+        p_val: 主 p 值。
+        p_type: p 值语义，例如 ``"Global"`` 或 ``"Minimal"``。
+        contrast_table: 对比表。
+        extra: 额外诊断信息。
+        alpha: 显著性阈值。
+
+    Returns:
+        标准结果字典。
+
+    Example:
+        >>> make_result("LMM", "CD4_Tcm", 0.01, "Minimal", alpha=0.05)["significant"]
+        True
+    """
     if extra is None:
         extra = {}
     return {
@@ -163,20 +230,18 @@ def make_result(method: str,
 
 
 def remove_main_variable_from_formula(formula: str, main_variable: str) -> str:
-    """
-    Remove terms containing main_variable (or C(main_variable)) from a mixedlm-style formula.
+    """从公式右侧移除主要解释变量。
 
-    Parameters
-    ----------
-    formula : str
-        Original formula, such as "y ~ disease + tissue + C(batch)".
-    main_variable : str
-        Variable name to remove.
+    Args:
+        formula: 原始公式，例如 ``"y ~ disease + tissue + C(batch)"``。
+        main_variable: 需要移除的变量名。
 
-    Returns
-    -------
-    str
-        Cleaned formula with main_variable removed.
+    Returns:
+        移除主要变量后的公式右侧；若右侧为空则返回 ``"1"``。
+
+    Example:
+        >>> remove_main_variable_from_formula("disease + tissue", "disease")
+        'tissue'
     """
     
     # 标准化字符串
@@ -221,9 +286,17 @@ def remove_main_variable_from_formula(formula: str, main_variable: str) -> str:
 
 
 def parse_formula_columns(formula: str):
-    """
-    Parse RHS variable names from a formula like 'y ~ a + b + C(c) + I(d**2)'
-    Returns: list of column names ['a', 'b', 'c', 'd']
+    """解析公式右侧引用的列名。
+
+    Args:
+        formula: 包含 ``~`` 的 patsy/statsmodels 公式。
+
+    Returns:
+        去重后的列名列表。
+
+    Example:
+        >>> parse_formula_columns("y ~ disease + C(tissue) + I(age**2)")
+        ['disease', 'tissue', 'age']
     """
     # 1. 拆分左右式
     if '~' not in formula:
@@ -265,10 +338,18 @@ def parse_formula_columns(formula: str):
 
 
 def split_C_terms(series):
-    """
-    Input: pd.Series of patsy-style terms, e.g.
-        'C(tissue, Treatment(reference="nif"))[T.if]'
-    Output: pd.DataFrame with columns ['baseline', 'category']
+    """拆解 patsy 分类变量项中的参考组和类别。
+
+    Args:
+        series: patsy 风格 term，例如
+            ``C(tissue, Treatment(reference="nif"))[T.if]``。
+
+    Returns:
+        包含 ``baseline`` 和 ``category`` 两列的 DataFrame。
+
+    Example:
+        >>> split_C_terms(pd.Series(['C(tissue, Treatment(reference="nif"))[T.if]']))
+        # baseline='nif', category='if'
     """
     
     def _split_term(term):
@@ -286,8 +367,21 @@ def split_C_terms(series):
 
 
 def collapse_dunn_matrix(dunn_p_matrix, group_means, ref="HC", alpha=0.05):
-    """
-    将 Dunn's test 全矩阵压缩成与 LMM/Dirichlet 对齐的结果格式。
+    """将 Dunn's test 全矩阵压缩为统一 contrast_table。
+
+    Args:
+        dunn_p_matrix: Dunn post-hoc 的两两 p 值矩阵。
+        group_means: 各组平均丰度。
+        ref: 参考组。
+        alpha: 显著性阈值。
+
+    Returns:
+        以 ``other`` 为索引的对比表。
+
+    Example:
+        >>> contrast = collapse_dunn_matrix(dunn, group_means, ref="HC")
+        >>> contrast[["P>|z|", "direction"]]
+        # 与 LMM/Dirichlet 输出字段对齐。
     """
     results = []
     ref_mean = group_means[ref]
@@ -317,7 +411,21 @@ def collapse_dunn_matrix(dunn_p_matrix, group_means, ref="HC", alpha=0.05):
 
 
 def extract_contrast(ref_label, means, tukey_res):
-    """Extract contrast results relative to a specified reference level."""
+    """从 Tukey HSD 结果中提取参考组相关对比。
+
+    Args:
+        ref_label: 参考组标签。
+        means: 各组平均比例。
+        tukey_res: ``pairwise_tukeyhsd`` 返回对象。
+
+    Returns:
+        contrast row 字典列表。
+
+    Example:
+        >>> rows = extract_contrast("HC", means, tukey)
+        >>> pd.DataFrame(rows).set_index("other")
+        # 只包含 HC vs other 的 post-hoc 结果。
+    """
     
     # Normalize means into a dict-like structure
     if isinstance(means, dict):
@@ -368,8 +476,18 @@ def extract_contrast(ref_label, means, tukey_res):
     return contrast_rows
 
 def filter_kwargs_for_func(func, params_dict):
-    """
-    工具函数：过滤字典，只保留目标函数需要的参数
+    """过滤参数字典，只保留目标函数接受的参数。
+
+    Args:
+        func: 目标函数。
+        params_dict: 候选参数字典。
+
+    Returns:
+        过滤后的参数字典。
+
+    Example:
+        >>> filter_kwargs_for_func(run_LMM, {"df_all": df, "unused": 1})
+        # {'df_all': df}
     """
     if func is None: return {}
     sig = inspect.signature(func)
@@ -378,7 +496,19 @@ def filter_kwargs_for_func(func, params_dict):
     return filtered
 
 def merge_contrast_tables(tables_dict):
-    """Merge multiple contrast_tables into one readable DataFrame."""
+    """合并多个方法的 contrast_table。
+
+    Args:
+        tables_dict: ``{method_name: contrast_table}`` 字典。
+
+    Returns:
+        合并后的 DataFrame，非 ``ref``/``other`` 字段会加方法名前缀。
+
+    Example:
+        >>> merged = merge_contrast_tables({"LMM": lmm_ct, "CLR": clr_ct})
+        >>> merged.head()
+        # 用于横向比较多个 engine 的同一组对比。
+    """
 
     merged = None
     for method, df in tables_dict.items():

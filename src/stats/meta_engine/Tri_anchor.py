@@ -15,11 +15,36 @@ def run_Meta_Ensemble(df_all: pd.DataFrame,
                       alpha: float = 0.05,
                       coef_threshold: float = 0.2,  # 降低硬门槛，依赖共识压制 FPR
                       **kwargs) -> Dict[str, Any]:
-    """
-    Robust-Consensus Meta Ensemble (V2):
-    1. 采用 2/3 多数投票机制 (Majority Vote)，解决单方法作为“单点故障”的问题。
-    2. 效应量取中位数 (Median Coef)，提高对单方法估计偏差的稳健性。
-    3. 方向强一致性约束：只有显著的方法方向一致时才判定为显著。
+    """运行三方法共识 meta engine。
+
+    该集合方法同时调用 Dirichlet-Multinomial Wald、CLR-LMM 和 PyDESeq2，
+    对同一个 cell subtype/subpopulation 的 contrast_table 做对齐。最终显著性依赖
+    2/3 多数投票、显著方法方向一致、中位数效应量达到阈值，以及 DMW 的宽松
+    veto 检查。设计目标是降低单一统计方法失效时带来的假阳性。
+
+    Args:
+        df_all: 长表丰度数据。
+        cell_type: 目标 cell subtype/subpopulation。
+        formula: 传给子方法的右侧公式。
+        main_variable: 主要解释变量。
+        alpha: 显著性阈值。
+        coef_threshold: meta 中位数效应量最低阈值。
+        **kwargs: 透传给子方法的兼容参数。
+
+    Returns:
+        字典，包含 ``contrast_table``、``summary`` 和 ``raw_results``。``raw_results``
+        保存每个子方法的原始结果，便于排查具体方法失败。
+
+    Example:
+        >>> res = run_Meta_Ensemble(
+        ...     df_all=count_df,
+        ...     cell_type="CD4_Tcm",
+        ...     formula="disease + tissue",
+        ...     main_variable="disease",
+        ...     ref_label="HC",
+        ... )
+        >>> res["contrast_table"][["Coef.", "P>|z|", "method_agreement"]]
+        # method_agreement 表示三个子方法中有几个支持该对比。
     """
     sub_methods = {
         'dmw': run_Dirichlet_Multinomial_Wald,
@@ -53,6 +78,7 @@ def run_Meta_Ensemble(df_all: pd.DataFrame,
         common_idx = common_idx.union(all_indices[i])
     
     def get_standardized_data(res_obj, target_index):
+        """将单个子方法结果对齐到共同 contrast index。"""
         if res_obj is None:
             return (pd.Series(False, index=target_index), pd.Series(0, index=target_index),
                     pd.Series(1.0, index=target_index), pd.Series(0.0, index=target_index))
@@ -137,11 +163,32 @@ def run_Meta_Ensemble_adaptive(df_all: pd.DataFrame,
                                main_variable: str = "disease",
                                alpha: float = 0.05,
                                **kwargs) -> Dict[str, Any]:
-    """
-    Robust-Consensus Meta Ensemble (V2):
-    1. 采用 2/3 多数投票机制 (Majority Vote)，解决单方法作为“单点故障”的问题。
-    2. 效应量取中位数 (Median Coef)，提高对单方法估计偏差的稳健性。
-    3. 方向强一致性约束：只有显著的方法方向一致时才判定为显著。
+    """运行自适应效应量阈值的三方法共识 meta engine。
+
+    与 ``run_Meta_Ensemble`` 相同，本函数集成 DMW、CLR-LMM 和 PyDESeq2；
+    区别是效应量阈值会根据三个方法估计系数的整体尺度动态调整，避免在低波动数据
+    中过度保守，也避免在高波动数据中门槛过低。
+
+    Args:
+        df_all: 长表丰度数据。
+        cell_type: 目标 cell subtype/subpopulation。
+        formula: 传给子方法的右侧公式。
+        main_variable: 主要解释变量。
+        alpha: 显著性阈值。
+        **kwargs: 透传给子方法的兼容参数。
+
+    Returns:
+        字典，包含 meta ``contrast_table``、摘要和子方法原始结果。
+
+    Example:
+        >>> res = run_Meta_Ensemble_adaptive(
+        ...     df_all=count_df,
+        ...     cell_type="Treg",
+        ...     formula="disease + C(tissue, Treatment(reference='nif'))",
+        ...     main_variable="disease",
+        ... )
+        >>> res["summary"]
+        # 查看 meta 命中数量和平均方法一致度。
     """
     sub_methods = {
         'dmw': run_Dirichlet_Multinomial_Wald,
@@ -175,6 +222,7 @@ def run_Meta_Ensemble_adaptive(df_all: pd.DataFrame,
         common_idx = common_idx.union(all_indices[i])
     
     def get_standardized_data(res_obj, target_index):
+        """将单个子方法结果对齐到共同 contrast index。"""
         if res_obj is None:
             return (pd.Series(False, index=target_index), pd.Series(0, index=target_index),
                     pd.Series(1.0, index=target_index), pd.Series(0.0, index=target_index))
@@ -280,11 +328,36 @@ def run_Meta_Ensemble_dynamic(
         diversity_weight: float = 0.5,  # 功能3：分歧度惩罚权重
         **kwargs
 ) -> Dict[str, Any]:
-    """
-    Advanced Dynamic Meta Ensemble (V3):
-    1. Soft Coef-Penalty: 基于效应量的P值软惩罚，保护显著且高效应的信号。
-    2. Dispersion Correction: 引入类似 Genomic Control 的思想修正过离散导致的P值通胀。
-    3. Consensus Diversity Shrinkage: 基于方法间分歧度（CV）修正共识性假阳性。
+    """运行已废弃的动态 meta engine。
+
+    该版本保留三个历史实验性策略：基于效应量的 p 值软惩罚、类似 genomic
+    control 的 lambda 校正，以及基于方法间 z-score CV 的共识收缩。当前推荐使用
+    ``run_Meta_Ensemble_adaptive``，本函数保留是为了兼容旧脚本。
+
+    Args:
+        df_all: 长表丰度数据。
+        cell_type: 目标 cell subtype/subpopulation。
+        formula: 传给子方法的右侧公式。
+        main_variable: 主要解释变量。
+        alpha: 显著性阈值。
+        coef_threshold: 触发软惩罚的效应量阈值。
+        k_penalty: p 值软惩罚强度。
+        inflation_factor: 经验零分布膨胀系数。
+        diversity_weight: 方法分歧度惩罚权重。
+        **kwargs: 透传给子方法的兼容参数。
+
+    Returns:
+        字典，包含 meta ``contrast_table``、摘要和子方法原始结果。
+
+    Example:
+        >>> res = run_Meta_Ensemble_dynamic(
+        ...     df_all=count_df,
+        ...     cell_type="B_memory",
+        ...     formula="disease + tissue",
+        ...     inflation_factor=1.2,
+        ... )
+        >>> res["contrast_table"].head()
+        # 仅建议用于复现历史结果。
     """
     sub_methods = {
         'dmw': run_Dirichlet_Multinomial_Wald,
@@ -318,6 +391,7 @@ def run_Meta_Ensemble_dynamic(
         common_idx = common_idx.union(all_indices[i])
     
     def get_standardized_data(res_obj, target_index):
+        """将单个子方法结果对齐到共同 contrast index。"""
         if res_obj is None:
             return (pd.Series(False, index=target_index), pd.Series(0, index=target_index),
                     pd.Series(1.0, index=target_index), pd.Series(0.0, index=target_index))
@@ -349,6 +423,7 @@ def run_Meta_Ensemble_dynamic(
     # 目的：模拟高 scale_factor 下零假设分布变宽的情况。
     # 如果外部传入了 inflation_factor (lambda > 1)，则修正 Z-score
     def adjust_p_by_lambda(p_series, lam):
+        """按经验膨胀系数缩小 z-score 后重新计算双侧 p 值。"""
         if lam <= 1.0: return p_series
         # 将 P 换算回 Z，缩小 Z 后再换回 P
         z = norm.ppf(1 - p_series / 2)

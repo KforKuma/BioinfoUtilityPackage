@@ -15,29 +15,24 @@ def plot_glasso_partial_corr(
         cv=5,
         cmap="coolwarm"
 ):
-    """
-    Estimate sparse inverse covariance using Graphical Lasso and plot partial correlation heatmap.
+    """估计稀疏精度矩阵并绘制偏相关热图。
 
-    Parameters
-    ----------
-    beta_matrix : pd.DataFrame
-        Feature matrix (samples × variables).
-    save_addr : str
-        Directory to save figure.
-    fig : matplotlib.figure.Figure, optional
-        Existing figure object.
-    ax : matplotlib.axes.Axes, optional
-        Existing axis object.
-    cv : int
-        Cross validation folds for GraphicalLassoCV.
-    cmap : str
-        Colormap for heatmap.
+    Args:
+        beta_matrix: 行为样本/条件、列为变量的系数矩阵。
+        save_addr: 图像输出目录。
+        filename: 输出文件名。
+        fig: 可选已有 Figure。
+        ax: 可选已有 Axes。
+        cv: ``GraphicalLassoCV`` 的交叉验证折数。
+        cmap: 热图色板。
 
-    Returns
-    -------
-    partial_corr : np.ndarray
-        Partial correlation matrix.
-    gl_model : fitted GraphicalLassoCV model
+    Returns:
+        ``(partial_corr, gl_model)``，分别为偏相关矩阵和拟合后的模型。
+
+    Example:
+        >>> partial_corr, model = plot_glasso_partial_corr(beta_df, "figures", "partial_corr.png")
+        >>> partial_corr.shape
+        # 用于观察条件/变量之间的稀疏偏相关结构。
     """
     
     # -------- Graphical Lasso --------
@@ -86,9 +81,23 @@ def plot_glasso_partial_corr_celltype(
         cv=5,
         cmap="coolwarm"
 ):
-    """
-    Estimate sparse inverse covariance between cell types using Graphical Lasso
-    and plot partial correlation heatmap.
+    """在 cell subtype/subpopulation 维度估计 Graphical Lasso 偏相关。
+
+    Args:
+        beta_matrix: cell subtype/subpopulation x 条件 的系数矩阵。
+        save_addr: 图像输出目录。
+        filename: 输出文件名。
+        fig: 可选 Figure。
+        ax: 可选 Axes。
+        cv: 交叉验证折数。
+        cmap: 热图色板。
+
+    Returns:
+        ``(partial_corr, gl_model)``。
+
+    Example:
+        >>> corr, model = plot_glasso_partial_corr_celltype(beta_df, "figures", "cell_corr.png")
+        # 展示亚群之间的偏相关网络。
     """
     
     # -------- transpose beta matrix (cell-cell relation) --------
@@ -139,9 +148,23 @@ def plot_glasso_partial_corr_celltype_filtered(
         fig=None,
         ax=None
 ):
-    """
-    Filter zero-connected cell types, perform hierarchical clustering,
-    and plot clustered partial correlation heatmap.
+    """过滤零连接节点后绘制聚类偏相关热图。
+
+    Args:
+        partial_corr: 偏相关矩阵。
+        beta_matrix: 原始系数矩阵，用于取 cell subtype/subpopulation 名称。
+        save_addr: 图像输出目录。
+        filename: 输出文件名。
+        fig: 可选 Figure。
+        ax: 可选 Axes。
+
+    Returns:
+        ``(partial_corr_clustered, filtered_celltypes, Z)``。
+
+    Example:
+        >>> clustered, celltypes, linkage_z = plot_glasso_partial_corr_celltype_filtered(
+        ...     partial_corr, beta_df, "figures", "clustered_corr.png"
+        ... )
     """
     
     # -------- remove diagonal and find non-zero nodes --------
@@ -205,8 +228,26 @@ def plot_pca_celltype_and_loading(
         fig2=None,
         ax2=None
 ):
-    """
-    PCA of cell-type beta vectors and loading plot of conditions.
+    """对 cell subtype/subpopulation beta 向量做 PCA 并绘制 loading。
+
+    Args:
+        beta_matrix: cell subtype/subpopulation x 条件 的系数矩阵。
+        save_addr: 图像输出目录。
+        filename_pca: PCA scatter 输出文件名。
+        filename_loading: loading scatter 输出文件名。
+        fig1: 可选 PCA Figure。
+        ax1: 可选 PCA Axes。
+        fig2: 可选 loading Figure。
+        ax2: 可选 loading Axes。
+
+    Returns:
+        ``(pcs_df, loading_plot_df, pca)``。
+
+    Example:
+        >>> pcs, loadings, pca = plot_pca_celltype_and_loading(
+        ...     beta_df, "figures", "pca.png", "loading.png"
+        ... )
+        >>> pcs.head()
     """
     
     from sklearn.decomposition import PCA
@@ -311,9 +352,29 @@ def plot_celltype_decomposition(
         ax_ica=None,
         n_components=2
 ):
-    """
-    Perform FA, NMF, and ICA decomposition of cell-type beta vectors
-    and plot scatter representations.
+    """对 cell subtype/subpopulation beta 向量执行 FA/NMF/ICA 分解。
+
+    Args:
+        beta_matrix: cell subtype/subpopulation x 条件 的系数矩阵。
+        save_addr: 图像输出目录。
+        filename_fa: FA 输出文件名。
+        filename_nmf: NMF 输出文件名。
+        filename_ica: ICA 输出文件名。
+        fig_fa: 可选 FA Figure。
+        ax_fa: 可选 FA Axes。
+        fig_nmf: 可选 NMF Figure。
+        ax_nmf: 可选 NMF Axes。
+        fig_ica: 可选 ICA Figure。
+        ax_ica: 可选 ICA Axes。
+        n_components: 分解维度。
+
+    Returns:
+        ``(fa_df, nmf_df, ica_df)``。
+
+    Example:
+        >>> fa_df, nmf_df, ica_df = plot_celltype_decomposition(
+        ...     beta_df, "figures", "fa.png", "nmf.png", "ica.png"
+        ... )
     """
     
     from sklearn.preprocessing import StandardScaler
@@ -474,6 +535,24 @@ def plot_ratio_scatter(
         jitter=0.12,
         figsize=(4, 4)
 ):
+    """绘制两个 cell subtype/subpopulation 比例的散点图。
+
+    Args:
+        plot_df: ratio 表，需包含 disease 分组列和 ratio/log2_ratio。
+        save_addr: 图像输出目录。
+        filename: 输出文件名。
+        cell_pair: ``(A, B)``，表示 ``A/B``。
+        disease_col: 分组列。
+        y_scale: ``"log2"`` 或 ``"ratio"``。
+        clr_lmm_result: 可选 CLR-LMM 结果，用于显著性标注。
+        alpha: 点透明度。
+        jitter: x 轴抖动。
+        figsize: 图大小。
+
+    Example:
+        >>> plot_ratio_scatter(ratio_df, "figures", "ratio.png", ("CD4_Tcm", "CD4_Tem"))
+        # 用于查看特定亚群比例在 disease 之间的差异。
+    """
     A, B = cell_pair
     
     # ------------------------
