@@ -278,3 +278,70 @@ def plot_piechart(
     else:
         plt.close(fig)
     return fig
+
+
+
+@logged
+def plot_cell_comparison_by_disease(adata, gene, cell_type_col, disease_col,
+                                    cell_types_to_compare, save_addr, filename):
+    """
+    针对每种疾病，左右拆分对比两种细胞的基因表达。
+
+    参数:
+    - adata: AnnData 对象
+    - gene: 目标基因
+    - cell_type_col: 存储细胞类型的 obs 列名
+    - disease_col: 存储疾病状态的 obs 列名 (如 'HC', 'BD')
+    - cell_types_to_compare: 长度为 2 的列表，例如 ['B_cell', 'T_cell']
+    
+    示例：
+    adata_sub = adata[adata.obs["Subset_Identity"].isin(["CD4 Tmem GZMK+","CD8 Tmem GZMK+"])]
+    cell_pair = ["CD4 Tmem GZMK+","CD8 Tmem GZMK+"] # 对比两种细胞
+    plot_cell_comparison_by_disease(
+        adata_sub,
+        gene='IFNG',
+        cell_type_col='Subset_Identity',
+        disease_col='disease',
+        cell_types_to_compare=cell_pair,
+        save_addr=save_fig_dir,
+        filename='adata_sub_in_GZMK_subset'
+    )
+    """
+    
+    # 1. 提取并过滤数据
+    # 只提取我们关心的那两种细胞，否则 split 会报错
+    plot_df = sc.get.obs_df(adata, keys=[gene, cell_type_col, disease_col])
+    plot_df = plot_df[plot_df[cell_type_col].isin(cell_types_to_compare)]
+    
+    # 强制转换类别顺序，确保左边永远是第一个细胞，右边永远是第二个
+    plot_df[cell_type_col] = plot_df[cell_type_col].astype('category')
+    plot_df[cell_type_col] = plot_df[cell_type_col].cat.reorder_categories(cell_types_to_compare)
+    
+    # 2. 创建画布
+    fig, ax = plt.subplots(figsize=(7, 6))
+    
+    # 3. 绘制拆分小提琴图
+    sns.violinplot(
+        data=plot_df,
+        x=disease_col,  # x 轴现在是疾病 (HC, BD...)
+        y=gene,
+        hue=cell_type_col,  # 颜色/拆分是细胞类型 (Cell A, Cell B)
+        split=True,  # 左右合体
+        inner="quartile",  # 显示四分位数线
+        palette="muted",
+        ax=ax
+    )
+    
+    # 4. 显式调用 ax 设置属性
+    ax.set_title(f"{gene} Expression: {cell_types_to_compare[0]} (Left) vs {cell_types_to_compare[1]} (Right)")
+    ax.set_xlabel("Disease Status")
+    ax.set_ylabel(f"Expression of {gene}")
+    
+    # 图例放在外面防止遮挡
+    ax.legend(title="Cell Type", bbox_to_anchor=(1.05, 1), loc='upper left', frameon=False)
+    
+    # 5. 保存
+    os.makedirs(save_addr, exist_ok=True)
+    abs_path = os.path.join(save_addr, filename)
+    matplotlib_savefig(fig, abs_path)
+
