@@ -1,3 +1,30 @@
+"""Step08a: prepare a canonical abundance cohort from the existing local CSV."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+import sys
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
+from project.Step08_Abundance.phase4_shared import (
+    LOCAL_INPUT,
+    LOCAL_WORK_ROOT,
+    Step08PreparationSpec,
+    prepare_step08_csv,
+)
+
+
+# %% Optional upstream preparation from H5AD
+# Original HPC path:
+# /public/home/xiongyuehan/data/IBD_analysis/output/Step07_Summary/
+# Step07_DR_clustered_clean_20260210.h5ad
+# The exact historical script is retained below as inert source text. It is disabled in
+# Phase 4 because Celltype_meta(stratified_clean).csv already exists locally.
+LEGACY_HPC_WORKFLOW = r'''
 # 在协和医院高算上测试
 # conda activate sc-min
 
@@ -184,3 +211,87 @@ for i,df in enumerate(count_df_sep_ls):
     plot_stacked_barplot(df,
                          save_addr=save_fig_addr,
                          filename=f"Stacked_barplot(layer{i+1})")
+'''
+
+
+# %% Configuration
+INPUT_PATH = LOCAL_INPUT
+OUTPUT_ROOT = LOCAL_WORK_ROOT
+PREPARATION_RUN_ID = "phase4-step08-preparation"
+ANALYSIS_ID = "phase4-step08-layer1"
+COHORT_ID = "layer1_tcell"
+GROUP_1 = "CD_if"
+GROUP_2 = "HC_normal"
+REFERENCE_CELL_TYPE = "CD4 Tnaive"
+
+
+# %% Reusable functions
+def build_preparation_spec(
+    *,
+    run_id: str = PREPARATION_RUN_ID,
+    analysis_id: str = ANALYSIS_ID,
+    cohort_id: str = COHORT_ID,
+    group_1: str = GROUP_1,
+    group_2: str = GROUP_2,
+    reference_cell_type: str = REFERENCE_CELL_TYPE,
+    samples_per_group: int | None = None,
+) -> Step08PreparationSpec:
+    return Step08PreparationSpec(
+        run_id=run_id,
+        analysis_id=analysis_id,
+        cohort_id=cohort_id,
+        group_1=group_1,
+        group_2=group_2,
+        reference_cell_type=reference_cell_type,
+        samples_per_group=samples_per_group,
+    )
+
+
+def run_preparation(
+    input_path: str | Path = INPUT_PATH,
+    output_root: str | Path = OUTPUT_ROOT,
+    *,
+    spec: Step08PreparationSpec | None = None,
+) -> Path:
+    """Create the immutable Step08a manifest consumed by Step08c and Step08d."""
+    return prepare_step08_csv(
+        input_path,
+        output_root,
+        spec or build_preparation_spec(),
+    )
+
+
+def main(argv: list[str] | None = None) -> Path:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--input", type=Path, default=INPUT_PATH)
+    parser.add_argument("--output-root", type=Path, default=OUTPUT_ROOT)
+    parser.add_argument("--run-id", default=PREPARATION_RUN_ID)
+    parser.add_argument("--analysis-id", default=ANALYSIS_ID)
+    parser.add_argument("--cohort-id", default=COHORT_ID)
+    parser.add_argument("--group-1", default=GROUP_1)
+    parser.add_argument("--group-2", default=GROUP_2)
+    parser.add_argument("--reference-cell-type", default=REFERENCE_CELL_TYPE)
+    parser.add_argument("--samples-per-group", type=int)
+    args = parser.parse_args(argv)
+    manifest = run_preparation(
+        args.input,
+        args.output_root,
+        spec=build_preparation_spec(
+            run_id=args.run_id,
+            analysis_id=args.analysis_id,
+            cohort_id=args.cohort_id,
+            group_1=args.group_1,
+            group_2=args.group_2,
+            reference_cell_type=args.reference_cell_type,
+            samples_per_group=args.samples_per_group,
+        ),
+    )
+    print(manifest)
+    return manifest
+
+
+# %% Interactive execution
+result: Path | None = None
+
+if __name__ == "__main__":
+    result = main()

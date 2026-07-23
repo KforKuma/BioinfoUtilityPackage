@@ -15,7 +15,9 @@ from src.stats.validation import parse_boolean_series
 class EvaluationSpec:
     truth_source: str = "population"
     required_effect_component: str = "composition"
-    eligible_estimand_levels: tuple[str, ...] = ("compatible", "direction_only")
+    eligible_estimand_levels: tuple[str, ...] = (
+        "compatible", "direction_only", "decision_only",
+    )
     method_universe_policy: str = "common_complete_universe"
     missing_result_policy: str = "exclude_and_report"
     invalid_result_policy: str = "exclude_and_report"

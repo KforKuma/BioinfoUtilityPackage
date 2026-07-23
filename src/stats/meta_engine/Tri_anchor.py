@@ -1,14 +1,568 @@
-from typing import Dict, Any
+from dataclasses import dataclass
+from datetime import datetime, timezone
+import json
+from pathlib import Path
+from typing import Dict, Any, Mapping, Sequence
+from uuid import uuid4
+
 import pandas as pd
 import numpy as np
 from scipy.stats import norm
+import yaml
 
+from src.stats.adapters._shared import public_row
+from src.stats.adapters.base import AdapterResult, BaseDifferentialAbundanceAdapter
 from src.stats.engine import *
+from src.stats.schemas import CanonicalDAInput, MethodDiagnostics
 from src.stats.validation import parse_boolean_series
 from src.utils.env_utils import call_with_compatible_args
 from src.utils.warnings import deprecated
 
 
+_ANCHOR_ROLES = {"compatible", "direction_only", "decision_only", "incompatible"}
+_DIRECTIONAL_VALUES = {"group_1_higher", "group_2_higher", "no_effect"}
+
+
+@dataclass(frozen=True)
+class TriAnchorRule:
+    """Versioned rule for combining canonical anchor decisions without score conversion."""
+
+    rule_version: str
+    anchor_methods: tuple[str, ...]
+    anchor_roles: Mapping[str, str]
+    minimum_valid_anchors: int
+    minimum_positive_anchors: int
+    require_direction_agreement: bool
+    require_evidence_agreement: bool
+    allow_decision_only: bool
+    conflict_policy: str
+    missing_anchor_policy: str
+    tie_handling: str
+    target_estimand: str
+    target_scale: str
+    effect_component: str
+    primary_decision_rule_id: str
+    reference_cell_type: str | None = None
+
+    @classmethod
+    def from_mapping(cls, record: Mapping[str, Any]) -> "TriAnchorRule":
+        methods = tuple(str(value) for value in record["anchor_methods"])
+        roles = {str(key): str(value) for key, value in record["anchor_roles"].items()}
+        rule = cls(
+            rule_version=str(record["rule_version"]),
+            anchor_methods=methods,
+            anchor_roles=roles,
+            minimum_valid_anchors=int(record["minimum_valid_anchors"]),
+            minimum_positive_anchors=int(record["minimum_positive_anchors"]),
+            require_direction_agreement=bool(record["require_direction_agreement"]),
+            require_evidence_agreement=bool(record.get("require_evidence_agreement", False)),
+            allow_decision_only=bool(record["allow_decision_only"]),
+            conflict_policy=str(record["conflict_policy"]),
+            missing_anchor_policy=str(record["missing_anchor_policy"]),
+            tie_handling=str(record["tie_handling"]),
+            target_estimand=str(record["target_estimand"]),
+            target_scale=str(record["target_scale"]),
+            effect_component=str(record.get("effect_component", "composition")),
+            primary_decision_rule_id=str(record["primary_decision_rule_id"]),
+            reference_cell_type=(
+                str(record["reference_cell_type"])
+                if record.get("reference_cell_type") not in {None, ""} else None
+            ),
+        )
+        rule.validate()
+        return rule
+
+    def validate(self) -> "TriAnchorRule":
+        if len(self.anchor_methods) < 2 or len(set(self.anchor_methods)) != len(self.anchor_methods):
+            raise ValueError("Tri_anchor requires at least two unique anchor methods.")
+        if set(self.anchor_roles) != set(self.anchor_methods):
+            raise ValueError("Tri_anchor anchor_roles must exactly cover anchor_methods.")
+        invalid_roles = set(self.anchor_roles.values()) - _ANCHOR_ROLES
+        if invalid_roles:
+            raise ValueError(f"Unknown Tri_anchor roles: {sorted(invalid_roles)}")
+        if not 2 <= self.minimum_valid_anchors <= len(self.anchor_methods):
+            raise ValueError("minimum_valid_anchors must be between 2 and the anchor count.")
+        if not 1 <= self.minimum_positive_anchors <= self.minimum_valid_anchors:
+            raise ValueError("minimum_positive_anchors must not exceed minimum_valid_anchors.")
+        if self.conflict_policy != "negative":
+            raise ValueError("The conservative v1 conflict_policy must be 'negative'.")
+        if self.missing_anchor_policy != "exclude":
+            raise ValueError("Invalid or missing anchors must use missing_anchor_policy='exclude'.")
+        if self.tie_handling != "negative":
+            raise ValueError("The conservative v1 tie_handling must be 'negative'.")
+        if not self.target_estimand or not self.target_scale or not self.primary_decision_rule_id:
+            raise ValueError("Tri_anchor target semantics and decision rule must be explicit.")
+        return self
+
+
+def default_tri_anchor_rule_path() -> Path:
+    return Path(__file__).resolve().parents[3] / "config" / "tri_anchor_rules.yaml"
+
+
+def load_tri_anchor_rule(
+    path: str | Path | None = None,
+    *,
+    overrides: Mapping[str, Any] | None = None,
+) -> TriAnchorRule:
+    source = Path(path) if path is not None else default_tri_anchor_rule_path()
+    if not source.is_absolute():
+        source = Path(__file__).resolve().parents[3] / source
+    with source.open(encoding="utf-8") as handle:
+        document = yaml.safe_load(handle)
+    if not isinstance(document, Mapping) or not isinstance(document.get("tri_anchor"), Mapping):
+        raise ValueError("Tri_anchor rule YAML requires a tri_anchor mapping.")
+    record = dict(document["tri_anchor"])
+    record.update(dict(overrides or {}))
+    return TriAnchorRule.from_mapping(record)
+
+
+def prepare_anchor_inputs(
+    public_view: pd.DataFrame,
+    evidence_layer: pd.DataFrame,
+    *,
+    run_id: str,
+    analysis_id: str,
+    contrast_id: str,
+    effect_component: str,
+    anchor_methods: Sequence[str],
+) -> pd.DataFrame:
+    """Align canonical anchor results and link native decisions for provenance only."""
+    required = {
+        "run_id", "analysis_id", "method", "contrast_id", "cell_type",
+        "effect_component", "primary_decision", "effect_direction", "estimate",
+        "effect_estimand", "effect_scale", "reference_cell_type", "is_available",
+        "is_valid", "contrast_status", "evidence_id",
+    }
+    if missing := required - set(public_view.columns):
+        raise ValueError(f"Canonical anchor public view is missing: {sorted(missing)}")
+    selected = public_view.loc[
+        public_view["run_id"].astype(str).eq(str(run_id))
+        & public_view["analysis_id"].astype(str).eq(str(analysis_id))
+        & public_view["contrast_id"].astype(str).eq(str(contrast_id))
+        & public_view["effect_component"].astype(str).eq(str(effect_component))
+        & public_view["method"].astype(str).isin(tuple(anchor_methods))
+    ].copy()
+    duplicate_key = ["method", "contrast_id", "cell_type", "effect_component"]
+    if selected.duplicated(duplicate_key).any():
+        raise ValueError("Tri_anchor received duplicate canonical anchor keys.")
+    unknown = set(selected["method"].astype(str)) - set(map(str, anchor_methods))
+    if unknown:
+        raise ValueError(f"Tri_anchor received unconfigured anchors: {sorted(unknown)}")
+
+    if evidence_layer.empty:
+        selected["anchor_native_decision"] = pd.NA
+    else:
+        evidence_required = {"evidence_id", "native_decision"}
+        if missing := evidence_required - set(evidence_layer.columns):
+            raise ValueError(f"Canonical anchor evidence is missing: {sorted(missing)}")
+        native = evidence_layer[["evidence_id", "native_decision"]].copy()
+        if native["evidence_id"].duplicated().any():
+            raise ValueError("Tri_anchor evidence IDs must be unique.")
+        native = native.rename(columns={"native_decision": "anchor_native_decision"})
+        selected = selected.merge(native, on="evidence_id", how="left", validate="one_to_one")
+    selected["primary_decision"] = parse_boolean_series(selected["primary_decision"])
+    selected["anchor_native_decision"] = parse_boolean_series(
+        selected["anchor_native_decision"], errors="coerce"
+    )
+    return selected
+
+
+def assess_anchor_compatibility(
+    prepared: pd.DataFrame,
+    rule: TriAnchorRule,
+) -> pd.DataFrame:
+    """Classify each anchor for the configured target without converting effect scales."""
+    result = prepared.copy()
+    compatibility: list[str] = []
+    reasons: list[str] = []
+    for _, row in result.iterrows():
+        method = str(row["method"])
+        configured_role = rule.anchor_roles.get(method, "incompatible")
+        available = bool(row["is_available"]) if pd.notna(row["is_available"]) else False
+        valid = bool(row["is_valid"]) if pd.notna(row["is_valid"]) else False
+        if not available or not valid or str(row["contrast_status"]) != "success":
+            compatibility.append("unavailable")
+            reasons.append("anchor_unavailable_or_invalid")
+            continue
+        if pd.isna(row["primary_decision"]):
+            compatibility.append("unavailable")
+            reasons.append("primary_decision_unavailable")
+            continue
+        if configured_role == "incompatible":
+            compatibility.append("incompatible")
+            reasons.append("configured_incompatible")
+            continue
+        if configured_role == "compatible":
+            exact_effect = (
+                str(row["effect_estimand"]) == rule.target_estimand
+                and str(row["effect_scale"]) == rule.target_scale
+                and np.isfinite(pd.to_numeric(pd.Series([row["estimate"]]), errors="coerce").iloc[0])
+            )
+            row_reference = row.get("reference_cell_type", pd.NA)
+            exact_reference = (
+                pd.isna(row_reference) if rule.reference_cell_type is None
+                else str(row_reference) == str(rule.reference_cell_type)
+            )
+            if exact_effect and exact_reference:
+                compatibility.append("compatible")
+                reasons.append("exact_target_effect_semantics")
+            else:
+                compatibility.append("incompatible")
+                reasons.append("target_effect_semantics_mismatch")
+            continue
+        if configured_role == "direction_only":
+            if str(row["effect_direction"]) in _DIRECTIONAL_VALUES:
+                compatibility.append("direction_only")
+                reasons.append("configured_direction_support")
+            else:
+                compatibility.append("decision_only")
+                reasons.append("direction_unavailable_decision_retained")
+            continue
+        compatibility.append("decision_only")
+        reasons.append("configured_decision_support")
+    result["anchor_compatibility"] = compatibility
+    result["anchor_compatibility_reason"] = reasons
+    return result
+
+
+def combine_anchor_evidence(
+    assessed: pd.DataFrame,
+    rule: TriAnchorRule,
+    *,
+    cell_types: Sequence[str],
+) -> pd.DataFrame:
+    """Apply majority and direction consensus to canonical decisions only."""
+    records: list[dict[str, Any]] = []
+    order = {method: index for index, method in enumerate(rule.anchor_methods)}
+    for cell_type in map(str, cell_types):
+        group = assessed.loc[assessed["cell_type"].astype(str).eq(cell_type)].copy()
+        group["_order"] = group["method"].astype(str).map(order)
+        group = group.sort_values("_order")
+        usable = group.loc[group["anchor_compatibility"].isin(
+            {"compatible", "direction_only", "decision_only"}
+        )].copy()
+        valid_count = len(usable)
+        positive = usable.loc[usable["primary_decision"].eq(True)].copy()
+        positive_count = len(positive)
+        positive_directions = positive.loc[
+            positive["effect_direction"].isin(_DIRECTIONAL_VALUES), "effect_direction"
+        ].astype(str)
+        direction_conflict = positive_directions.nunique() > 1
+        direction_missing = len(positive_directions) < positive_count
+        evidence_disagreement = False
+        if rule.require_evidence_agreement and not usable.empty:
+            comparable = usable["anchor_native_decision"].notna()
+            evidence_disagreement = bool(
+                (~comparable).any()
+                or (
+                    usable.loc[comparable, "anchor_native_decision"].astype(bool).to_numpy()
+                    != usable.loc[comparable, "primary_decision"].astype(bool).to_numpy()
+                ).any()
+            )
+
+        sufficient = valid_count >= rule.minimum_valid_anchors
+        tied = valid_count > 0 and positive_count * 2 == valid_count
+        consensus: Any = pd.NA
+        limitation = "insufficient_valid_anchors"
+        if sufficient:
+            consensus = bool(positive_count >= rule.minimum_positive_anchors)
+            limitation = ""
+            if tied and rule.tie_handling == "negative":
+                consensus = False
+                limitation = "tie_resolved_negative"
+            if rule.require_direction_agreement and (direction_conflict or direction_missing):
+                consensus = False
+                limitation = "direction_conflict_or_missing"
+            if evidence_disagreement:
+                consensus = False
+                limitation = "native_primary_evidence_disagreement"
+
+        directional = usable.loc[
+            usable["effect_direction"].isin(_DIRECTIONAL_VALUES), "effect_direction"
+        ].astype(str)
+        consensus_direction = (
+            directional.iloc[0] if len(directional) and directional.nunique() == 1
+            else ("undetermined" if len(directional) else "not_applicable")
+        )
+        compatible_effects = usable.loc[usable["anchor_compatibility"].eq("compatible")].copy()
+        compatible_values = pd.to_numeric(compatible_effects["estimate"], errors="coerce").dropna()
+        estimate = float(compatible_values.median()) if len(compatible_values) else np.nan
+        if not np.isfinite(estimate) and not rule.allow_decision_only and sufficient:
+            consensus = pd.NA
+            limitation = "unified_effect_unavailable_and_decision_only_disabled"
+
+        native_effect_row = usable.loc[
+            pd.to_numeric(usable["estimate"], errors="coerce").notna()
+        ].head(1)
+        records.append({
+            "cell_type": cell_type,
+            "valid_anchor_count": valid_count,
+            "positive_anchor_count": positive_count,
+            "valid_anchor_methods": json.dumps(usable["method"].astype(str).tolist()),
+            "positive_anchor_methods": json.dumps(positive["method"].astype(str).tolist()),
+            "compatibility_by_method": json.dumps(dict(zip(
+                group["method"].astype(str), group["anchor_compatibility"].astype(str), strict=True
+            )), sort_keys=True),
+            "direction_conflict": direction_conflict,
+            "direction_missing": direction_missing,
+            "evidence_disagreement": evidence_disagreement,
+            "consensus_direction": consensus_direction,
+            "tri_anchor_consensus": consensus,
+            "limitation_reason": limitation or pd.NA,
+            "estimate": estimate,
+            "estimand_compatibility": "compatible" if np.isfinite(estimate) else "decision_only",
+            "anchor_effect_method": (
+                str(native_effect_row.iloc[0]["method"]) if not native_effect_row.empty else pd.NA
+            ),
+            "anchor_native_effect": (
+                native_effect_row.iloc[0]["estimate"] if not native_effect_row.empty else np.nan
+            ),
+            "anchor_effect_estimand": (
+                native_effect_row.iloc[0]["effect_estimand"] if not native_effect_row.empty else pd.NA
+            ),
+            "anchor_effect_scale": (
+                native_effect_row.iloc[0]["effect_scale"] if not native_effect_row.empty else pd.NA
+            ),
+        })
+    return pd.DataFrame(records)
+
+
+def build_tri_anchor_result(
+    combined: pd.DataFrame,
+    canonical_input: CanonicalDAInput,
+    contrast: pd.Series,
+    rule: TriAnchorRule,
+    *,
+    analysis_id: str,
+    diagnostic_id: str,
+    method_version: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build schema-valid public/evidence rows with no cross-paradigm score."""
+    public_rows: list[dict[str, Any]] = []
+    evidence_rows: list[dict[str, Any]] = []
+    reference = rule.reference_cell_type or (
+        str(contrast["reference_cell_type"])
+        if pd.notna(contrast.get("reference_cell_type")) else None
+    )
+    for _, native in combined.iterrows():
+        cell_type = str(native["cell_type"])
+        direction_basis = (
+            f"canonical_anchor_direction_consensus;target_estimand={rule.target_estimand};"
+            f"reference_cell_type={reference or 'not_applicable'}"
+        )
+        estimate = pd.to_numeric(pd.Series([native["estimate"]]), errors="coerce").iloc[0]
+        row, result_id, evidence_id = public_row(
+            method_id="tri_anchor",
+            method_version=method_version,
+            analysis_id=analysis_id,
+            diagnostic_id=diagnostic_id,
+            contrast=contrast,
+            cell_type=cell_type,
+            effect_component=rule.effect_component,
+            estimate=estimate,
+            effect_estimand=rule.target_estimand,
+            effect_scale=rule.target_scale,
+            direction_basis=direction_basis,
+            decision_rule_id=rule.primary_decision_rule_id,
+            reference_cell_type=reference if reference is not None else pd.NA,
+            effect_estimate_source="derived" if np.isfinite(estimate) else "not_applicable",
+            result_interpretation=(
+                "Tri_anchor decision consensus. A public effect is present only when anchors "
+                "have exactly compatible target semantics."
+            ),
+            reference_strategy="common_exclusion" if reference else "not_applicable",
+            reference_selection_reason=contrast.get("reference_selection_reason", pd.NA),
+            reference_is_fixed=bool(reference),
+            benchmark_estimand=rule.target_estimand,
+            derived_from_native_effect=bool(np.isfinite(estimate)),
+        )
+        if cell_type == reference:
+            row.update({
+                "evidence_id": pd.NA,
+                "estimate": np.nan,
+                "effect_direction": "not_applicable",
+                "primary_decision": pd.NA,
+                "decision_metric": pd.NA,
+                "decision_value": pd.NA,
+                "decision_operator": pd.NA,
+                "decision_threshold": pd.NA,
+                "decision_rule_id": pd.NA,
+                "decision_rule_description": pd.NA,
+                "is_available": False,
+                "is_valid": False,
+                "contrast_status": "reference",
+                "failure_reason": pd.NA,
+                "is_benchmark_eligible": False,
+                "estimand_compatibility": "unavailable",
+                "derived_from_native_effect": False,
+                "effect_estimate_source": "not_applicable",
+            })
+            public_rows.append(row)
+            continue
+        if pd.isna(native["tri_anchor_consensus"]):
+            row.update({
+                "evidence_id": pd.NA,
+                "estimate": np.nan,
+                "effect_direction": "not_applicable",
+                "primary_decision": pd.NA,
+                "decision_metric": pd.NA,
+                "decision_value": pd.NA,
+                "decision_operator": pd.NA,
+                "decision_threshold": pd.NA,
+                "decision_rule_id": pd.NA,
+                "decision_rule_description": pd.NA,
+                "is_available": False,
+                "is_valid": False,
+                "contrast_status": "unavailable",
+                "failure_reason": native["limitation_reason"],
+                "is_benchmark_eligible": False,
+                "estimand_compatibility": "unavailable",
+                "derived_from_native_effect": False,
+                "effect_estimate_source": "not_applicable",
+            })
+            public_rows.append(row)
+            continue
+        if not np.isfinite(estimate):
+            row["effect_direction"] = native["consensus_direction"]
+            row["estimand_compatibility"] = "decision_only"
+        public_rows.append(row)
+        consensus = bool(native["tri_anchor_consensus"])
+        evidence_rows.append({
+            "evidence_id": evidence_id,
+            "result_id": result_id,
+            "evidence_paradigm": "other_native",
+            "native_decision": consensus,
+            "native_decision_metric": "tri_anchor_consensus",
+            "native_decision_value": consensus,
+            "native_decision_rule_id": f"tri-anchor-combination-{rule.rule_version}",
+            "tri_anchor_consensus": consensus,
+            "tri_anchor_rule_version": rule.rule_version,
+            "anchor_methods": json.dumps(rule.anchor_methods),
+            "valid_anchor_methods": native["valid_anchor_methods"],
+            "positive_anchor_methods": native["positive_anchor_methods"],
+            "valid_anchor_count": native["valid_anchor_count"],
+            "positive_anchor_count": native["positive_anchor_count"],
+            "direction_conflict": native["direction_conflict"],
+            "evidence_disagreement": native["evidence_disagreement"],
+            "compatibility_by_method": native["compatibility_by_method"],
+            "anchor_effect_method": native["anchor_effect_method"],
+            "anchor_native_effect": native["anchor_native_effect"],
+            "anchor_effect_estimand": native["anchor_effect_estimand"],
+            "anchor_effect_scale": native["anchor_effect_scale"],
+        })
+    return pd.DataFrame(public_rows), pd.DataFrame(evidence_rows)
+
+
+class TriAnchorAdapter(BaseDifferentialAbundanceAdapter):
+    """Dependent adapter that consumes canonical results produced earlier by the runner."""
+
+    method_id = "tri_anchor"
+    consumes_canonical_results = True
+
+    def __init__(
+        self,
+        *,
+        rule: TriAnchorRule | None = None,
+        method_version: str = "1.0.0",
+    ) -> None:
+        super().__init__(method_version=method_version)
+        self.rule = (rule or load_tri_anchor_rule()).validate()
+
+    def prepare_native_input(self, canonical_input, contrast):  # pragma: no cover - guarded by runner
+        raise RuntimeError("TriAnchorAdapter requires canonical anchor results.")
+
+    def execute_native(self, native_input, contrast):  # pragma: no cover - guarded by runner
+        raise RuntimeError("TriAnchorAdapter requires canonical anchor results.")
+
+    def transform_native_output(self, native_output, canonical_input, contrast, **kwargs):
+        raise RuntimeError("TriAnchorAdapter uses build_tri_anchor_result().")
+
+    def run_from_anchor_results(
+        self,
+        canonical_input: CanonicalDAInput,
+        contrast: pd.Series,
+        *,
+        anchor_public: pd.DataFrame,
+        anchor_evidence: pd.DataFrame,
+        analysis_id: str,
+        run_id: str,
+        native_output_dir: Path,
+    ) -> AdapterResult:
+        diagnostic_id = str(uuid4())
+        diagnostics = MethodDiagnostics(
+            diagnostic_id=diagnostic_id,
+            analysis_id=analysis_id,
+            method=self.method_id,
+            method_version=self.method_version,
+            status="running",
+            input_hash=canonical_input.input_hash(),
+            started_at=datetime.now(timezone.utc).isoformat(),
+            details={
+                "rule_version": self.rule.rule_version,
+                "anchor_methods": list(self.rule.anchor_methods),
+                "target_estimand": self.rule.target_estimand,
+                "target_scale": self.rule.target_scale,
+            },
+        )
+        rule_record = dict(self.rule.__dict__)
+        if self.rule.reference_cell_type is None and pd.notna(contrast.get("reference_cell_type")):
+            rule_record["reference_cell_type"] = str(contrast["reference_cell_type"])
+        effective_rule = TriAnchorRule.from_mapping(rule_record)
+        try:
+            prepared = prepare_anchor_inputs(
+                anchor_public,
+                anchor_evidence,
+                run_id=run_id,
+                analysis_id=analysis_id,
+                contrast_id=str(contrast["contrast_id"]),
+                effect_component=effective_rule.effect_component,
+                anchor_methods=effective_rule.anchor_methods,
+            )
+            assessed = assess_anchor_compatibility(prepared, effective_rule)
+            cell_types = canonical_input.cell_type_manifest.loc[
+                canonical_input.cell_type_manifest["inclusion_status"].eq("included"), "cell_type"
+            ].astype(str)
+            combined = combine_anchor_evidence(assessed, effective_rule, cell_types=cell_types)
+            native_path = self.save_native_output(
+                combined,
+                native_output_dir,
+                analysis_id=analysis_id,
+                contrast_id=str(contrast["contrast_id"]),
+            )
+            diagnostics.native_output_path = str(native_path)
+            diagnostics.details.update({
+                "number_rows": len(combined),
+                "number_decision_available": int(combined["tri_anchor_consensus"].notna().sum()),
+                "number_decision_unavailable": int(combined["tri_anchor_consensus"].isna().sum()),
+            })
+            public, evidence = build_tri_anchor_result(
+                combined,
+                canonical_input,
+                contrast,
+                effective_rule,
+                analysis_id=analysis_id,
+                diagnostic_id=diagnostic_id,
+                method_version=self.method_version,
+            )
+            diagnostics.converged = True
+            diagnostics.finish(status="success")
+            return AdapterResult(public, evidence, diagnostics)
+        except Exception as exc:
+            diagnostics.error_type = type(exc).__name__
+            diagnostics.error_message = str(exc)
+            diagnostics.converged = False
+            diagnostics.finish(status="failed")
+            public = self.unavailable_public_rows(
+                canonical_input,
+                contrast,
+                analysis_id=analysis_id,
+                diagnostic_id=diagnostic_id,
+                failure_reason="canonical_conversion_error",
+            )
+            return AdapterResult(public, pd.DataFrame(), diagnostics)
+
+
+@deprecated(alternative="TriAnchorAdapter through DifferentialAbundanceRunner")
 def run_Meta_Ensemble(df_all: pd.DataFrame,
                       cell_type: str,
                       formula: str,
@@ -158,6 +712,7 @@ def run_Meta_Ensemble(df_all: pd.DataFrame,
     }
 
 
+@deprecated(alternative="TriAnchorAdapter through DifferentialAbundanceRunner")
 def run_Meta_Ensemble_adaptive(df_all: pd.DataFrame,
                                cell_type: str,
                                formula: str,
