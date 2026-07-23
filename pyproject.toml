@@ -20,3 +20,6 @@ authors = [{name="KforKuma", email="johnhsiung1998@gmail.com"}]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

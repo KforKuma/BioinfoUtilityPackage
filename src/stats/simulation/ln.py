@@ -8,7 +8,8 @@ import pandas as pd
 from scipy.special import softmax
 
 from src.utils.hier_logger import logged
-from src.stats.simulation.truth_refine import refine_ground_truth_by_observation
+from src.stats.simulation.design import build_simulation_metadata, validate_factor_levels
+from src.stats.simulation.truth_refine import attach_population_effects, refine_ground_truth_by_observation
 logger = logging.getLogger(__name__)
 
 
@@ -33,7 +34,11 @@ def simulate_LogisticNormal_hierarchical(
         total_count_mean=2e4,total_count_sd=5e2,min_count=1000,
         disease_levels=("HC", "CD", "UC"),
         tissue_levels=("nif", "if"),
-        random_state=1234
+        random_state=1234,
+        assignment_strategy="balanced",
+        protected_cell_types: Sequence[str] = (),
+        population_null_tolerance: float = 1e-12,
+        population_reference_cell_type: str | None = None,
 ):
     """生成 Logistic-Normal Multinomial 层次模拟数据。
 
@@ -58,6 +63,11 @@ def simulate_LogisticNormal_hierarchical(
         disease_levels: disease 水平，首个元素作为参考组。
         tissue_levels: tissue 水平，首个元素作为参考组。
         random_state: 随机种子。
+        assignment_strategy: ``balanced`` 为默认的分层随机平衡设计；``random``
+            保留历史独立随机分配行为。
+        protected_cell_types: 不得承载 latent injection 的预注册 cell type。
+        population_null_tolerance: 判定精确 population effect 数值零的显式容差。
+        population_reference_cell_type: population log-ratio estimand 的预注册 reference。
 
     Returns:
         ``(df_long, df_true_refined)``，分别为模拟丰度长表和可观察 ground truth。
@@ -74,38 +84,58 @@ def simulate_LogisticNormal_hierarchical(
         >>> df_sim.groupby("sample_id")["count"].sum().head()
         # 检查每个 sample 的模拟测序深度。
     """
-    if n_donors <= 0 or n_samples_per_donor <= 0 or n_celltypes <= 1:
-        raise ValueError("`n_donors`, `n_samples_per_donor`, and `n_celltypes` must be positive; `n_celltypes` must be greater than 1.")
-    if len(disease_levels) < 2:
-        raise ValueError("`disease_levels` must contain at least two levels.")
-    if len(tissue_levels) < 2:
-        raise ValueError("`tissue_levels` must contain at least two levels.")
+    if not isinstance(n_celltypes, int) or isinstance(n_celltypes, bool) or n_celltypes <= 1:
+        raise ValueError("`n_celltypes` must be an integer greater than 1.")
+    disease_levels, tissue_levels = validate_factor_levels(disease_levels, tissue_levels)
+    numeric_parameters = np.asarray([
+        baseline_mu_scale, disease_effect_size, tissue_effect_size,
+        interaction_effect_size, inflamed_cell_frac, donor_noise_sd,
+        sample_noise_sd, total_count_mean, total_count_sd, min_count,
+        population_null_tolerance,
+    ], dtype=float)
+    if not np.isfinite(numeric_parameters).all():
+        raise ValueError("Simulation numeric parameters must be finite.")
     if not 0 <= inflamed_cell_frac <= 1:
         raise ValueError("`inflamed_cell_frac` must be between 0 and 1.")
+    if min(baseline_mu_scale, disease_effect_size, tissue_effect_size, interaction_effect_size) < 0:
+        raise ValueError("Baseline and effect-size parameters must be non-negative.")
+    if min(donor_noise_sd, sample_noise_sd, total_count_sd) < 0:
+        raise ValueError("Noise scale parameters must be non-negative.")
+    if total_count_mean <= 0 or min_count <= 0:
+        raise ValueError("`total_count_mean` and `min_count` must be greater than 0.")
 
     rng = np.random.default_rng(random_state)
     ref_disease = disease_levels[0]
     ref_tissue = tissue_levels[0]
     other_tissue = tissue_levels[1]
     cell_types = [f"CT{i + 1}" for i in range(n_celltypes)]
+    if (
+        population_reference_cell_type is not None
+        and str(population_reference_cell_type) not in set(map(str, protected_cell_types))
+    ):
+        raise ValueError("The population reference cell type must also be protected from injection.")
+    protected = set(map(str, protected_cell_types))
+    unknown_protected = protected - set(cell_types)
+    if unknown_protected:
+        raise ValueError(f"Unknown protected cell types: {sorted(unknown_protected)}")
+    eligible_indices = np.asarray([
+        index for index, cell_type in enumerate(cell_types) if cell_type not in protected
+    ], dtype=int)
+    if not len(eligible_indices):
+        raise ValueError("At least one cell type must remain eligible for effect injection.")
     
     # ---------------------------
     # Step 1: 向量化构建 Metadata
     # ---------------------------
-    donor_ids = [f"D{i + 1}" for i in range(n_donors)]
-    # 每个 donor 固定一个疾病状态
-    donor_disease_map = {d: rng.choice(disease_levels) for d in donor_ids}
-    
-    records = []
-    for d in donor_ids:
-        for s_idx in range(n_samples_per_donor):
-            records.append({
-                "donor_id": d,
-                "disease": donor_disease_map[d],
-                "tissue": rng.choice(tissue_levels),
-                "sample_id": f"{d}_S{s_idx}"
-            })
-    df_meta = pd.DataFrame(records)
+    df_meta = build_simulation_metadata(
+        n_donors=n_donors,
+        n_samples_per_donor=n_samples_per_donor,
+        disease_levels=disease_levels,
+        tissue_levels=tissue_levels,
+        rng=rng,
+        assignment_strategy=assignment_strategy,
+    )
+    donor_ids = df_meta["donor_id"].unique().tolist()
     n_samples = len(df_meta)
     
     # ---------------------------
@@ -116,16 +146,19 @@ def simulate_LogisticNormal_hierarchical(
     
     # 预计算 disease/tissue/interaction 效应
     disease_effects = {}
-    n_main = max(1, int(n_celltypes * 0.1))
-    main_indices = rng.choice(n_celltypes, size=n_main, replace=False)
+    n_main = min(len(eligible_indices), max(1, int(n_celltypes * 0.1)))
+    main_indices = rng.choice(eligible_indices, size=n_main, replace=False)
     for d_level in disease_levels[1:]:
         vec = np.zeros(n_celltypes)
         vec[main_indices] = disease_effect_size * rng.uniform(0.8, 1.2) * rng.choice([-1, 1], n_main)
         disease_effects[d_level] = vec
     
     tissue_effect_vec = np.zeros(n_celltypes)
-    n_inf = max(1, int(n_celltypes * inflamed_cell_frac))
-    inf_indices = rng.choice(n_celltypes, size=n_inf, replace=False)
+    n_inf = min(
+        len(eligible_indices),
+        0 if inflamed_cell_frac == 0 else max(1, int(n_celltypes * inflamed_cell_frac)),
+    )
+    inf_indices = rng.choice(eligible_indices, size=n_inf, replace=False)
     tissue_signs = rng.choice([-1, 1], n_inf)
     tissue_effect_vec[inf_indices] = tissue_effect_size * rng.uniform(0.8, 1.2) * tissue_signs
     
@@ -158,10 +191,8 @@ def simulate_LogisticNormal_hierarchical(
         mask = ((df_meta['disease'] == d_level) & (df_meta['tissue'] == other_tissue)).values
         logits[mask] += effect
     
-    # 5. 合并样本噪声 (合并 multivariate_normal 的方差)
-    # 原始 sd 为 sample_noise_sd，协方差 0.5 相当于 sd 约为 0.707
-    total_noise_sd = np.sqrt(sample_noise_sd ** 2 + 0.5)
-    logits += rng.normal(0, total_noise_sd, size=logits.shape)
+    # 5. 样本噪声严格由公开参数控制；sample_noise_sd=0 不再隐式加入额外方差。
+    logits += rng.normal(0, sample_noise_sd, size=logits.shape)
     
     # ---------------------------
     # Step 7-9: 采样与长表构建
@@ -183,7 +214,7 @@ def simulate_LogisticNormal_hierarchical(
     df_long['cell_type'] = np.tile(cell_types, n_samples)
     df_long['count'] = counts.flatten()
     df_long['total_count'] = df_long.groupby('sample_id')['count'].transform('sum')
-    df_long['prop'] = df_long['count'] / (df_long['total_count'] + 1e-12)
+    df_long['prop'] = df_long['count'] / df_long['total_count']
     
     # 真实效应表 (此处可调用你原有的 build_true_effect_table)
     # 为简洁起见，假设逻辑同原代码
@@ -191,8 +222,20 @@ def simulate_LogisticNormal_hierarchical(
         cell_types, ref_disease, ref_tissue,
         disease_effects, tissue_effect_vec, inter_effects, other_tissue
     )
+    df_true_effect = attach_population_effects(
+        df_true_effect,
+        baseline_logits=baseline_mu,
+        cell_types=cell_types,
+        disease_effects=disease_effects,
+        tissue_effect=tissue_effect_vec,
+        interaction_effects=inter_effects,
+        population_null_tolerance=population_null_tolerance,
+        population_reference_cell_type=population_reference_cell_type,
+    )
     df_long = df_long.reset_index(drop=True)
-    df_true_refined = refine_ground_truth_by_observation(df_long, df_true_effect)
+    df_true_refined = refine_ground_truth_by_observation(
+        df_long, df_true_effect, injected_effect_scale="logit_clr_latent_effect"
+    )
     return df_long, df_true_refined
 
 @logged
@@ -256,8 +299,8 @@ def build_true_effect_table(cell_types, ref_disease, ref_tissue, disease_effects
             
             # 计算总效应
             total_effect = E_disease + E_tissue + E_interaction
-            # 只要三者有一个注入了，就是显著的（符合 Addition 语义）
-            is_truly_sig = (E_disease != 0) or (E_tissue != 0) or (E_interaction != 0)
+            # Addition truth follows the net contrast; exact cancellation is a null.
+            is_truly_sig = not np.isclose(total_effect, 0.0, atol=1e-12, rtol=0.0)
             
             true_effects.append({
                 'cell_type': ct_name,

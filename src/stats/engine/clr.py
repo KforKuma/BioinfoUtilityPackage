@@ -17,6 +17,7 @@ from src.stats.support import (
     parse_formula_columns,
     split_C_terms,
 )
+from src.stats.engine.lmm import run_LMM
 
 from src.utils.hier_logger import logged
 
@@ -90,6 +91,8 @@ def run_CLR_LMM(df_all: pd.DataFrame,
         cell_A = cell_type
         cell_type_label = cell_type
     
+    original_formula = formula.split("~", 1)[1].strip() if "~" in formula else formula
+
     # 公式合法性判断
     if "+" in formula:
         if main_variable is None:
@@ -139,41 +142,26 @@ def run_CLR_LMM(df_all: pd.DataFrame,
             clr_target = (clr[cell_A] - clr[cell_B]).reset_index()
             clr_target = clr_target.rename(columns={0: "clr_value"})
         
-        group = clr_target[group_label]
-        md = smf.mixedlm(formula, clr_target, groups=group)
-        mdf = md.fit(method="nm", maxiter=200, reml=use_reml)
-        
-        # 读取结果
-        pval = mdf.pvalues.min()
-        
-        # 储存结果
-        output = mdf.summary().tables
-        extra["mixedlm_summary"] = output[0]
-        extra["mixedlm_fixed_effect"] = output[1]
-        
-        contrast_table = extra["mixedlm_fixed_effect"].copy()
-        contrast_table = contrast_table[1:-1]
-        contrast_table["ref"], contrast_table["other"] = split_C_terms(pd.Series(contrast_table.index)).T.values
-        
-        contrast_table["P>|z|"] = contrast_table["P>|z|"].astype(float)
-        contrast_table["significant"] = (contrast_table["P>|z|"] < alpha).astype(str)
-        
-        contrast_table["Coef."] = contrast_table["Coef."].astype(float)
-        contrast_table["direction"] = contrast_table["Coef."].apply(lambda x: "ref_greater" if x < 0 else "other_greater")
-        
-        contrast_table = contrast_table[
-            ['ref', 'other', 'Coef.', 'Std.Err.', 'z', 'P>|z|', '[0.025', '0.975]', 'significant', 'direction']]
-        contrast_table = pd.DataFrame(contrast_table).set_index("other")
-        
-        if len(output) == 3:
-            extra["mixedlm_random_effect"] = output[2]
-                
-        return make_result(method="CLR_LMM",
-                           cell_type=cell_type_label,
-                           p_val=pval if pval is not None else np.nan,p_type='Minimal',
-                           contrast_table=contrast_table,
-                           extra=extra,
-                           alpha=alpha)
+        lmm_input = clr_target.rename(columns={"clr_value": "prop"}).copy()
+        lmm_input["cell_type"] = cell_type_label
+        result = run_LMM(
+            df_all=lmm_input,
+            cell_type=cell_type_label,
+            formula=original_formula,
+            main_variable=main_variable,
+            ref_label=ref_label,
+            group_label=group_label,
+            use_reml=False,
+            alpha=alpha,
+        )
+        result["method"] = "CLR_LMM"
+        result["extra"] = {
+            **result.get("extra", {}),
+            "transformation": "centered_log_ratio" if mode == "single" else "log_ratio",
+            "pseudocount": pseudocount,
+            "requested_use_reml": bool(use_reml),
+        }
+        return result
     
     except Exception as e:
         extra["error"] = str(e)
@@ -181,10 +169,12 @@ def run_CLR_LMM(df_all: pd.DataFrame,
         return make_result(method="CLR_LMM",
                            cell_type=cell_type_label,
                            p_val=np.nan,
-                           p_type='Minimal',
+                           p_type='unavailable',
                            contrast_table=None,
-                           extra=extra,
-                           alpha=alpha)
+                           extra={**extra, "failure_reason": "model_fit_failed"},
+                           alpha=alpha,
+                           contrast_status="unavailable",
+                           failure_reason="model_fit_failed")
 
 @logged
 def run_CLR_LMM_with_LFC(

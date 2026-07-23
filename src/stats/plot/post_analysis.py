@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 from sklearn.covariance import GraphicalLassoCV
 
 from src.core.plot.basics import matplotlib_savefig
+from src.stats.validation import parse_boolean_value
 
 def plot_glasso_partial_corr(
         beta_matrix,
@@ -621,7 +622,7 @@ def plot_ratio_scatter(
             if row["ref"] not in xpos:
                 continue
             
-            if str(row["significant"]) == "False":
+            if parse_boolean_value(row["significant"], errors="coerce") is not True:
                 continue
             
             x1 = xpos[row["ref"]]

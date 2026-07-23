@@ -5,20 +5,62 @@ from tqdm import tqdm
 
 import inspect
 import logging
+import warnings
 
 import numpy as np
 import pandas as pd
 
 from src.stats.support import *
+from src.stats.benchmark_metrics import calculate_binary_metrics, estimate_fdr_from_replicates
+from src.stats.validation import parse_boolean_series, parse_boolean_value
 from src.utils.hier_logger import logged
 
 logger = logging.getLogger(__name__)
 
 
+_TRUTH_SOURCE_COLUMNS = {
+    "injected": "Is_Injected_Nonzero",
+    "population": "Is_Population_Nonzero",
+    "observed": "Is_Observed_Detectable",
+}
+
+
+def _truth_column_for_source(frame: pd.DataFrame, truth_source: str) -> str:
+    if truth_source not in _TRUTH_SOURCE_COLUMNS:
+        raise ValueError(
+            "`truth_source` must be one of 'injected', 'population', or 'observed'."
+        )
+    column = _TRUTH_SOURCE_COLUMNS[truth_source]
+    if column not in frame.columns:
+        raise ValueError(f"Truth source {truth_source!r} requires column {column!r}.")
+    return column
+
+
+def _apply_fixed_nominal_decision(frame: pd.DataFrame, alpha: float = 0.05) -> pd.DataFrame:
+    """Apply a fixed, predeclared threshold without data-adaptive shrinkage."""
+    result = frame.copy()
+    existing = (
+        parse_boolean_series(result["Est_Significant"])
+        if "Est_Significant" in result.columns
+        else pd.Series(pd.NA, index=result.index, dtype="boolean")
+    )
+    if "Est_PValue" in result.columns:
+        pvalues = pd.to_numeric(result["Est_PValue"], errors="coerce")
+        finite = pvalues.notna() & np.isfinite(pvalues)
+        existing.loc[finite] = pvalues.loc[finite] <= alpha
+    result["Est_Significant"] = existing
+    result["nominal_alpha"] = alpha
+    result["adaptive_alpha_enabled"] = False
+    return result
+
+
 
 def _calculate_performance_metrics(df_all_sims: pd.DataFrame,
-                                   alpha: float = 0.05) -> pd.DataFrame:
-    """计算模拟评估结果的 Power 和 FPR。
+                                   alpha: float = 0.05,
+                                   truth_col: str = "True_Significant",
+                                   decision_col: str | None = None,
+                                   replicate_col: str = "simulation_replicate") -> pd.DataFrame:
+    """计算定义正确的 Power/TPR、FPR、FDP、Precision 和 Specificity。
 
     Args:
         df_all_sims: 单次或多次模拟的估计结果表，至少包含 ``contrast_factor``、
@@ -26,56 +68,72 @@ def _calculate_performance_metrics(df_all_sims: pd.DataFrame,
         alpha: 当 ``Est_Significant`` 不存在时，用该阈值从 p 值重新判断显著性。
 
     Returns:
-        按 ``contrast_factor`` 汇总的性能表，包含 ``TP``、``FP``、``FN``、
-        ``Power`` 和 ``FPR``。
+        按 ``contrast_factor`` 汇总的性能表。missing/unavailable decision 不会被
+        当作阴性；零分母指标返回 NaN 并附带 ``*_Reason``。
 
     Example:
         >>> metrics = _calculate_performance_metrics(results_df, alpha=0.05)
         >>> metrics[["contrast_factor", "Power", "FPR"]]
         # 用于比较不同统计方法在模拟真值下的表现。
     """
+    output_columns = [
+        "contrast_factor", "TP", "FP", "TN", "FN", "N_Evaluated", "N_Excluded",
+        "Power", "TPR", "FPR", "FDP", "FDR_Estimate", "Precision", "Specificity",
+        "Nominal_Alpha", "Empirical_Type_I_Error",
+    ]
     if df_all_sims.empty:
-        return pd.DataFrame(columns=["contrast_factor", "TP", "FP", "FN", "Power", "FPR"])
+        return pd.DataFrame(columns=output_columns)
+    if "contrast_factor" not in df_all_sims.columns:
+        raise ValueError("Missing required column: 'contrast_factor'.")
+    if truth_col not in df_all_sims.columns:
+        raise ValueError(f"Missing required truth column: {truth_col!r}.")
 
-    # --- 新增：强制类型转换，确保是布尔型 ---
-    for col in ['True_Significant', 'Est_Significant', 'Est_PValue']:
-        if col in df_all_sims.columns:
-            if col == 'Est_PValue':
-                df_all_sims[col] = pd.to_numeric(df_all_sims[col], errors='coerce')
-            else:
-                # 处理可能存在的字符串 "True"/"False"
-                df_all_sims[col] = df_all_sims[col].map({'True': True, 'False': False, True: True, False: False})
-                # 填充 NaN 并强制转为 bool
-                df_all_sims[col] = df_all_sims[col].fillna(False).astype(bool)
-    
-    # 如果 Est_Significant 已经存在（由包装函数 _collect_simulation_results 计算好了），则直接使用它
-    if 'Est_Significant' in df_all_sims.columns:
-        df_all_sims['Est_Significant_Alpha'] = df_all_sims['Est_Significant']
+    frame = df_all_sims.copy()
+    frame[truth_col] = parse_boolean_series(frame[truth_col])
+    if decision_col is None:
+        decision_col = "primary_decision" if "primary_decision" in frame.columns else "Est_Significant"
+    if decision_col in frame.columns:
+        frame["_benchmark_decision"] = parse_boolean_series(frame[decision_col])
+    elif "Est_PValue" in frame.columns:
+        pvalues = pd.to_numeric(frame["Est_PValue"], errors="coerce")
+        frame["_benchmark_decision"] = pd.Series(pd.NA, index=frame.index, dtype="boolean")
+        finite = pvalues.notna() & np.isfinite(pvalues)
+        frame.loc[finite, "_benchmark_decision"] = pvalues.loc[finite] <= alpha
     else:
-        # 否则才根据 p-value 重新计算
-        df_all_sims['Est_Significant_Alpha'] = (df_all_sims['Est_PValue'] <= alpha)
-    
-    # 分类为 TP, FP, TN, FN
-    # TP = (df_all_sims['True_Significant']) & (df_all_sims['Est_Significant_Alpha']).sum()
-    # FP = (~df_all_sims['True_Significant']) & (df_all_sims['Est_Significant_Alpha']).sum()
-    # TN = (~df_all_sims['True_Significant']) & (~df_all
-    # _sims['Est_Significant_Alpha']).sum()
-    # FN = (df_all_sims['True_Significant']) & (~df_all_sims['Est_Significant_Alpha']).sum()
-    
-    # 按对比因素计算指标
-    metrics = df_all_sims.groupby('contrast_factor').apply(lambda g: pd.Series({
-        'TP': ((g['True_Significant']) & (g['Est_Significant_Alpha'])).sum(),
-        'FP': ((~g['True_Significant']) & (g['Est_Significant_Alpha'])).sum(),
-        'FN': ((g['True_Significant']) & (~g['Est_Significant_Alpha'])).sum(),
-    })).reset_index()
-    
-    metrics['Power'] = metrics['TP'] / (metrics['TP'] + metrics['FN'])
-    metrics['FPR'] = metrics['FP'] / (metrics['TP'] + metrics['FP'])
-    
-    # 处理除以零的情况
-    metrics['Power'] = metrics['Power'].fillna(0)
-    metrics['FPR'] = metrics['FPR'].fillna(0)
-    
+        raise ValueError(f"Missing decision column {decision_col!r} and fallback 'Est_PValue'.")
+
+    if {"is_available", "is_valid"}.issubset(frame.columns):
+        available = parse_boolean_series(frame["is_available"])
+        valid = parse_boolean_series(frame["is_valid"])
+        frame.loc[~(available.fillna(False) & valid.fillna(False)), "_benchmark_decision"] = pd.NA
+
+    rows = []
+    for contrast_factor, group in frame.groupby("contrast_factor", dropna=False, sort=False):
+        row = {"contrast_factor": contrast_factor}
+        row.update(calculate_binary_metrics(group[truth_col], group["_benchmark_decision"]))
+        row["Nominal_Alpha"] = alpha
+        row["Empirical_Type_I_Error"] = row["FPR"]
+        rows.append(row)
+    metrics = pd.DataFrame(rows)
+
+    if replicate_col in frame.columns:
+        fdr = estimate_fdr_from_replicates(
+            frame,
+            truth_col=truth_col,
+            decision_col="_benchmark_decision",
+            replicate_col=replicate_col,
+            group_cols=("contrast_factor",),
+        )
+        metrics = metrics.merge(fdr, on="contrast_factor", how="left")
+        if "FDR_Reason" not in metrics.columns:
+            metrics["FDR_Reason"] = np.where(
+                metrics["N_FDP_Replicates"].fillna(0).gt(0), None, "no_finite_replicate_fdp"
+            )
+    else:
+        metrics["FDR_Estimate"] = np.nan
+        metrics["N_FDP_Replicates"] = 0
+        metrics["FDR_Reason"] = "replicate_id_unavailable"
+
     return metrics
 
 
@@ -84,6 +142,7 @@ def _collect_simulation_results(
         df_true_effect: pd.DataFrame,
         run_stats_func,  # 传入的统计运行函数，例如 run_Dirichlet_Wald
         formula: str,
+        truth_source: str = "injected",
         **kwargs
 ) -> pd.DataFrame:
     """收集单个模拟数据集的统计结果并合并 ground truth。
@@ -109,6 +168,8 @@ def _collect_simulation_results(
         >>> results_df[["True_Significant", "Est_PValue", "Est_Significant"]].head()
     """
     
+    truth_column = _truth_column_for_source(df_true_effect, truth_source)
+
     # 获取唯一的细胞类型列表
     cell_types = df_sim['cell_type'].unique().tolist()
     
@@ -159,7 +220,11 @@ def _collect_simulation_results(
                 'contrast_ref': true_row['contrast_ref'],
                 'True_Effect': true_row['True_Effect'],
                 'True_Direction': true_row['True_Direction'],
-                'True_Significant': true_row['Is_Detectable_True'],
+                'True_Significant': true_row[truth_column],
+                'Truth_Source': truth_source,
+                'Injected_Effect': true_row.get('Injected_Effect', np.nan),
+                'Population_Effect': true_row.get('Population_Effect', np.nan),
+                'Observed_Effect': true_row.get('Observed_Effect', np.nan),
                 **est_results
             }
             all_results.append(result_record)
@@ -186,36 +251,35 @@ def _extract_contrast_results(contrast_table: pd.DataFrame,
         >>> est = _extract_contrast_results(res["contrast_table"], "CD")
         >>> est["Est_PValue"]
     """
+    unavailable = {
+        'Est_Coef': np.nan,
+        'Est_PValue': np.nan,
+        'Est_Direction': 'None',
+        'Est_Significant': pd.NA,
+        'contrast_status': 'unavailable',
+        'failure_reason': 'unsupported_contrast',
+    }
     if contrast_table is None or contrast_table.empty:
-        return {
-            'Est_Coef': np.nan,
-            'Est_PValue': np.nan,
-            'Est_Direction': 'None',
-            'Est_Significant': False
-        }
+        return unavailable.copy()
     
     # 1. 重置索引以便按列名访问 'other'
     df_reset = contrast_table.reset_index()
     
     # 2. 使用布尔索引查找目标行
-    result_rows = df_reset[df_reset['other'] == target_other]
+    if 'other' not in df_reset.columns:
+        return unavailable.copy()
+    result_rows = df_reset[df_reset['other'].astype(str) == str(target_other)]
     
     if result_rows.empty:
-        # 如果找不到匹配的对比，返回默认值
-        return {
-            'Est_Coef': np.nan,
-            'Est_PValue': np.nan,
-            'Est_Direction': 'None',
-            'Est_Significant': False
-        }
+        return unavailable.copy()
     
     # 3. 提取结果 (只取第一行匹配项)
     result_row = result_rows.iloc[0]
     
     # 4. 确定 P 值列名 (Fallback 逻辑)
     pval_colname = None
-    # 定义优先级：P>|z| > p_adj > pval
-    pval_candidates = ['P>|z|', 'p_adj', 'pval']
+    # 优先使用已经声明 family 的 adjusted p，随后才是 raw p。
+    pval_candidates = ['pvalue_adjusted', 'p_adj', 'pvalue_raw', 'P>|z|', 'pval']
     
     # 检查哪些候选列存在于当前的 DataFrame 中
     existing_cols = result_rows.columns  # 在 DataFrame (result_rows) 上检查 .columns 是正确的
@@ -226,16 +290,16 @@ def _extract_contrast_results(contrast_table: pd.DataFrame,
             break
     
     # 5. 提取 P 值和显著性
-    est_pval = result_row[pval_colname] if pval_colname else np.nan
+    est_pval = pd.to_numeric(pd.Series([result_row[pval_colname]]), errors='coerce').iloc[0] if pval_colname else np.nan
     
     # 由于您的统计输出中已经有了 'significant' 列，我们优先使用它。
     # 如果没有 'significant' 列，则基于 P 值和 alpha 重新计算。
     if 'significant' in existing_cols:
-        est_significant = result_row['significant']
-    elif not np.isnan(est_pval):
+        est_significant = parse_boolean_value(result_row['significant'])
+    elif pd.notna(est_pval) and np.isfinite(est_pval):
         est_significant = (est_pval <= alpha)
     else:
-        est_significant = False
+        est_significant = pd.NA
     
     # Coef 列和 direction 列通常存在
     est_coef = next(
@@ -249,7 +313,9 @@ def _extract_contrast_results(contrast_table: pd.DataFrame,
         'Est_Coef': est_coef,
         'Est_PValue': est_pval,
         'Est_Direction': est_direction,
-        'Est_Significant': est_significant
+        'Est_Significant': est_significant,
+        'contrast_status': result_row.get('contrast_status', 'success'),
+        'failure_reason': result_row.get('failure_reason', None),
     }
 
 
@@ -261,65 +327,32 @@ def _extract_addition_results(contrast_table, group_name):
         group_name: 组合标签，例如 ``"UC x if"``。
 
     Returns:
-        估计结果字典。如果无法匹配，则返回非显著默认值。
+        估计结果字典。只接受模型已正式计算的组合/interaction 行；无法匹配时
+        返回 unavailable，不从主效应 p 值拼接近似结果。
 
     Example:
         >>> _extract_addition_results(contrast_table, "UC x if")
-        # 若没有组合项，会尝试把 disease 和 tissue 主效应相加。
+        # 若没有正式组合项，返回 unavailable。
     """
+    unavailable = {
+        'Est_Coef': np.nan,
+        'Est_PValue': np.nan,
+        'Est_Significant': pd.NA,
+        'Est_Direction': 'None',
+        'contrast_status': 'unavailable',
+        'failure_reason': 'unsupported_contrast',
+    }
     if contrast_table is None or contrast_table.empty:
-        return {'Est_Coef': 0.0, 'Est_PValue': 1.0, 'Est_Significant': False, 'Est_Direction': 'None'}
-    # 尝试直接匹配（如果你的统计方法已经算好了组合对比）
-    if group_name in contrast_table.index:
-        res = contrast_table.loc[group_name]
-        return {
-            'Est_Coef': res.get('Coef.', res.get('Coef', 0.0)),
-            'Est_PValue': res.get('P>|z|', 1.0),
-            'Est_Significant': res.get('significant', False),
-            'Est_Direction': res.get('direction', 'None')
-        }
-    
-    # 【备选逻辑】如果 contrast_table 是解耦的，手动进行线性组合（Linear Combination）
-    # 注意：这需要解析 'UC x if' 为 ['UC', 'if']
+        return unavailable
+
+    direct = _extract_contrast_results(contrast_table, group_name)
+    if direct['contrast_status'] == 'success':
+        return direct
+
     parts = group_name.split(' x ')
-    if len(parts) == 2:
-        d_part, t_part = parts[0], parts[1]
-        
-        # 只有当两个主成分都在表中时才进行估算
-        if d_part in contrast_table.index and t_part in contrast_table.index:
-            def get_coef(df, row):
-                coef_col = next(c for c in df.columns if c.lower().replace('.', '') == 'coef')
-                return df.loc[row, coef_col]
-            
-            c1 = get_coef(contrast_table, d_part)
-            c2 = get_coef(contrast_table, t_part)
-            # 粗略估计组合效应（不考虑交互项系数，或假设交互项为0）
-            combined_coef = c1 + c2
-            # P值在这里很难手动合并，通常取最不显著的一个（保守做法）
-            pval_candidates = ['P>|z|', 'p_adj', 'pval']
-            pval_colname = None
-            for col in pval_candidates:
-                if col in contrast_table.columns:
-                    pval_colname = col
-                    break
-            if pval_colname is None:
-                return {
-                    'Est_Coef': combined_coef,
-                    'Est_PValue': np.nan,
-                    'Est_Significant': False,
-                    'Est_Direction': 'other_greater' if combined_coef > 0 else 'ref_greater'
-                }
-            combined_p = min(contrast_table.loc[d_part, pval_colname],
-                             contrast_table.loc[t_part, pval_colname])
-            
-            return {
-                'Est_Coef': combined_coef,
-                'Est_PValue': combined_p,
-                'Est_Significant': combined_p < 0.05,
-                'Est_Direction': 'other_greater' if combined_coef > 0 else 'ref_greater'
-            }
-    
-    return {'Est_Coef': 0.0, 'Est_PValue': 1.0, 'Est_Significant': False, 'Est_Direction': 'None'}
+    if len(parts) == 2 and all(part in contrast_table.index for part in parts):
+        unavailable['failure_reason'] = 'covariance_unavailable'
+    return unavailable
 
 @logged
 def evaluate_effect_size_scaling(
@@ -328,6 +361,7 @@ def evaluate_effect_size_scaling(
         run_stats_func=None,
         formula="disease + C(tissue, Treatment(reference='nif'))",
         base_params=None,
+        truth_source="injected",
         **kwargs
 ):
     """按 effect size 缩放因子评估单个统计方法。
@@ -354,6 +388,11 @@ def evaluate_effect_size_scaling(
     """
     
     
+    warnings.warn(
+        "evaluate_effect_size_scaling is deprecated; use run_abundance_pipeline and evaluate_contrasts.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     # 1. 初始化模拟器和基础参数
     if sim_func is None:
         raise ValueError("Please provide a simulation function via `sim_func`.")
@@ -404,20 +443,13 @@ def evaluate_effect_size_scaling(
             df_true_effect=df_true_effect,
             run_stats_func=run_stats_func,
             formula=formula,
+            truth_source=truth_source,
             **stats_filtered_kwargs
         )
         
-        # 收缩
         if results_df.empty or "Est_PValue" not in results_df.columns:
             continue
-        sig_ratio = sum(results_df["Est_PValue"] < 0.05) / max(results_df.shape[0], 1)
-        if sig_ratio < 0.5:
-            alpha_adj = 0.05
-        else:
-            alpha_adj = 0.05 * (0.5 / sig_ratio)  # 自动收缩 alpha
-        
-        results_df["Est_Significant"] = (results_df["Est_Significant"].astype(bool) &
-                                         (results_df["Est_PValue"] < alpha_adj))
+        results_df = _apply_fixed_nominal_decision(results_df, alpha=0.05)
         
         # 5. 计算性能指标
         metrics = _calculate_performance_metrics(results_df, alpha=0.05)
@@ -439,6 +471,7 @@ def evaluate_effect_size_scaling_with_raw(
         sim_params,
         stats_params,
         formula,
+        truth_source="injected",
 ):
     """按 effect size 缩放因子评估统计方法并保留原始结果。
 
@@ -465,6 +498,11 @@ def evaluate_effect_size_scaling_with_raw(
         ... )
     """
     
+    warnings.warn(
+        "evaluate_effect_size_scaling_with_raw is deprecated; use the canonical pipeline.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     all_summary_metrics = []
     all_raw_results = []
     
@@ -491,22 +529,15 @@ def evaluate_effect_size_scaling_with_raw(
             df_true_effect=df_true_effect,
             run_stats_func=run_stats_func,
             formula=formula,
+            truth_source=truth_source,
             **stats_params
         )
         
         results_df["scale_factor"] = k
         
-        # 收缩
         if results_df.empty or "Est_PValue" not in results_df.columns:
             continue
-        sig_ratio = sum(results_df["Est_PValue"] < 0.05) / max(results_df.shape[0], 1)
-        if sig_ratio < 0.5:
-            alpha_adj = 0.05
-        else:
-            alpha_adj = 0.05 * (0.5 / sig_ratio)  # 自动收缩 alpha
-        
-        results_df["Est_Significant"] = (results_df["Est_Significant"].astype(bool) &
-                                         (results_df["Est_PValue"] < alpha_adj))
+        results_df = _apply_fixed_nominal_decision(results_df, alpha=0.05)
         
         
         all_raw_results.append(results_df)
@@ -529,6 +560,7 @@ def _collect_simulation_meta_results(
         df_true_effect: pd.DataFrame,
         run_stats_func,
         formula: str,
+        truth_source: str = "injected",
         **kwargs
 ):
     """收集 meta engine 及其子方法的模拟估计结果。
@@ -553,6 +585,7 @@ def _collect_simulation_meta_results(
         ... )
         >>> storage["meta"].head()
     """
+    truth_column = _truth_column_for_source(df_true_effect, truth_source)
     cell_types = df_sim['cell_type'].unique().tolist()
     storage = {'meta': [], 'dmw': [], 'clr': [], 'deseq2': []}
     
@@ -587,7 +620,9 @@ def _collect_simulation_meta_results(
                 if current_table is None or (isinstance(current_table, pd.DataFrame) and current_table.empty):
                     est_results = {
                         'Est_Coef': np.nan, 'Est_PValue': np.nan,
-                        'Est_Direction': 'None', 'Est_Significant': False
+                        'Est_Direction': 'None', 'Est_Significant': pd.NA,
+                        'contrast_status': 'unavailable',
+                        'failure_reason': 'native_output_missing',
                     }
                 else:
                     # --- 修正点 2: 严格使用 current_table 提取各方法独立的结果 ---
@@ -605,7 +640,11 @@ def _collect_simulation_meta_results(
                     'contrast_ref': true_row['contrast_ref'],
                     'True_Effect': true_row['True_Effect'],
                     'True_Direction': true_row['True_Direction'],
-                    'True_Significant': true_row.get('Is_Detectable_True', true_row['True_Significant']),
+                    'True_Significant': true_row[truth_column],
+                    'Truth_Source': truth_source,
+                    'Injected_Effect': true_row.get('Injected_Effect', np.nan),
+                    'Population_Effect': true_row.get('Population_Effect', np.nan),
+                    'Observed_Effect': true_row.get('Observed_Effect', np.nan),
                     **est_results
                 }
                 storage[key].append(record)
@@ -625,6 +664,7 @@ def evaluate_effect_size_meta_scaling(
         run_meta_func=None,
         formula="disease + C(tissue, Treatment(reference='nif'))",
         base_params=None,
+        truth_source="injected",
         **kwargs
 ):
     """按 effect size 缩放因子评估 meta engine 及其子方法。
@@ -651,6 +691,11 @@ def evaluate_effect_size_meta_scaling(
         >>> out["meta"].head()
     """
     
+    warnings.warn(
+        "evaluate_effect_size_meta_scaling is deprecated; use the canonical pipeline.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     # 1. 初始化模拟器和基础参数
     if sim_func is None:
         raise ValueError("Please provide a simulation function via `sim_func`.")
@@ -706,19 +751,13 @@ def evaluate_effect_size_meta_scaling(
             df_true_effect=df_true_effect,
             run_stats_func=run_meta_func,
             formula=formula,
+            truth_source=truth_source,
             **stats_filtered_kwargs
         )
         for key, value in results_df_dict.items():
             if value.empty:
                 continue
-            sig_ratio = sum(results_df_dict[key]["Est_PValue"] < 0.05) / max(results_df_dict[key].shape[0], 1)
-            if sig_ratio < 0.4:
-                alpha_adj = 0.05
-            else:
-                alpha_adj = 0.05 * (0.25 / sig_ratio)**2 # 自动收缩 alpha
-                
-            results_df_dict[key]["Est_Significant"] = (results_df_dict[key]["Est_Significant"].astype(bool) &
-                                                     (results_df_dict[key]["Est_PValue"] < alpha_adj))
+            results_df_dict[key] = _apply_fixed_nominal_decision(value, alpha=0.05)
             
         # 5. 计算性能指标
         for key in results_df_dict.keys():

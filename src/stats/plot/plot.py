@@ -13,6 +13,7 @@ from scipy.spatial import ConvexHull
 from scipy.stats import f_oneway
 
 from src.core.plot.basics import matplotlib_savefig
+from src.stats.validation import parse_boolean_series, parse_boolean_value
 
 import logging
 from src.utils.hier_logger import logged
@@ -179,7 +180,8 @@ def plot_better_residual(df, tukey_df, group_key, subset, save_addr):
     ax.set_xlabel("Disease Group")
     
     # 过滤出显著的比较
-    significant = tukey_df[tukey_df["reject"] == "True"].reset_index()
+    reject = parse_boolean_series(tukey_df["reject"]).fillna(False)
+    significant = tukey_df[reject].reset_index()
     
     # 连线高度
     y_max = grouped["residual"].max()
@@ -1100,7 +1102,7 @@ def plot_ratio_scatter(
                 # print(plot_df[disease_col][0:10])
                 continue
             
-            if row["significant"] == 'False':
+            if parse_boolean_value(row["significant"], errors="coerce") is not True:
                 print("[plot_ratio_scatter] Warning! Non-significant contrast skipped.")
                 continue
             

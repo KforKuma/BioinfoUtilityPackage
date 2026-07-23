@@ -3,13 +3,22 @@ import numpy as np
 
 from src.stats.engine import *
 from src.stats.support import *
+from src.stats.validation import parse_boolean_series
 
 import logging
+import warnings
 from src.utils.hier_logger import logged
 logger = logging.getLogger(__name__)
 
 @logged
-def collect_real_data_results(count_df, stats_func, **kwargs):
+def collect_real_data_results(
+    count_df,
+    stats_func,
+    *,
+    nominal_alpha: float = 0.05,
+    adaptive_alpha_enabled: bool = False,
+    **kwargs,
+):
     """对真实数据中所有 cell subtype/subpopulation 运行统计方法。
 
     Args:
@@ -29,10 +38,19 @@ def collect_real_data_results(count_df, stats_func, **kwargs):
         ... )
         >>> df_res[["cell_type", "Coef.", "P>|z|", "significant"]].head()
     """
+    warnings.warn(
+        "collect_real_data_results is deprecated; use run_abundance_pipeline in real_data mode.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     if "cell_type" not in count_df.columns:
         raise ValueError("Missing required column: 'cell_type'.")
     if stats_func is None:
         raise ValueError("Please provide a stats function via `stats_func`.")
+    if adaptive_alpha_enabled:
+        raise ValueError(
+            "Adaptive alpha is exploratory_only and is disabled in the formal result path."
+        )
 
     all_summary_list = []
     
@@ -55,17 +73,31 @@ def collect_real_data_results(count_df, stats_func, **kwargs):
             # 2. 提取 contrast 表（通常包含所有变量的回归系数）
             # 包含：Term (variable), Coefficient (LFC), p-value, SE 等
             if stats_res.get("contrast_table") is None or stats_res["contrast_table"].empty:
+                all_summary_list.append(pd.DataFrame([{
+                    "cell_type": ct_name,
+                    "significant": pd.NA,
+                    "contrast_status": stats_res.get("contrast_status", "unavailable"),
+                    "failure_reason": stats_res.get("failure_reason") or "native_output_missing",
+                }]))
                 continue
             contrast_table = stats_res["contrast_table"].copy()
             
             # 3. 补充元信息以便后续汇总
             contrast_table['cell_type'] = ct_name
+            if 'contrast_status' not in contrast_table.columns:
+                contrast_table['contrast_status'] = 'success'
             
             all_summary_list.append(contrast_table)
         
         except Exception as e:
             print(f"[collect_real_data_results] Warning! Stats failed for cell_type '{ct_name}'. Error: {e}")
-            continue
+            all_summary_list.append(pd.DataFrame([{
+                "cell_type": ct_name,
+                "significant": pd.NA,
+                "contrast_status": "failed",
+                "failure_reason": type(e).__name__,
+                "error_message": str(e),
+            }]))
     
     if not all_summary_list:
         return pd.DataFrame()
@@ -73,25 +105,29 @@ def collect_real_data_results(count_df, stats_func, **kwargs):
     # 合并所有细胞类型的结果
     df_results = pd.concat(all_summary_list, ignore_index=False)
     
-    # 增加一个 posterior p 值校正逻辑
-    pval_candidates = ['P>|z|', 'p_adj', 'pval']
+    # 只使用固定阈值；adjusted p 的优先级高于 raw p。
+    pval_candidates = ['pvalue_adjusted', 'p_adj', 'pvalue_raw', 'P>|z|', 'pval']
     existing_cols = df_results.columns  # 在 DataFrame (result_rows) 上检查 .columns 是正确的
     pval_colname = None
     for col in pval_candidates:
         if col in existing_cols:
             pval_colname = col
             break
-    if pval_colname is None:
-        raise ValueError("No p-value column detected in the contrast table.")
-    
-    sig_ratio = sum(df_results[pval_colname] < 0.05) / df_results.shape[0]
-    if sig_ratio < 0.4:
-        alpha_adj = 0.05
+    if "significant" in df_results.columns:
+        df_results["significant"] = parse_boolean_series(df_results["significant"])
     else:
-        alpha_adj = 0.05 * (0.25 / sig_ratio) ** 2  # 自动收缩 alpha
-    
-    df_results["significant"] = (df_results["significant"].astype(bool) &
-                                     (df_results[pval_colname] < alpha_adj))
+        df_results["significant"] = pd.Series(pd.NA, index=df_results.index, dtype="boolean")
+    if pval_colname is not None:
+        pvalues = pd.to_numeric(df_results[pval_colname], errors="coerce")
+        finite = pvalues.notna() & np.isfinite(pvalues)
+        missing_decision = df_results["significant"].isna() & finite
+        df_results.loc[missing_decision, "significant"] = pvalues.loc[missing_decision] < nominal_alpha
+
+    unavailable = df_results["contrast_status"].ne("success") if "contrast_status" in df_results.columns else False
+    if not isinstance(unavailable, bool):
+        df_results.loc[unavailable, "significant"] = pd.NA
+    df_results["nominal_alpha"] = nominal_alpha
+    df_results["adaptive_alpha_enabled"] = False
     
     
     # 整理列顺序，方便阅读

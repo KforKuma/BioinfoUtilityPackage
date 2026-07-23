@@ -13,7 +13,8 @@ from scipy.stats import (
 
 
 from src.utils.hier_logger import logged
-from src.stats.simulation.truth_refine import refine_ground_truth_by_observation
+from src.stats.simulation.design import build_simulation_metadata, validate_factor_levels
+from src.stats.simulation.truth_refine import attach_population_effects, refine_ground_truth_by_observation
 logger = logging.getLogger(__name__)
 
 
@@ -37,6 +38,10 @@ def simulate_DM_data(
         tissue_levels: Tuple[str, str] = ("nif", "if"),
         total_count_mean=2e4,total_count_sd=5e2,min_count=1000,
         donor_noise_sd: float = 0.3,
+        assignment_strategy: str = "balanced",
+        protected_cell_types: Sequence[str] = (),
+        population_null_tolerance: float = 1e-12,
+        population_reference_cell_type: str | None = None,
         random_state: int = 1234
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """生成 Dirichlet-Multinomial 组成丰度模拟数据。
@@ -61,6 +66,12 @@ def simulate_DM_data(
         total_count_sd: 每个 sample 的测序深度标准差。
         min_count: 每个 sample 的最小测序深度。
         donor_noise_sd: donor 级别 alpha 扰动强度。
+        assignment_strategy: ``balanced`` 为默认的分层随机平衡设计；``random``
+            保留历史独立随机分配行为。
+        protected_cell_types: 不得承载 latent injection 的预注册 cell type，例如
+            reference cell type。
+        population_null_tolerance: 判定精确 population effect 数值零的显式容差。
+        population_reference_cell_type: population log-ratio estimand 的预注册 reference。
         random_state: 随机种子。
 
     Returns:
@@ -83,17 +94,35 @@ def simulate_DM_data(
         >>> df_truth.query("True_Significant").head()
         # 用于评估模拟数据中被注入且可观察到的真实差异。
     """
-    if n_donors <= 0 or n_samples_per_donor <= 0 or n_celltypes <= 1:
-        raise ValueError("`n_donors`, `n_samples_per_donor`, and `n_celltypes` must be positive; `n_celltypes` must be greater than 1.")
-    if len(disease_levels) < 2:
-        raise ValueError("`disease_levels` must contain at least two levels.")
-    if len(tissue_levels) < 2:
-        raise ValueError("`tissue_levels` must contain at least two levels.")
+    if not isinstance(n_celltypes, int) or isinstance(n_celltypes, bool) or n_celltypes <= 1:
+        raise ValueError("`n_celltypes` must be an integer greater than 1.")
+    disease_levels, tissue_levels = validate_factor_levels(disease_levels, tissue_levels)
+    numeric_parameters = np.asarray([
+        baseline_alpha_scale, disease_effect_size, tissue_effect_size,
+        interaction_effect_size, inflamed_cell_frac, sampling_bias_strength,
+        total_count_mean, total_count_sd, min_count, donor_noise_sd,
+        population_null_tolerance,
+    ], dtype=float)
+    if not np.isfinite(numeric_parameters).all():
+        raise ValueError("Simulation numeric parameters must be finite.")
     if not 0 <= inflamed_cell_frac <= 1:
         raise ValueError("`inflamed_cell_frac` must be between 0 and 1.")
+    if baseline_alpha_scale <= 0:
+        raise ValueError("`baseline_alpha_scale` must be greater than 0.")
+    if min(disease_effect_size, tissue_effect_size, interaction_effect_size) < 0:
+        raise ValueError("Effect-size parameters are non-negative magnitudes.")
+    if min(sampling_bias_strength, donor_noise_sd, total_count_sd) < 0:
+        raise ValueError("Noise and sampling-bias scale parameters must be non-negative.")
+    if total_count_mean <= 0 or min_count <= 0:
+        raise ValueError("`total_count_mean` and `min_count` must be greater than 0.")
 
     rng = np.random.default_rng(random_state)
     cell_type_names = [f"CT{i + 1}" for i in range(n_celltypes)]
+    if (
+        population_reference_cell_type is not None
+        and str(population_reference_cell_type) not in set(map(str, protected_cell_types))
+    ):
+        raise ValueError("The population reference cell type must also be protected from injection.")
     
     # 1. Baseline alpha
     baseline = rng.uniform(0.5, 2.0, n_celltypes)
@@ -103,7 +132,7 @@ def simulate_DM_data(
     disease_main_effects_dict, tissue_effect_vec, interaction_effects_dict, df_true_effect = build_DM_effects_with_main_effect(
         cell_type_names, disease_levels, tissue_levels,
         disease_effect_size, tissue_effect_size, interaction_effect_size,
-        inflamed_cell_frac, rng
+        inflamed_cell_frac, rng, protected_cell_types=protected_cell_types
     )
     
     # 2. 预准备元数据和采样 (为了提速，先生成所有参数)
@@ -116,48 +145,38 @@ def simulate_DM_data(
         latent_axis = rng.normal(0, 1, n_celltypes)
         latent_axis /= np.linalg.norm(latent_axis)
     
-    meta_records = []
+    df_meta = build_simulation_metadata(
+        n_donors=n_donors,
+        n_samples_per_donor=n_samples_per_donor,
+        disease_levels=disease_levels,
+        tissue_levels=tissue_levels,
+        rng=rng,
+        assignment_strategy=assignment_strategy,
+    )
+    donor_alpha = {
+        donor: baseline * np.exp(rng.normal(0, donor_noise_sd, n_celltypes))
+        for donor in df_meta["donor_id"].unique()
+    }
     counts_list = []
-    
-    for d_idx in range(n_donors):
-        donor = f"D{d_idx + 1}"
-        disease = rng.choice(disease_levels)
-        # Donor 级别的噪声
-        alpha_d = baseline * np.exp(rng.normal(0, donor_noise_sd, n_celltypes))
-        
-        for s_idx in range(n_samples_per_donor):
-            tissue = rng.choice(tissue_levels)
-            alpha = alpha_d.copy()
-            
-            # 应用效应
-            if disease != ref_disease:
-                alpha *= np.exp(disease_main_effects_dict[disease])
-            if tissue != ref_tissue:
-                alpha *= np.exp(tissue_effect_vec)
-                if disease != ref_disease:
-                    alpha *= np.exp(interaction_effects_dict[disease])
-            
-            # 采样偏差
-            if sampling_bias_strength > 0:
-                alpha *= np.exp(rng.normal(0, sampling_bias_strength) * latent_axis)
-            
-            alpha = np.maximum(alpha, 1e-6)
-            
-            # multinomial 的 n 必须是整数；显式 round/int 便于不同 numpy 版本兼容。
-            N = int(max(round(rng.normal(total_count_mean, total_count_sd)), min_count))
-            p = rng.dirichlet(alpha)
-            counts = rng.multinomial(n=N, pvals=p)
-            
-            counts_list.append(counts)
-            meta_records.append({
-                "donor_id": donor,
-                "disease": disease,
-                "tissue": tissue,
-                "sample_id": f"{donor}_S{s_idx + 1}"
-            })
+    for sample in df_meta.itertuples(index=False):
+        alpha = donor_alpha[sample.donor_id].copy()
+
+        if sample.disease != ref_disease:
+            alpha *= np.exp(disease_main_effects_dict[sample.disease])
+        if sample.tissue != ref_tissue:
+            alpha *= np.exp(tissue_effect_vec)
+            if sample.disease != ref_disease:
+                alpha *= np.exp(interaction_effects_dict[sample.disease])
+
+        if sampling_bias_strength > 0:
+            alpha *= np.exp(rng.normal(0, sampling_bias_strength) * latent_axis)
+
+        alpha = np.maximum(alpha, 1e-6)
+        N = int(max(round(rng.normal(total_count_mean, total_count_sd)), min_count))
+        p = rng.dirichlet(alpha)
+        counts_list.append(rng.multinomial(n=N, pvals=p))
     
     # 3. 内存友好型构建长表 (核心优化点)
-    df_meta = pd.DataFrame(meta_records)
     counts_matrix = np.vstack(counts_list)
     
     # 直接利用 NumPy 向量化展开，避开 melt
@@ -167,17 +186,29 @@ def simulate_DM_data(
     
     # 4. 计算比例
     df_long['total_count'] = df_long.groupby('sample_id')['count'].transform('sum')
-    df_long['prop'] = df_long['count'] / (df_long['total_count'] + 1e-9)
+    df_long['prop'] = df_long['count'] / df_long['total_count']
     
+    df_true_effect = attach_population_effects(
+        df_true_effect,
+        baseline_logits=np.log(baseline),
+        cell_types=cell_type_names,
+        disease_effects=disease_main_effects_dict,
+        tissue_effect=tissue_effect_vec,
+        interaction_effects=interaction_effects_dict,
+        population_null_tolerance=population_null_tolerance,
+        population_reference_cell_type=population_reference_cell_type,
+    )
     df_long = df_long.reset_index(drop=True)
-    df_true_refined = refine_ground_truth_by_observation(df_long,df_true_effect)
+    df_true_refined = refine_ground_truth_by_observation(
+        df_long, df_true_effect, injected_effect_scale="log_alpha_effect"
+    )
     return df_long, df_true_refined
 
 
 def build_DM_effects_with_main_effect(
         cell_type_names, disease_levels, tissue_levels,
         disease_effect_size, tissue_effect_size, interaction_effect_size,
-        inflamed_cell_frac, rng
+        inflamed_cell_frac, rng, protected_cell_types: Sequence[str] = ()
 ):
     """构建 DM 模拟所需的主效应、组织效应和交互效应。
 
@@ -219,6 +250,16 @@ def build_DM_effects_with_main_effect(
     n_celltypes = len(cell_type_names)
     if n_celltypes == 0:
         raise ValueError("`cell_type_names` must not be empty.")
+    protected = set(map(str, protected_cell_types))
+    unknown_protected = protected - set(map(str, cell_type_names))
+    if unknown_protected:
+        raise ValueError(f"Unknown protected cell types: {sorted(unknown_protected)}")
+    eligible_indices = np.asarray([
+        index for index, cell_type in enumerate(cell_type_names)
+        if str(cell_type) not in protected
+    ], dtype=int)
+    if not len(eligible_indices):
+        raise ValueError("At least one cell type must remain eligible for effect injection.")
     ref_disease = disease_levels[0]  # HC
     ref_tissue = tissue_levels[0]  # nif
     other_tissue = tissue_levels[1]  # if
@@ -228,14 +269,21 @@ def build_DM_effects_with_main_effect(
     # ------------------------------------
     
     # 疾病主效应细胞集 (Disease Main Effect Cells)
-    n_disease_main_cts = max(1, int(n_celltypes * 0.1))
-    disease_main_cts_indices = rng.choice(n_celltypes, size=n_disease_main_cts, replace=False)
+    n_disease_main_cts = min(len(eligible_indices), max(1, int(n_celltypes * 0.1)))
+    disease_main_cts_indices = rng.choice(
+        eligible_indices, size=n_disease_main_cts, replace=False
+    )
     # 随机分配方向 (+1 或 -1)
     disease_signs = rng.choice([-1, 1], size=n_disease_main_cts)
     
     # 组织/交互作用效应细胞集 (Tissue/Interaction Effect Cells)
-    n_inflamed_cts = max(1, int(n_celltypes * inflamed_cell_frac))
-    inflamed_cts_indices = rng.choice(n_celltypes, size=n_inflamed_cts, replace=False)
+    n_inflamed_cts = min(
+        len(eligible_indices),
+        0 if inflamed_cell_frac == 0 else max(1, int(n_celltypes * inflamed_cell_frac)),
+    )
+    inflamed_cts_indices = rng.choice(
+        eligible_indices, size=n_inflamed_cts, replace=False
+    )
     # NEW: 随机分配方向 (+1 或 -1)
     inflamed_signs = rng.choice([-1, 1], size=n_inflamed_cts)
     
@@ -315,14 +363,14 @@ def build_DM_effects_with_main_effect(
             
             # 计算总效应 (Addition 语义)
             total_effect = E_disease + E_tissue + E_interaction
-            is_truly_sig = (E_disease != 0) or (E_tissue != 0) or (E_interaction != 0)
+            is_truly_sig = not np.isclose(total_effect, 0.0, atol=1e-12, rtol=0.0)
             
             true_effects.append({
                 'cell_type': ct_name,
                 'contrast_factor': 'interaction',
                 'contrast_group': f'{other_disease} x {other_tissue}',
                 'contrast_ref': f'{ref_disease} x {ref_tissue}',
-                'True_Effect': E_interaction,
+                'True_Effect': total_effect,
                 # NEW: E_interaction < 0 时为 ref_greater
                 'True_Direction': 'other_greater' if total_effect > 0 else (
                     'ref_greater' if total_effect < 0 else 'None'),

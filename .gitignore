@@ -1,1 +1,15 @@
-/project/
+/project/*
+!/project/Step08_Abundance/
+/project/Step08_Abundance/*
+!/project/Step08_Abundance/Step08a_Preparation.py
+!/project/Step08_Abundance/Step08b_Simulation.py
+!/project/Step08_Abundance/Step08c_Realdata.py
+!/project/Step08_Abundance/Step08d_Additional_Analysis.py
+!/project/Step08_Abundance/Test_Sccoda.py
+__pycache__/
+*.py[cod]
+.pytest_cache/
+audit/phase1/runtime_cache/
+audit/phase1_5/**/sccomp_model_cache/
+audit/phase1_5/**/staging/
+sccomp_draws_files/

@@ -7,8 +7,6 @@ import re
 import numpy as np
 import pandas as pd
 
-from src.stats.plot.plot import *
-
 import logging
 from src.utils.hier_logger import logged
 logger = logging.getLogger(__name__)
@@ -197,7 +195,9 @@ def make_result(method: str,
                 p_type: str | None,
                 contrast_table: pd.DataFrame = None,
                 extra: dict | None = None,
-                alpha: float = 0.05) -> dict[str, Any]:
+                alpha: float = 0.05,
+                contrast_status: str | None = None,
+                failure_reason: str | None = None) -> dict[str, Any]:
     """构造 stats engine 的统一返回结构。
 
     Args:
@@ -218,13 +218,21 @@ def make_result(method: str,
     """
     if extra is None:
         extra = {}
+    numeric_p = np.nan if p_val is None else float(p_val)
+    p_available = bool(np.isfinite(numeric_p))
+    if contrast_status is None:
+        contrast_status = "success" if p_available else "unavailable"
+    if contrast_status != "success" and failure_reason is None:
+        failure_reason = extra.get("failure_reason") or extra.get("error_type")
     return {
         "method": method,
         "cell_type": cell_type,
-        "p_val": float(p_val) if p_val is not None else None,
+        "p_val": numeric_p if p_available else np.nan,
         "p_type": p_type,
         'contrast_table': contrast_table,
-        "significant": bool(p_val is not None and p_val < alpha),
+        "significant": bool(numeric_p < alpha) if p_available and contrast_status == "success" else pd.NA,
+        "contrast_status": contrast_status,
+        "failure_reason": failure_reason,
         "extra": extra
     }
 

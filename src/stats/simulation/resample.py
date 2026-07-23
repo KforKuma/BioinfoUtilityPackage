@@ -9,7 +9,8 @@ import pandas as pd
 
 
 from src.utils.hier_logger import logged
-from src.stats.simulation.truth_refine import refine_ground_truth_by_observation
+from src.stats.simulation.design import build_simulation_metadata, validate_factor_levels
+from src.stats.simulation.truth_refine import attach_population_effects, refine_ground_truth_by_observation
 logger = logging.getLogger(__name__)
 
 # -----------------------
@@ -31,7 +32,11 @@ def simulate_CLR_resample_data(
         disease_levels=("HC", "CD", "UC"),
         tissue_levels=("nif", "if"),
         pseudocount=1.0,
-        random_state=1234
+        random_state=1234,
+        assignment_strategy="balanced",
+        protected_cell_types: Sequence[str] = (),
+        population_null_tolerance: float = 1e-12,
+        population_reference_cell_type: str | None = None,
 ):
     """基于真实样本 CLR 背景重采样生成模拟丰度数据。
 
@@ -55,6 +60,11 @@ def simulate_CLR_resample_data(
         tissue_levels: tissue 水平，首个元素作为参考组。
         pseudocount: 从真实 count 转 CLR logits 前加入的伪计数。
         random_state: 随机种子。
+        assignment_strategy: ``balanced`` 为默认的分层随机平衡设计；``random``
+            保留历史独立随机分配行为。
+        protected_cell_types: 不得承载 latent injection 的预注册 cell type。
+        population_null_tolerance: 判定精确 population effect 数值零的显式容差。
+        population_reference_cell_type: population log-ratio estimand 的预注册 reference。
 
     Returns:
         ``(df_long, df_true_refined)``，分别为模拟长表和按实际观察 LFC 修正后的
@@ -77,14 +87,32 @@ def simulate_CLR_resample_data(
     missing_cols = required_cols - set(count_df.columns)
     if missing_cols:
         raise ValueError(f"Missing required columns: {sorted(missing_cols)}")
-    if n_donors <= 0 or n_samples_per_donor <= 0 or n_celltypes <= 1:
-        raise ValueError("`n_donors`, `n_samples_per_donor`, and `n_celltypes` must be positive; `n_celltypes` must be greater than 1.")
-    if len(disease_levels) < 2:
-        raise ValueError("`disease_levels` must contain at least two levels.")
-    if len(tissue_levels) < 2:
-        raise ValueError("`tissue_levels` must contain at least two levels.")
+    if not isinstance(n_celltypes, int) or isinstance(n_celltypes, bool) or n_celltypes <= 1:
+        raise ValueError("`n_celltypes` must be an integer greater than 1.")
+    disease_levels, tissue_levels = validate_factor_levels(disease_levels, tissue_levels)
+    numeric_parameters = np.asarray([
+        disease_effect_size, tissue_effect_size, interaction_effect_size,
+        inflamed_cell_frac, donor_noise_sd, sample_noise_sd, pseudocount,
+        population_null_tolerance,
+    ], dtype=float)
+    if not np.isfinite(numeric_parameters).all():
+        raise ValueError("Simulation numeric parameters must be finite.")
     if not 0 <= inflamed_cell_frac <= 1:
         raise ValueError("`inflamed_cell_frac` must be between 0 and 1.")
+    if min(disease_effect_size, tissue_effect_size, interaction_effect_size) < 0:
+        raise ValueError("Effect-size parameters are non-negative magnitudes.")
+    if min(donor_noise_sd, sample_noise_sd) < 0:
+        raise ValueError("Noise scale parameters must be non-negative.")
+    if pseudocount <= 0:
+        raise ValueError("`pseudocount` must be greater than 0.")
+
+    counts_numeric = pd.to_numeric(count_df["count"], errors="coerce")
+    if counts_numeric.isna().any() or ~np.isfinite(counts_numeric).all() or counts_numeric.lt(0).any():
+        raise ValueError("Input counts must be finite and non-negative.")
+    if not np.equal(counts_numeric, np.floor(counts_numeric)).all():
+        raise ValueError("Input counts must be integer-valued.")
+    count_df = count_df.copy()
+    count_df["count"] = counts_numeric
 
     rng = np.random.default_rng(random_state)
     n_sim_samples = n_donors * n_samples_per_donor
@@ -92,8 +120,13 @@ def simulate_CLR_resample_data(
     # ---------------------------
     # Step 1: 数据提取与基线构建
     # ---------------------------
-    metadata_map = count_df[['sample_id', 'donor_id', 'disease', 'tissue']].drop_duplicates().set_index('sample_id')
+    metadata = count_df[['sample_id', 'donor_id', 'disease', 'tissue']].drop_duplicates()
+    if metadata["sample_id"].duplicated().any():
+        raise ValueError("Input donor/disease/tissue metadata must be sample-constant.")
+    metadata_map = metadata.set_index('sample_id')
     sample_totals = count_df.groupby('sample_id')['count'].sum()
+    if sample_totals.le(0).any():
+        raise ValueError("Every source sample must have a positive total count.")
     
     df_counts_wide = (
         count_df.groupby(['sample_id', 'cell_type'])['count']
@@ -119,6 +152,11 @@ def simulate_CLR_resample_data(
     
     # 构建新的虚拟细胞名称列表 [CT1, CT2, ..., CTn]
     sim_cell_names = [f"CT{i + 1}" for i in range(n_celltypes)]
+    if (
+        population_reference_cell_type is not None
+        and str(population_reference_cell_type) not in set(map(str, protected_cell_types))
+    ):
+        raise ValueError("The population reference cell type must also be protected from injection.")
     
     # 获取基线样本池
     ref_disease = disease_levels[0]
@@ -147,44 +185,39 @@ def simulate_CLR_resample_data(
         interaction_effect_size=interaction_effect_size,
         tissue_effect_size=tissue_effect_size,
         inflamed_cell_frac=inflamed_cell_frac,
-        rng=rng
+        rng=rng,
+        protected_cell_types=protected_cell_types,
     )
     
     # ---------------------------
     # Step 4: 层次化模拟 (与之前逻辑一致，但维度已变为 n_celltypes)
     # ---------------------------
-    sim_records = []
-    for d_idx in range(n_donors):
-        donor_id = f"D{d_idx + 1:02d}"
-        disease = rng.choice(disease_levels)
-        # 生成对应维度的噪声
-        donor_shift = rng.normal(0, donor_noise_sd, n_celltypes)
-        
-        for s_idx in range(n_samples_per_donor):
-            sample_id = f"{donor_id}_S{s_idx + 1}"
-            tissue = rng.choice(tissue_levels)
-            
-            idx_resample = rng.integers(0, len(clr_logits_baseline))
-            clr_logit_sim = clr_logits_baseline[idx_resample].copy()
-            
-            clr_logit_sim += donor_shift
-            if disease != ref_disease:
-                clr_logit_sim += disease_main_effects_dict[disease]
-            if tissue != ref_tissue:
-                clr_logit_sim += tissue_effect
-            # 修正：之前代码这里漏了 tissue 判断，现在加上
-            if disease != ref_disease and tissue != ref_tissue:
-                clr_logit_sim += interaction_effects_dict[disease]
-            
-            clr_logit_sim += rng.normal(0, sample_noise_sd, n_celltypes)
-            
-            sim_records.append({
-                "donor_id": donor_id, "sample_id": sample_id,
-                "disease": disease, "tissue": tissue,
-                "clr_logit_sim": clr_logit_sim
-            })
-    
-    df_sim_meta = pd.DataFrame(sim_records)
+    df_sim_meta = build_simulation_metadata(
+        n_donors=n_donors,
+        n_samples_per_donor=n_samples_per_donor,
+        disease_levels=disease_levels,
+        tissue_levels=tissue_levels,
+        rng=rng,
+        assignment_strategy=assignment_strategy,
+    )
+    donor_shifts = {
+        donor: rng.normal(0, donor_noise_sd, n_celltypes)
+        for donor in df_sim_meta["donor_id"].unique()
+    }
+    simulated_logits = []
+    for sample in df_sim_meta.itertuples(index=False):
+        idx_resample = rng.integers(0, len(clr_logits_baseline))
+        clr_logit_sim = clr_logits_baseline[idx_resample].copy()
+        clr_logit_sim += donor_shifts[sample.donor_id]
+        if sample.disease != ref_disease:
+            clr_logit_sim += disease_main_effects_dict[sample.disease]
+        if sample.tissue != ref_tissue:
+            clr_logit_sim += tissue_effect
+        if sample.disease != ref_disease and sample.tissue != ref_tissue:
+            clr_logit_sim += interaction_effects_dict[sample.disease]
+        clr_logit_sim += rng.normal(0, sample_noise_sd, n_celltypes)
+        simulated_logits.append(clr_logit_sim)
+    df_sim_meta["clr_logit_sim"] = simulated_logits
     
     # ---------------------------
     # Step 5: 生成 Count
@@ -212,16 +245,28 @@ def simulate_CLR_resample_data(
     df_sim_long['count'] = counts_matrix.flatten()
     
     df_sim_long['total_count'] = df_sim_long.groupby('sample_id')['count'].transform('sum')
-    df_sim_long['prop'] = df_sim_long['count'] / (df_sim_long['total_count'] + 1e-9)
+    df_sim_long['prop'] = df_sim_long['count'] / df_sim_long['total_count']
+    df_true_effect = attach_population_effects(
+        df_true_effect,
+        baseline_logits=clr_logits_baseline,
+        cell_types=sim_cell_names,
+        disease_effects=disease_main_effects_dict,
+        tissue_effect=tissue_effect,
+        interaction_effects=interaction_effects_dict,
+        population_null_tolerance=population_null_tolerance,
+        population_reference_cell_type=population_reference_cell_type,
+    )
     df_long = df_sim_long.reset_index(drop=True)
-    df_true_refined = refine_ground_truth_by_observation(df_long, df_true_effect)
+    df_true_refined = refine_ground_truth_by_observation(
+        df_long, df_true_effect, injected_effect_scale="clr_latent_effect"
+    )
     return df_long, df_true_refined
 
 @logged
 def build_CLR_effects_and_table(
         cell_types, disease_levels, tissue_levels,
         disease_effect_size, tissue_effect_size, interaction_effect_size,
-        inflamed_cell_frac, rng
+        inflamed_cell_frac, rng, protected_cell_types: Sequence[str] = ()
 ):
     """构建 CLR resampling 模拟所需的效应向量和 ground truth 表。
 
@@ -260,14 +305,27 @@ def build_CLR_effects_and_table(
     n_celltypes = len(cell_types)
     if n_celltypes == 0:
         raise ValueError("`cell_types` must not be empty.")
+    protected = set(map(str, protected_cell_types))
+    unknown_protected = protected - set(map(str, cell_types))
+    if unknown_protected:
+        raise ValueError(f"Unknown protected cell types: {sorted(unknown_protected)}")
+    eligible_indices = np.asarray([
+        index for index, cell_type in enumerate(cell_types)
+        if str(cell_type) not in protected
+    ], dtype=int)
+    if not len(eligible_indices):
+        raise ValueError("At least one cell type must remain eligible for effect injection.")
     if len(tissue_levels) < 2:
         raise ValueError("`tissue_levels` must contain at least two levels.")
     ref_disease = disease_levels[0]  # HC
     ref_tissue = tissue_levels[0]  # nif
     other_tissue = tissue_levels[1]  # if
     
-    n_disease_main_cts = max(1, int(n_celltypes * 0.1))
-    n_inflamed_cts = max(1, int(n_celltypes * inflamed_cell_frac))
+    n_disease_main_cts = min(len(eligible_indices), max(1, int(n_celltypes * 0.1)))
+    n_inflamed_cts = min(
+        len(eligible_indices),
+        0 if inflamed_cell_frac == 0 else max(1, int(n_celltypes * inflamed_cell_frac)),
+    )
     
     # --- 1. 疾病主效应 (每个疾病独立采样受影响细胞) ---
     disease_main_effects_dict = {}
@@ -275,7 +333,7 @@ def build_CLR_effects_and_table(
         effect_vec = np.zeros(n_celltypes)
         # 只有在 size > 0 时才采样和赋值
         if disease_effect_size > 0:
-            indices = rng.choice(n_celltypes, size=n_disease_main_cts, replace=False)
+            indices = rng.choice(eligible_indices, size=n_disease_main_cts, replace=False)
             signs = rng.choice([-1, 1], size=n_disease_main_cts)
             random_multiplier = rng.uniform(0.8, 1.2)
             effect_vec[indices] = disease_effect_size * random_multiplier * signs
@@ -284,7 +342,9 @@ def build_CLR_effects_and_table(
     # --- 2. 组织主效应 ---
     tissue_effect = np.zeros(n_celltypes)
     if tissue_effect_size > 0:
-        inflamed_cts_indices = rng.choice(n_celltypes, size=n_inflamed_cts, replace=False)
+        inflamed_cts_indices = rng.choice(
+            eligible_indices, size=n_inflamed_cts, replace=False
+        )
         inflamed_signs = rng.choice([-1, 1], size=n_inflamed_cts)
         random_multiplier = rng.uniform(0.8, 1.2)
         tissue_effect[inflamed_cts_indices] = tissue_effect_size * random_multiplier * inflamed_signs
@@ -295,7 +355,7 @@ def build_CLR_effects_and_table(
         effect_vec = np.zeros(n_celltypes)
         if interaction_effect_size > 0:
             # 独立采样交互项影响的细胞，数量仍由 inflamed_cell_frac 决定
-            inter_indices = rng.choice(n_celltypes, size=n_inflamed_cts, replace=False)
+            inter_indices = rng.choice(eligible_indices, size=n_inflamed_cts, replace=False)
             inter_signs = rng.choice([-1, 1], size=n_inflamed_cts)
             random_multiplier = rng.uniform(0.5, 1.5)
             effect_vec[inter_indices] = interaction_effect_size * random_multiplier * inter_signs
@@ -344,7 +404,7 @@ def build_CLR_effects_and_table(
             
             # 叠加
             total_val = val_disease + val_tissue + val_inter
-            is_truly_sig = (val_disease != 0) or (val_tissue != 0) or (val_inter != 0)
+            is_truly_sig = not np.isclose(total_val, 0.0, atol=1e-12, rtol=0.0)
             
             true_effects.append({
                 'cell_type': ct_name,

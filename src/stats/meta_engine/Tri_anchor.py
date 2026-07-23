@@ -4,6 +4,7 @@ import numpy as np
 from scipy.stats import norm
 
 from src.stats.engine import *
+from src.stats.validation import parse_boolean_series
 from src.utils.env_utils import call_with_compatible_args
 from src.utils.warnings import deprecated
 
@@ -84,7 +85,7 @@ def run_Meta_Ensemble(df_all: pd.DataFrame,
                     pd.Series(1.0, index=target_index), pd.Series(0.0, index=target_index))
         
         df = res_obj['contrast_table'].reindex(target_index)
-        sig = df['significant'].fillna(False).astype(bool)
+        sig = parse_boolean_series(df['significant']).fillna(False).astype(bool)
         dir_map = {'other_greater': 1, 'ref_greater': -1}
         direction = df['direction'].map(dir_map).fillna(0).astype(int)
         pvals = df['P>|z|'].fillna(1.0)
@@ -228,7 +229,7 @@ def run_Meta_Ensemble_adaptive(df_all: pd.DataFrame,
                     pd.Series(1.0, index=target_index), pd.Series(0.0, index=target_index))
         
         df = res_obj['contrast_table'].reindex(target_index)
-        sig = df['significant'].fillna(False).astype(bool)
+        sig = parse_boolean_series(df['significant']).fillna(False).astype(bool)
         dir_map = {'other_greater': 1, 'ref_greater': -1}
         direction = df['direction'].map(dir_map).fillna(0).astype(int)
         pvals = df['P>|z|'].fillna(1.0)
@@ -397,7 +398,7 @@ def run_Meta_Ensemble_dynamic(
                     pd.Series(1.0, index=target_index), pd.Series(0.0, index=target_index))
         
         df = res_obj['contrast_table'].reindex(target_index)
-        sig = df['significant'].fillna(False).astype(bool)
+        sig = parse_boolean_series(df['significant']).fillna(False).astype(bool)
         dir_map = {'other_greater': 1, 'ref_greater': -1}
         direction = df['direction'].map(dir_map).fillna(0).astype(int)
         pvals = df['P>|z|'].fillna(1.0)
