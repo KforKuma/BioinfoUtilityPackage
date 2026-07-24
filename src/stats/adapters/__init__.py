@@ -1,4 +1,5 @@
 from .base import AdapterResult, BaseDifferentialAbundanceAdapter
+from .clr_lmm import CLRLMMAdapter
 from .dcats import DCATSAdapter
 from .mock import MockBayesianAdapter, MockFailureAdapter, MockFrequentistAdapter
 from .propeller import PropellerAdapter
@@ -10,6 +11,7 @@ from .sccoda import ScCODAAdapter
 __all__ = [
     "AdapterResult",
     "BaseDifferentialAbundanceAdapter",
+    "CLRLMMAdapter",
     "DCATSAdapter",
     "MockBayesianAdapter",
     "MockFailureAdapter",

@@ -73,10 +73,11 @@ def check_estimand_compatibility(
         return "direction_only"
     if method.lower() in {
         "propeller", "dcats", "sccomp", "sccoda", "naive_welch_proportion",
+        "clr_lmm",
     }:
         if scale in {
             "logit", "arcsine_sqrt", "log_odds", "logit_unconstrained", "log_ratio",
-            "proportion_difference",
+            "proportion_difference", "clr_log_ratio",
         }:
             return "direction_only"
     return "incompatible"

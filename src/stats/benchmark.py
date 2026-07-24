@@ -141,8 +141,16 @@ def load_scenario_matrix(path: str | Path = DEFAULT_SCENARIOS) -> pd.DataFrame:
         raise ValueError("Scenario matrix must include null, weak, moderate, and strong effects.")
     if not frame.loc[frame["effect_strength"].eq("null"), "disease_effect_size"].eq(0).all():
         raise ValueError("Null scenarios must have zero disease effect.")
-    if (frame["reference_cell_type"].astype(str) != "CT" + frame["n_celltypes"].astype(str)).any():
-        raise ValueError("Phase-5 scenario references must be the protected final cell type.")
+    for _, row in frame.iterrows():
+        reference = str(row["reference_cell_type"])
+        if not reference:
+            raise ValueError("Every scenario requires a non-empty protected reference cell type.")
+        if "cell_type_names_json" in frame and str(row.get("cell_type_names_json", "")):
+            names = json.loads(str(row["cell_type_names_json"]))
+            if reference not in set(map(str, names)):
+                raise ValueError("Scenario reference is absent from cell_type_names_json.")
+        elif reference != "CT" + str(row["n_celltypes"]):
+            raise ValueError("Legacy generic scenarios must protect the final CT cell type.")
     return frame
 
 
@@ -156,7 +164,7 @@ def load_benchmark_config(path: str | Path = DEFAULT_CONFIG) -> dict[str, Any]:
 
 
 def _scenario_parameters(row: pd.Series) -> dict[str, Any]:
-    return {
+    parameters = {
         "n_donors": int(row["n_donors"]),
         "n_samples_per_donor": int(row["n_samples_per_donor"]),
         "n_celltypes": int(row["n_celltypes"]),
@@ -177,6 +185,29 @@ def _scenario_parameters(row: pd.Series) -> dict[str, Any]:
         "disease_levels": ["control", "case"],
         "tissue_levels": ["nif", "if"],
     }
+    if str(row.get("cell_type_names_json", "")):
+        parameters["cell_type_names"] = json.loads(str(row["cell_type_names_json"]))
+    if str(row.get("baseline_composition_json", "")):
+        parameters["baseline_composition"] = json.loads(
+            str(row["baseline_composition_json"])
+        )
+    return parameters
+
+
+def _run_config_path(root: Path) -> Path:
+    current = root / "benchmark_config" / "benchmark_config.yaml"
+    return current if current.is_file() else root / "benchmark_config" / "phase5_benchmark.yaml"
+
+
+def _phase_label_from_config(config: dict[str, Any]) -> str:
+    schema_version = str(config.get("schema_version", "phase5-benchmark-v1"))
+    label = schema_version.split("-", 1)[0]
+    return label if label.startswith("phase") else "phase5"
+
+
+def _phase_label_for_run(root: Path) -> str:
+    config = yaml.safe_load(_run_config_path(root).read_text(encoding="utf-8"))
+    return _phase_label_from_config(config)
 
 
 def _replicate_paths(root: Path, scenario_id: str, replicate_id: str) -> dict[str, Path]:
@@ -247,6 +278,15 @@ def _save_frozen_replicate(
     canonical.contrast_specification.to_csv(
         paths["simulation"] / "contrast_specification.csv", index=False
     )
+    # The immutable task hash is computed from the exact CSV handoff consumed by
+    # methods, not from the pre-serialization in-memory frames.
+    frozen_canonical = CanonicalDAInput(
+        pd.read_csv(paths["simulation"] / "canonical_abundance_input.csv"),
+        pd.read_csv(paths["simulation"] / "sample_metadata.csv"),
+        pd.read_csv(paths["simulation"] / "cell_type_manifest.csv"),
+        pd.read_csv(paths["simulation"] / "contrast_specification.csv"),
+    ).validate()
+    frozen_input_hash = frozen_canonical.input_hash()
     truth.to_csv(paths["truth"] / "truth_table.csv", index=False)
     truth.loc[truth["truth_source"].eq("injected")].to_csv(
         paths["truth"] / "injection_manifest.csv", index=False
@@ -261,7 +301,7 @@ def _save_frozen_replicate(
         "scenario_id": scenario_id,
         "replicate_id": replicate_id,
         "simulation_seed": seed,
-        "input_hash": canonical.input_hash(),
+        "input_hash": frozen_input_hash,
         "number_samples": int(canonical.sample_manifest["sample_id"].nunique()),
         "number_cell_types": int(canonical.cell_type_manifest["cell_type"].nunique()),
         "number_zero_counts": int(pd.to_numeric(abundance["count"]).eq(0).sum()),
@@ -281,7 +321,9 @@ def _save_frozen_replicate(
     }
     _write_json(paths["simulation"] / "generator_diagnostics.json", diagnostics)
     manifest = {
-        "schema_version": "phase5-simulation-replicate-v1",
+        "schema_version": (
+            f"{_phase_label_from_config(benchmark_config)}-simulation-replicate-v1"
+        ),
         "benchmark_id": benchmark_id,
         "run_id": run_id,
         "analysis_id": analysis_id,
@@ -289,12 +331,12 @@ def _save_frozen_replicate(
         "replicate_id": replicate_id,
         "simulation_seed": seed,
         "status": "frozen_before_method_execution",
-        "input_hash": canonical.input_hash(),
+        "input_hash": frozen_input_hash,
         "created_at": _utc_now(),
         "files": _file_records(paths["root"], excluded={"manifests/run_manifest.json"}),
     }
     _write_json(paths["manifests"] / "run_manifest.json", manifest)
-    return run_id, analysis_id, canonical.input_hash(), seed
+    return run_id, analysis_id, frozen_input_hash, seed
 
 
 def initialize_benchmark(
@@ -325,7 +367,7 @@ def initialize_benchmark(
     ):
         (root / name).mkdir()
     snapshots = {
-        Path(config_path): root / "benchmark_config" / "phase5_benchmark.yaml",
+        Path(config_path): root / "benchmark_config" / "benchmark_config.yaml",
         Path(scenario_path): root / "benchmark_config" / "scenario_matrix.csv",
         Path(evaluation_path): root / "benchmark_config" / "evaluation_spec.yaml",
         Path(registry_path): root / "method_registry" / "method_benchmark_registry.yaml",
@@ -367,7 +409,7 @@ def initialize_benchmark(
     task_path = root / "benchmark_task_manifest.csv"
     _write_task_manifest(task_frame, task_path)
     manifest = {
-        "schema_version": "phase5-benchmark-run-v1",
+        "schema_version": f"{_phase_label_from_config(config)}-benchmark-run-v1",
         "benchmark_id": benchmark_id,
         "phase": phase,
         "replicates_per_scenario": replicates,
@@ -452,7 +494,7 @@ def run_pending_tasks(
         if column not in tasks:
             tasks[column] = "." if column == "result_subdir" else pd.NA
         tasks[column] = tasks[column].astype("object")
-    config = yaml.safe_load((root / "benchmark_config" / "phase5_benchmark.yaml").read_text(encoding="utf-8"))
+    config = yaml.safe_load(_run_config_path(root).read_text(encoding="utf-8"))
     order = list(config["execution"]["enabled_task_order"])
     order_rank = {method: index for index, method in enumerate(order)}
     pending_mask = tasks["status"].eq("pending")
@@ -661,9 +703,17 @@ def production_checkpoint(
         number_conversion_failed=lambda values: int(values.eq("conversion_failed").sum()),
     ).reset_index()
     systematic_missing = bool(per_method["number_success"].eq(0).sum() >= 2)
-    total_bytes = sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
+    all_files = [path for path in root.rglob("*") if path.is_file()]
+    total_bytes = sum(path.stat().st_size for path in all_files)
     completed_fraction = len(replicate_ids) / int(manifest["replicates_per_scenario"])
-    projected_bytes = int(total_bytes / completed_fraction) if completed_fraction else 0
+    method_bytes = sum(
+        path.stat().st_size for path in all_files if "methods" in path.relative_to(root).parts
+    )
+    static_bytes = total_bytes - method_bytes
+    projected_bytes = (
+        int(static_bytes + method_bytes / completed_fraction)
+        if completed_fraction else 0
+    )
     free_bytes = shutil.disk_usage(root).free
     resources_exceeded = projected_bytes > free_bytes * 0.8
     blockers = []
@@ -677,7 +727,9 @@ def production_checkpoint(
         blockers.append("multiple_methods_systematically_missing")
     if resources_exceeded:
         blockers.append("projected_storage_exceeds_plan")
-    checkpoint_root = root / "diagnostics" / "production_checkpoint_20pct"
+    checkpoint_percent = int(round(100 * completed_fraction))
+    checkpoint_name = f"{checkpoint_percent}_percent"
+    checkpoint_root = root / "diagnostics" / f"production_checkpoint_{checkpoint_percent}pct"
     checkpoint_root.mkdir(parents=True, exist_ok=False)
     status.to_csv(checkpoint_root / "task_status.csv", index=False)
     per_method.to_csv(checkpoint_root / "method_status.csv", index=False)
@@ -687,7 +739,7 @@ def production_checkpoint(
         checkpoint_root / "input_hash_failures.csv", index=False
     )
     report = {
-        "checkpoint": "20_percent",
+        "checkpoint": checkpoint_name,
         "replicate_ids": sorted(replicate_ids),
         "number_selected_tasks": len(enabled),
         "input_hash_check": "passed" if not hash_failures else "failed",
@@ -704,14 +756,24 @@ def production_checkpoint(
         "files": _file_records(checkpoint_root, excluded={"checkpoint_manifest.json"}),
     }
     _write_json(checkpoint_root / "checkpoint_manifest.json", report)
+    _write_json(checkpoint_root / "checkpoint_summary.json", report)
+    pd.DataFrame({"blocker": blockers}).to_csv(
+        checkpoint_root / "checkpoint_failures.csv", index=False
+    )
     if blockers:
         raise RuntimeError(f"Production checkpoint blockers: {blockers}")
-    manifest["stop_point_c"] = {
+    checkpoint_record = {
         "status": "self_accepted",
-        "checkpoint": "20_percent",
+        "checkpoint": checkpoint_name,
         "replicate_ids": sorted(replicate_ids),
         "created_at": report["created_at"],
     }
+    if _phase_label_for_run(root) == "phase5":
+        manifest["stop_point_c"] = checkpoint_record
+    else:
+        existing = list(manifest.get("production_checkpoints", []))
+        existing.append(checkpoint_record)
+        manifest["production_checkpoints"] = existing
     _write_json(root / "benchmark_manifest.json", manifest)
     return checkpoint_root / "checkpoint_manifest.json"
 
@@ -731,11 +793,13 @@ def retry_failed_tasks(
             tasks[column] = "." if column == "result_subdir" else pd.NA
         tasks[column] = tasks[column].astype("object")
     config = yaml.safe_load(
-        (root / "benchmark_config" / "phase5_benchmark.yaml").read_text(encoding="utf-8")
+        _run_config_path(root).read_text(encoding="utf-8")
     )
     candidates = tasks.index[
         tasks["method"].astype(str).eq(method)
-        & tasks["status"].isin(["runtime_failed", "diagnostics_invalid"])
+        & tasks["status"].isin(
+            ["runtime_failed", "diagnostics_invalid", "conversion_failed"]
+        )
         & pd.to_numeric(tasks["attempt_count"], errors="coerce").eq(1)
         & tasks["failure_reason"].astype(str).str.contains(reason_contains, case=False, regex=False)
     ].tolist()
@@ -832,7 +896,7 @@ def retry_failed_tasks(
                     "attempt": 1,
                     "path": ".",
                     "recorded_status": original_manifest["status"],
-                    "corrected_failure_class": "runtime_failed",
+                    "corrected_failure_class": original_manifest["status"],
                     "failure_reason": original_manifest.get("failure_reason"),
                     "task_manifest": "task_manifest.json",
                 },
@@ -866,6 +930,214 @@ def retry_failed_tasks(
     })
     _write_json(manifest_path, manifest)
     return task_path
+
+
+def accept_phase6_stop_point_c(benchmark_root: str | Path) -> Path:
+    """Write and validate the all-method completion package before evaluation."""
+    root = Path(benchmark_root).resolve()
+    if _phase_label_for_run(root) != "phase6":
+        raise ValueError("This Stop Point C gate is specific to Phase 6.")
+    manifest_path = root / "benchmark_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("phase") != "production":
+        raise ValueError("Phase-6 Stop Point C applies only to the production run.")
+    tasks = pd.read_csv(root / "benchmark_task_manifest.csv")
+    enabled = tasks.loc[tasks["status"].ne("skipped_with_reason")].copy()
+    completion = (
+        enabled.groupby(["method", "status"], sort=False)
+        .size()
+        .unstack(fill_value=0)
+        .reset_index()
+    )
+    for status in sorted(ALLOWED_TASK_STATUSES - {"skipped_with_reason"}):
+        if status not in completion:
+            completion[status] = 0
+    completion["number_tasks"] = completion[
+        sorted(ALLOWED_TASK_STATUSES - {"skipped_with_reason"})
+    ].sum(axis=1)
+    completion["terminal_rate"] = 1 - (
+        completion["pending"] + completion["running"]
+    ) / completion["number_tasks"]
+    completion.to_csv(root / "method_completion_matrix.csv", index=False)
+
+    failures = enabled.loc[~enabled["status"].eq("success")].copy()
+    failures.to_csv(root / "method_failure_summary.csv", index=False)
+    enabled[[
+        "scenario_id", "replicate_id", "method", "status", "runtime_seconds",
+        "attempt_count", "failure_reason", "result_subdir",
+    ]].to_csv(root / "runtime_summary.csv", index=False)
+
+    diagnostics_frames: list[pd.DataFrame] = []
+    missing_outputs: list[dict[str, str]] = []
+    hash_failures: list[dict[str, str]] = []
+    for _, task in enabled.iterrows():
+        paths = _replicate_paths(root, str(task["scenario_id"]), str(task["replicate_id"]))
+        frozen_hash = json.loads(
+            (paths["manifests"] / "run_manifest.json").read_text(encoding="utf-8")
+        )["input_hash"]
+        if str(task["input_hash"]) != str(frozen_hash):
+            hash_failures.append({
+                "scenario_id": str(task["scenario_id"]),
+                "replicate_id": str(task["replicate_id"]),
+                "method": str(task["method"]),
+                "reason": "task_hash_disagrees_with_frozen_manifest",
+            })
+        if str(task["status"]) != "success":
+            continue
+        result_root = (
+            paths["methods"] / str(task["method"]) / str(task.get("result_subdir", "."))
+        )
+        required_outputs = ("public_contrast.csv", "evidence.csv", "diagnostics.csv")
+        absent = [name for name in required_outputs if not (result_root / name).is_file()]
+        if absent:
+            missing_outputs.append({
+                "scenario_id": str(task["scenario_id"]),
+                "replicate_id": str(task["replicate_id"]),
+                "method": str(task["method"]),
+                "reason": f"missing_success_outputs:{','.join(absent)}",
+            })
+            continue
+        diagnostics_frames.append(pd.read_csv(result_root / "diagnostics.csv"))
+    diagnostics = (
+        pd.concat(diagnostics_frames, ignore_index=True)
+        if diagnostics_frames else pd.DataFrame()
+    )
+    diagnostics.to_csv(root / "diagnostic_summary.csv", index=False)
+
+    blockers: list[str] = []
+    if enabled["status"].isin(["pending", "running"]).any():
+        blockers.append("enabled_tasks_not_terminal")
+    per_method_success = enabled.groupby("method")["status"].apply(
+        lambda values: int(values.eq("success").sum())
+    )
+    if per_method_success.eq(0).any():
+        blockers.append("enabled_method_has_no_successful_run")
+    if missing_outputs:
+        blockers.append("successful_task_missing_canonical_outputs")
+    if hash_failures:
+        blockers.append("input_hash_mismatch")
+    readiness = root / "evaluation_readiness_report.md"
+    lines = [
+        "# Phase 6 evaluation readiness",
+        "",
+        f"- Enabled tasks: {len(enabled)}",
+        f"- Successful tasks: {int(enabled['status'].eq('success').sum())}",
+        f"- Terminal tasks: {int((~enabled['status'].isin(['pending', 'running'])).sum())}",
+        f"- Enabled methods with at least one success: {int(per_method_success.gt(0).sum())}",
+        f"- Hash mismatches: {len(hash_failures)}",
+        f"- Successful tasks missing outputs: {len(missing_outputs)}",
+        f"- Blockers: {', '.join(blockers) if blockers else 'none'}",
+        "",
+        "Stop Point C: self-accepted" if not blockers else "Stop Point C: blocked",
+        "",
+    ]
+    readiness.write_text("\n".join(lines), encoding="utf-8")
+    pd.DataFrame(missing_outputs).to_csv(root / "missing_success_outputs.csv", index=False)
+    pd.DataFrame(hash_failures).to_csv(root / "completion_hash_failures.csv", index=False)
+    if blockers:
+        raise RuntimeError(f"Phase-6 Stop Point C blockers: {blockers}")
+    manifest["stop_point_c"] = {
+        "status": "self_accepted",
+        "created_at": _utc_now(),
+        "evaluation_readiness_report": "evaluation_readiness_report.md",
+    }
+    _write_json(manifest_path, manifest)
+    return readiness
+
+
+def accept_phase6_stop_point_b(benchmark_root: str | Path) -> Path:
+    """Validate the completed pilot and freeze the Phase-6 production plan."""
+    root = Path(benchmark_root).resolve()
+    if _phase_label_for_run(root) != "phase6":
+        raise ValueError("This Stop Point B gate is specific to Phase 6.")
+    manifest_path = root / "benchmark_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("phase") != "pilot":
+        raise ValueError("Phase-6 Stop Point B applies only to a pilot run.")
+    tasks = pd.read_csv(root / "benchmark_task_manifest.csv")
+    enabled = tasks.loc[tasks["status"].ne("skipped_with_reason")].copy()
+    metrics = pd.read_csv(root / "pilot_metrics.csv")
+    truth = pd.read_csv(root / "pilot_truth_summary.csv")
+    distribution = pd.read_csv(root / "pilot_distribution_comparison.csv")
+    bayesian = pd.read_csv(root / "summaries" / "bayesian_diagnostics_summary.csv")
+    blockers: list[str] = []
+    if enabled["status"].isin(["pending", "running"]).any():
+        blockers.append("pilot_tasks_not_terminal")
+    if not enabled["status"].eq("success").all():
+        blockers.append("pilot_enabled_task_failure")
+    if not parse_boolean_series(distribution["within_tolerant_band"]).eq(True).all():
+        blockers.append("pilot_distribution_outside_tolerant_band")
+    scenarios = load_scenario_matrix(root / "benchmark_config" / "scenario_matrix.csv")
+    effect_map = scenarios.set_index("scenario_id")["effect_strength"].astype(str).to_dict()
+    for row in truth.itertuples(index=False):
+        if effect_map[str(row.scenario_id)] == "null":
+            if int(row.number_nonreference_true) != 0 or int(row.number_nonreference_null) == 0:
+                blockers.append("null_truth_invalid")
+                break
+        elif int(row.number_nonreference_true) == 0 or int(row.number_nonreference_null) == 0:
+            blockers.append("nonnull_truth_lacks_true_or_null")
+            break
+    formal_moderate = metrics.loc[
+        metrics["scenario_id"].astype(str).eq("moderate_medium_calibrated")
+        & metrics["benchmark_role"].astype(str).eq("formal_candidate")
+    ]
+    if pd.to_numeric(formal_moderate["mean_Power"], errors="coerce").fillna(0).le(0).all():
+        blockers.append("all_formal_methods_zero_power_in_moderate")
+    strong = metrics.loc[
+        metrics["scenario_id"].astype(str).eq("strong_large_calibrated")
+        & metrics["benchmark_role"].astype(str).eq("formal_candidate")
+    ]
+    if pd.to_numeric(strong["mean_FPR"], errors="coerce").gt(0.20).any():
+        blockers.append("broad_strong_scenario_fpr")
+    if (
+        bayesian["status"].astype(str).ne("success").mean() > 0.5
+        or pd.to_numeric(bayesian["divergences"], errors="coerce").fillna(1).gt(0).mean() > 0.5
+    ):
+        blockers.append("majority_sccoda_diagnostics_invalid")
+    if not enabled.groupby(["scenario_id", "replicate_id"])["input_hash"].nunique().eq(1).all():
+        blockers.append("pilot_input_hash_mismatch")
+    figure_count = len(list((root / "pilot_figures").glob("*.png")))
+    if figure_count < 8:
+        blockers.append("pilot_figures_incomplete")
+
+    runtime = pd.to_numeric(enabled["runtime_seconds"], errors="coerce")
+    projected_serial_hours = float(runtime.sum() / 3 * 20 / 3600)
+    plan_path = root / "production_plan.md"
+    plan_lines = [
+        "# Phase 6 production plan",
+        "",
+        "Stop Point B: self-accepted" if not blockers else "Stop Point B: blocked",
+        "",
+        "- Production benchmark ID: `phase6-production-v1`.",
+        "- Fixed scale: 20 replicates per each of 7 preregistered scenarios.",
+        "- Enabled methods: Propeller, DCATS, CLR_LMM, sccomp, scCODA, and the naive Welch sanity check.",
+        "- Total enabled tasks: 840; every scenario × replicate uses one frozen input and truth table.",
+        "- 10% checkpoint: r001-r002 after all six methods are terminal.",
+        "- 50% checkpoint: r001-r010 after all six methods are terminal.",
+        "- Final batch: r011-r020, followed by Stop Point C, canonical evaluation, and plotting.",
+        "- scCODA runs one replicate ID (7 scenarios) per parent process; other methods may use larger method batches.",
+        "- No decision threshold, truth rule, reference, scenario, or sampling parameter changes after this gate.",
+        f"- Pilot-derived serial runtime projection: approximately {projected_serial_hours:.1f} hours.",
+        "- Monitoring uses only task-manifest summaries at method-batch boundaries and the 10%/50% checkpoints.",
+        "",
+        "Pilot caution: sccomp showed elevated FPR in some non-null/heterogeneous scenarios. "
+        "This remains a reported method result; it is not corrected by changing thresholds.",
+        "",
+        f"Blockers: {', '.join(blockers) if blockers else 'none'}.",
+        "",
+    ]
+    plan_path.write_text("\n".join(plan_lines), encoding="utf-8")
+    if blockers:
+        raise RuntimeError(f"Phase-6 Stop Point B blockers: {blockers}")
+    manifest["stop_point_b"] = {
+        "status": "self_accepted",
+        "created_at": _utc_now(),
+        "production_replicates_per_scenario": 20,
+        "production_plan": "production_plan.md",
+    }
+    manifest["status"] = "stop_point_b_self_accepted"
+    _write_json(manifest_path, manifest)
+    return plan_path
 
 
 def record_interrupted_tasks(
@@ -1005,6 +1277,8 @@ def _stability_summary(
         completed = len(nonreference)
         available = int(parse_boolean_series(nonreference.get("is_available", pd.Series(dtype=object))).eq(True).sum())
         valid = int(parse_boolean_series(nonreference.get("is_valid", pd.Series(dtype=object))).eq(True).sum())
+        runtime_values = pd.to_numeric(group["runtime_seconds"], errors="coerce")
+        number_tasks = int(len(group))
         rows.append({
             "method": method,
             "scenario_id": scenario_id,
@@ -1017,8 +1291,24 @@ def _stability_summary(
             "diagnostics_failures": int(group["status"].eq("diagnostics_invalid").sum()),
             "conversion_failures": int(group["status"].eq("conversion_failed").sum()),
             "completion_rate": completed / expected if expected else np.nan,
+            "availability_rate": available / expected if expected else np.nan,
             "validity_rate": valid / expected if expected else np.nan,
-            "median_runtime": float(pd.to_numeric(group["runtime_seconds"], errors="coerce").median()),
+            "diagnostics_invalid_rate": (
+                float(group["status"].eq("diagnostics_invalid").sum()) / number_tasks
+                if number_tasks else np.nan
+            ),
+            "runtime_failure_rate": (
+                float(group["status"].eq("runtime_failed").sum()) / number_tasks
+                if number_tasks else np.nan
+            ),
+            "conversion_failure_rate": (
+                float(group["status"].eq("conversion_failed").sum()) / number_tasks
+                if number_tasks else np.nan
+            ),
+            "median_runtime": float(runtime_values.median()),
+            "runtime_q25": float(runtime_values.quantile(0.25)),
+            "runtime_q75": float(runtime_values.quantile(0.75)),
+            "runtime_q90": float(runtime_values.quantile(0.90)),
         })
     result = pd.DataFrame(rows)
     roles = registry[["method_id", "benchmark_role", "scientific_status"]].rename(
@@ -1120,6 +1410,55 @@ def _plot_from_summaries(root: Path, *, pilot: bool) -> list[dict[str, str]]:
     axes[0].legend(fontsize=7)
     save(fig, "method_performance_overview", "summaries/scenario_level_metrics.csv")
 
+    heatmap = summary.pivot(index="method", columns="scenario_id", values="mean_Power")
+    fig, ax = plt.subplots(
+        figsize=(max(8, 1.25 * len(heatmap.columns)), max(3.5, 0.6 * len(heatmap.index)))
+    )
+    image = ax.imshow(
+        np.ma.masked_invalid(heatmap.to_numpy(dtype=float)),
+        aspect="auto",
+        vmin=0,
+        vmax=1,
+        cmap="viridis",
+    )
+    ax.set_xticks(np.arange(len(heatmap.columns)), heatmap.columns, rotation=70, ha="right")
+    ax.set_yticks(np.arange(len(heatmap.index)), heatmap.index)
+    ax.set_title("Scenario × method power")
+    fig.colorbar(image, ax=ax, label="Power")
+    save(fig, "scenario_method_power_heatmap", "summaries/scenario_level_metrics.csv")
+
+    sanity_summary = summary.groupby(
+        ["method", "benchmark_role"], sort=False, as_index=False
+    ).agg(
+        mean_power=("mean_Power", "mean"),
+        mean_fpr=("mean_FPR", "mean"),
+        mean_fdr=("empirical_FDR", "mean"),
+    )
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4.5))
+    role_colors = {
+        "sanity_check": "tab:orange",
+        "formal_candidate": "tab:blue",
+        "legacy_comparator": "tab:gray",
+    }
+    bar_colors = [
+        role_colors.get(str(value), "tab:gray")
+        for value in sanity_summary["benchmark_role"]
+    ]
+    for axis, metric, title in zip(
+        axes,
+        ("mean_power", "mean_fpr", "mean_fdr"),
+        ("Mean non-null power", "Mean FPR", "Mean empirical FDR"),
+        strict=True,
+    ):
+        values = pd.to_numeric(sanity_summary[metric], errors="coerce")
+        axis.bar(sanity_summary["method"], values, color=bar_colors)
+        axis.tick_params(axis="x", rotation=55)
+        axis.set_ylim(0, 1.02)
+        axis.set_title(title)
+        if metric in {"mean_fpr", "mean_fdr"}:
+            axis.axhline(0.05, linestyle="--", color="black", linewidth=1)
+    save(fig, "sanity_check_comparison", "summaries/scenario_level_metrics.csv")
+
     fig, axes = plt.subplots(1, 3, figsize=(14, 4))
     grouped = stability.groupby("method", sort=False).agg(
         completion_rate=("completion_rate", "mean"),
@@ -1202,6 +1541,159 @@ def _plot_from_summaries(root: Path, *, pilot: bool) -> list[dict[str, str]]:
     return figures
 
 
+def _write_pilot_validation_tables(root: Path, tasks: pd.DataFrame) -> None:
+    """Persist simulation/truth/status checks used for the Phase-6 pilot gate."""
+    summary_rows: list[dict[str, Any]] = []
+    truth_rows: list[dict[str, Any]] = []
+    for (scenario_id, replicate_id), _ in tasks.groupby(
+        ["scenario_id", "replicate_id"], sort=False
+    ):
+        paths = _replicate_paths(root, str(scenario_id), str(replicate_id))
+        abundance = pd.read_csv(paths["simulation"] / "canonical_abundance_input.csv")
+        samples = pd.read_csv(paths["simulation"] / "sample_metadata.csv")
+        truth = pd.read_csv(paths["truth"] / "truth_table.csv")
+        manifest = json.loads(
+            (paths["manifests"] / "run_manifest.json").read_text(encoding="utf-8")
+        )
+        counts = abundance.pivot(index="sample_id", columns="cell_type", values="count")
+        proportions = abundance.pivot(
+            index="sample_id", columns="cell_type", values="proportion"
+        )
+        depths = counts.sum(axis=1)
+        means = proportions.mean(axis=0)
+        variances = proportions.var(axis=0, ddof=1)
+        concentration = (
+            depths.median() * (1 - variances / (means * (1 - means)))
+            / ((variances / (means * (1 - means))) * depths.median() - 1)
+        ).where(lambda values: values.gt(0) & np.isfinite(values))
+        log_counts = np.log(counts.add(0.5))
+        clr = log_counts.subtract(log_counts.mean(axis=1), axis=0)
+        donor = samples.set_index("sample_id").loc[clr.index, "donor_id"].astype(str)
+        donor_noise = clr.groupby(donor).mean().std(ddof=1).median()
+        sample_heterogeneity = np.sqrt(
+            clr.subtract(clr.median()).pow(2).mean(axis=1)
+        ).median()
+        summary_rows.append({
+            "scenario_id": scenario_id,
+            "replicate_id": replicate_id,
+            "input_hash": manifest["input_hash"],
+            "number_samples": int(len(samples)),
+            "number_cell_types": int(counts.shape[1]),
+            "total_count_mean": float(depths.mean()),
+            "total_count_median": float(depths.median()),
+            "total_count_sd": float(depths.std(ddof=1)),
+            "zero_frequency": float(counts.eq(0).to_numpy().mean()),
+            "low_abundance_q10": float(means.quantile(0.10)),
+            "between_sample_variance_median": float(variances.median()),
+            "estimated_dm_concentration_median": float(concentration.median()),
+            "donor_clr_noise_sd": float(donor_noise),
+            "sample_level_heterogeneity": float(sample_heterogeneity),
+            "maximum_proportion_sum_error": float(
+                (proportions.sum(axis=1) - 1).abs().max()
+            ),
+        })
+        population = truth.loc[truth["truth_source"].astype(str).eq("population")].copy()
+        flags = parse_boolean_series(population["is_true_effect"])
+        reference = population["cell_type"].astype(str).eq(
+            population["reference_cell_type"].astype(str)
+        )
+        truth_rows.append({
+            "scenario_id": scenario_id,
+            "replicate_id": replicate_id,
+            "number_population_true": int(flags.eq(True).sum()),
+            "number_population_null": int(flags.eq(False).sum()),
+            "number_nonreference_true": int(flags.loc[~reference].eq(True).sum()),
+            "number_nonreference_null": int(flags.loc[~reference].eq(False).sum()),
+            "reference_cell_type": str(population["reference_cell_type"].iloc[0]),
+            "reference_is_true": bool(flags.loc[reference].eq(True).any()),
+        })
+    simulation_summary = pd.DataFrame(summary_rows)
+    truth_summary = pd.DataFrame(truth_rows)
+    simulation_summary.to_csv(root / "pilot_simulation_summary.csv", index=False)
+    truth_summary.to_csv(root / "pilot_truth_summary.csv", index=False)
+
+    config = yaml.safe_load(_run_config_path(root).read_text(encoding="utf-8"))
+    calibration_manifest = Path(str(config["calibration_manifest"]))
+    if not calibration_manifest.is_absolute():
+        calibration_manifest = REPOSITORY_ROOT / calibration_manifest
+    calibration_root = calibration_manifest.parent
+    layer_parameters = pd.read_csv(
+        calibration_root
+        / "parameter_estimation"
+        / "layer1_tcell"
+        / "estimated_parameters.csv"
+    ).set_index("parameter")
+    scenarios = pd.read_csv(root / "benchmark_config" / "scenario_matrix.csv")
+    primary_scenario = "null_medium_calibrated"
+    configured = scenarios.set_index("scenario_id").loc[primary_scenario]
+    observed = simulation_summary.loc[
+        simulation_summary["scenario_id"].eq(primary_scenario)
+    ]
+    metric_map = {
+        "n_celltypes": "number_cell_types",
+        "total_count_mean": "total_count_mean",
+        "total_count_sd": "total_count_sd",
+        "zero_frequency": "zero_frequency",
+        "low_abundance_q10": "low_abundance_q10",
+        "baseline_alpha_scale": "estimated_dm_concentration_median",
+        "donor_noise_sd": "donor_clr_noise_sd",
+        "sample_level_heterogeneity": "sample_level_heterogeneity",
+    }
+    comparison_rows: list[dict[str, Any]] = []
+    for parameter, observed_column in metric_map.items():
+        raw = float(layer_parameters.loc[parameter, "raw_estimate"])
+        tolerant = float(layer_parameters.loc[parameter, "simulation_value"])
+        scenario_value = (
+            float(configured[parameter])
+            if parameter in configured.index and pd.notna(configured[parameter])
+            else tolerant
+        )
+        pilot_value = float(pd.to_numeric(observed[observed_column], errors="coerce").mean())
+        use_observed_raw = parameter in {"donor_noise_sd", "sample_level_heterogeneity"}
+        acceptance_reference = raw if use_observed_raw else scenario_value
+        acceptance_basis = (
+            "real_data_observed_moment"
+            if use_observed_raw else "scenario_configured_value"
+        )
+        ratio = (
+            pilot_value / acceptance_reference
+            if acceptance_reference != 0 else np.nan
+        )
+        within = (
+            bool(0.5 <= ratio <= 2.0)
+            if np.isfinite(ratio)
+            else bool(abs(pilot_value - scenario_value) <= 0.05)
+        )
+        if parameter in {"n_celltypes"}:
+            within = bool(pilot_value == scenario_value)
+        comparison_rows.append({
+            "scenario_id": primary_scenario,
+            "parameter": parameter,
+            "real_data_raw_estimate": raw,
+            "tolerant_simulation_value": tolerant,
+            "scenario_configured_value": scenario_value,
+            "pilot_observed_mean": pilot_value,
+            "acceptance_reference": acceptance_reference,
+            "acceptance_basis": acceptance_basis,
+            "pilot_to_acceptance_reference_ratio": ratio,
+            "tolerance_rule": (
+                "exact" if parameter == "n_celltypes" else "0.5 <= observed/configured <= 2.0"
+            ),
+            "within_tolerant_band": within,
+        })
+    pd.DataFrame(comparison_rows).to_csv(
+        root / "pilot_distribution_comparison.csv", index=False
+    )
+    status = (
+        tasks.loc[tasks["status"].ne("skipped_with_reason")]
+        .groupby(["method", "status"], sort=False)
+        .size()
+        .rename("number_tasks")
+        .reset_index()
+    )
+    status.to_csv(root / "pilot_method_status.csv", index=False)
+
+
 def evaluate_benchmark(benchmark_root: str | Path) -> Path:
     root = Path(benchmark_root).resolve()
     if any((root / "evaluation").iterdir()) or any((root / "summaries").iterdir()):
@@ -1238,13 +1730,20 @@ def evaluate_benchmark(benchmark_root: str | Path) -> Path:
     truth = validate_truth_table(pd.concat(truth_frames, ignore_index=True))
     enabled_methods = tuple(registry.loc[registry["enabled"].astype(bool), "method_id"].astype(str))
     spec_doc = yaml.safe_load((root / "benchmark_config" / "evaluation_spec.yaml").read_text(encoding="utf-8"))
+    policy_aliases = {
+        "exclude_common_key_with_reason": "exclude_and_report",
+    }
     spec = EvaluationSpec(
         truth_source=str(spec_doc["truth_source"]),
         required_effect_component=str(spec_doc["required_effect_component"]),
         eligible_estimand_levels=tuple(spec_doc["eligible_estimand_levels"]),
         method_universe_policy=str(spec_doc["method_universe_policy"]),
-        missing_result_policy=str(spec_doc["missing_result_policy"]),
-        invalid_result_policy=str(spec_doc["invalid_result_policy"]),
+        missing_result_policy=policy_aliases.get(
+            str(spec_doc["missing_result_policy"]), str(spec_doc["missing_result_policy"])
+        ),
+        invalid_result_policy=policy_aliases.get(
+            str(spec_doc["invalid_result_policy"]), str(spec_doc["invalid_result_policy"])
+        ),
         reference_policy=str(spec_doc["reference_policy"]),
         methods=enabled_methods,
     )
@@ -1343,6 +1842,7 @@ def evaluate_benchmark(benchmark_root: str | Path) -> Path:
     pilot = str(json.loads((root / "benchmark_manifest.json").read_text(encoding="utf-8"))["phase"]) == "pilot"
     figures = _plot_from_summaries(root, pilot=pilot)
     if pilot:
+        _write_pilot_validation_tables(root, tasks)
         shutil.copyfile(root / "benchmark_task_manifest.csv", root / "pilot_status.csv")
         shutil.copyfile(summaries / "scenario_level_metrics.csv", root / "pilot_metrics.csv")
         shutil.copyfile(summaries / "runtime_summary.csv", root / "pilot_runtime.csv")
@@ -1374,8 +1874,9 @@ def evaluate_benchmark(benchmark_root: str | Path) -> Path:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest.update({"status": "evaluation_and_figures_complete", "finished_at": _utc_now()})
     _write_json(manifest_path, manifest)
+    phase_label = _phase_label_for_run(root)
     result_manifest = {
-        "schema_version": "phase5-result-manifest-v1",
+        "schema_version": f"{phase_label}-result-manifest-v1",
         "benchmark_id": tasks["benchmark_id"].iloc[0],
         "phase": "pilot" if pilot else "production",
         "status": "evaluation_and_figures_complete",
@@ -1393,8 +1894,9 @@ def finalize_stop_point_d(benchmark_root: str | Path) -> Path:
     """Seal the human-review package after its narrative reports are written."""
     root = Path(benchmark_root).resolve()
     final_report = root / "final_report"
-    required = (
-        "phase5_final_report.md",
+    phase_label = _phase_label_for_run(root)
+    required = [
+        f"{phase_label}_final_report.md",
         "method_performance_summary.csv",
         "method_stability_summary.csv",
         "scenario_level_metrics.csv",
@@ -1402,8 +1904,14 @@ def finalize_stop_point_d(benchmark_root: str | Path) -> Path:
         "runtime_summary.csv",
         "diagnostic_failure_summary.csv",
         "figure_index.md",
-        "phase5_remaining_questions.md",
-    )
+        f"{phase_label}_remaining_questions.md",
+    ]
+    if phase_label == "phase6":
+        required.extend([
+            "stratified_parameter_report.md",
+            "simulation_parameter_manifest.yaml",
+            "method_completion_matrix.csv",
+        ])
     missing = [name for name in required if not (final_report / name).is_file()]
     if not (final_report / "figures").is_dir():
         missing.append("figures/")
@@ -1430,13 +1938,17 @@ def finalize_stop_point_d(benchmark_root: str | Path) -> Path:
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Phase-5 immutable benchmark orchestrator")
+    parser = argparse.ArgumentParser(description="Immutable differential-abundance benchmark orchestrator")
     subparsers = parser.add_subparsers(dest="command", required=True)
     initialize = subparsers.add_parser("initialize")
     initialize.add_argument("benchmark_id")
     initialize.add_argument("--phase", choices=("pilot", "production"), required=True)
     initialize.add_argument("--replicates", type=int, required=True)
     initialize.add_argument("--output-base", type=Path, default=REPOSITORY_ROOT / "benchmark_runs")
+    initialize.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
+    initialize.add_argument("--scenarios", type=Path, default=DEFAULT_SCENARIOS)
+    initialize.add_argument("--evaluation", type=Path, default=DEFAULT_EVALUATION)
+    initialize.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     run = subparsers.add_parser("run")
     run.add_argument("benchmark_root", type=Path)
     run.add_argument("--only-method", action="append", default=[])
@@ -1455,6 +1967,10 @@ def main(argv: list[str] | None = None) -> None:
     checkpoint = subparsers.add_parser("checkpoint")
     checkpoint.add_argument("benchmark_root", type=Path)
     checkpoint.add_argument("--replicate", action="append", required=True)
+    stop_c = subparsers.add_parser("accept-stop-c")
+    stop_c.add_argument("benchmark_root", type=Path)
+    stop_b = subparsers.add_parser("accept-stop-b")
+    stop_b.add_argument("benchmark_root", type=Path)
     finalize = subparsers.add_parser("finalize-stop-d")
     finalize.add_argument("benchmark_root", type=Path)
     args = parser.parse_args(argv)
@@ -1464,6 +1980,10 @@ def main(argv: list[str] | None = None) -> None:
             phase=args.phase,
             replicates=args.replicates,
             output_base=args.output_base,
+            registry_path=args.registry,
+            scenario_path=args.scenarios,
+            evaluation_path=args.evaluation,
+            config_path=args.config,
         )
     elif args.command == "run":
         result = run_pending_tasks(
@@ -1489,6 +2009,10 @@ def main(argv: list[str] | None = None) -> None:
             args.benchmark_root,
             replicate_ids=set(args.replicate),
         )
+    elif args.command == "accept-stop-c":
+        result = accept_phase6_stop_point_c(args.benchmark_root)
+    elif args.command == "accept-stop-b":
+        result = accept_phase6_stop_point_b(args.benchmark_root)
     elif args.command == "finalize-stop-d":
         result = finalize_stop_point_d(args.benchmark_root)
     else:

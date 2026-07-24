@@ -1,7 +1,7 @@
 from __future__ import annotations
 import warnings
 import logging
-from typing import Sequence, Tuple
+from typing import Mapping, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -28,6 +28,8 @@ def simulate_DM_data(
         n_donors: int = 8,
         n_samples_per_donor: int = 4,
         n_celltypes: int = 50,
+        cell_type_names: Sequence[str] | None = None,
+        baseline_composition: Mapping[str, float] | Sequence[float] | None = None,
         baseline_alpha_scale: float = 30.0,
         disease_effect_size: float = 0.5,
         tissue_effect_size: float = 0.6,
@@ -117,7 +119,12 @@ def simulate_DM_data(
         raise ValueError("`total_count_mean` and `min_count` must be greater than 0.")
 
     rng = np.random.default_rng(random_state)
-    cell_type_names = [f"CT{i + 1}" for i in range(n_celltypes)]
+    if cell_type_names is None:
+        cell_type_names = [f"CT{i + 1}" for i in range(n_celltypes)]
+    else:
+        cell_type_names = [str(value) for value in cell_type_names]
+        if len(cell_type_names) != n_celltypes or len(set(cell_type_names)) != n_celltypes:
+            raise ValueError("`cell_type_names` must contain n_celltypes unique values.")
     if (
         population_reference_cell_type is not None
         and str(population_reference_cell_type) not in set(map(str, protected_cell_types))
@@ -125,7 +132,24 @@ def simulate_DM_data(
         raise ValueError("The population reference cell type must also be protected from injection.")
     
     # 1. Baseline alpha
-    baseline = rng.uniform(0.5, 2.0, n_celltypes)
+    if baseline_composition is None:
+        baseline = rng.uniform(0.5, 2.0, n_celltypes)
+    elif isinstance(baseline_composition, Mapping):
+        missing_baseline = set(cell_type_names) - set(map(str, baseline_composition))
+        if missing_baseline:
+            raise ValueError(
+                "`baseline_composition` mapping is missing cell types: "
+                f"{sorted(missing_baseline)}"
+            )
+        baseline = np.asarray(
+            [baseline_composition[str(cell_type)] for cell_type in cell_type_names], dtype=float
+        )
+    else:
+        baseline = np.asarray(list(baseline_composition), dtype=float)
+        if len(baseline) != n_celltypes:
+            raise ValueError("`baseline_composition` must have n_celltypes values.")
+    if not np.isfinite(baseline).all() or (baseline <= 0).any():
+        raise ValueError("`baseline_composition` values must be finite and positive.")
     baseline = baseline / baseline.sum() * baseline_alpha_scale
     
     # 1.5 效应向量 (假设该函数已定义)

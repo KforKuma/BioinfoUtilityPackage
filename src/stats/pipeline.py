@@ -13,6 +13,7 @@ import pandas as pd
 import yaml
 
 from src.stats.adapters import (
+    CLRLMMAdapter,
     DCATSAdapter,
     MockBayesianAdapter,
     MockFailureAdapter,
@@ -401,6 +402,7 @@ def _build_adapters(config: dict[str, Any], run_root: Path):
                 num_warmup=int(runtime.get("sccoda_num_warmup", 500)),
                 num_chains=int(runtime.get("sccoda_num_chains", 2)),
                 rng_key=int(runtime.get("sccoda_rng_key", 7)),
+                target_accept_prob=float(runtime.get("sccoda_target_accept_prob", 0.98)),
             ))
         elif method == "tri_anchor":
             tri_config = dict(config.get("tri_anchor", {}))
@@ -421,6 +423,13 @@ def _build_adapters(config: dict[str, Any], run_root: Path):
             adapters.append(MockFailureAdapter())
         elif method == "naive_welch_proportion":
             adapters.append(NaiveWelchProportionAdapter(method_version="scipy"))
+        elif method == "clr_lmm":
+            adapters.append(CLRLMMAdapter(
+                method_version="statsmodels",
+                pseudocount=float(runtime.get("clr_lmm_pseudocount", 1.0)),
+                group_label=str(runtime.get("clr_lmm_group_label", "donor_id")),
+                covariates=tuple(runtime.get("clr_lmm_covariates", ["tissue"])),
+            ))
         else:
             raise ValueError(f"Unsupported pipeline method: {method!r}")
     return adapters
