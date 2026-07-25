@@ -1,6 +1,7 @@
 from .base import AdapterResult, BaseDifferentialAbundanceAdapter
 from .clr_lmm import CLRLMMAdapter
 from .dcats import DCATSAdapter
+from .engine_methods import EngineMethodAdapter
 from .mock import MockBayesianAdapter, MockFailureAdapter, MockFrequentistAdapter
 from .propeller import PropellerAdapter
 from .r_bridge import RScriptBridge
@@ -13,6 +14,7 @@ __all__ = [
     "BaseDifferentialAbundanceAdapter",
     "CLRLMMAdapter",
     "DCATSAdapter",
+    "EngineMethodAdapter",
     "MockBayesianAdapter",
     "MockFailureAdapter",
     "MockFrequentistAdapter",

@@ -68,16 +68,28 @@ def check_estimand_compatibility(
     if "variability" in estimand and "composition" in benchmark:
         return "incompatible"
     if pd.notna(reference_cell_type) and str(reference_cell_type):
-        if "relative_compositional" not in estimand and "pairwise_celltype_log_ratio" not in estimand:
+        reference_relative_estimands = {
+            "dirichlet_log_alpha_contrast",
+            "dirichlet_multinomial_log_alpha_contrast",
+        }
+        if (
+            "relative_compositional" not in estimand
+            and "pairwise_celltype_log_ratio" not in estimand
+            and estimand not in reference_relative_estimands
+        ):
             return "incompatible"
         return "direction_only"
     if method.lower() in {
         "propeller", "dcats", "sccomp", "sccoda", "naive_welch_proportion",
         "clr_lmm",
+        "dirichlet_multinomial_wald", "dirichlet_wald", "dkd", "pydeseq2",
+        "permutation_mixed", "pclr_ols", "pclr_lmm", "anova_naive",
+        "anova_transformed",
     }:
         if scale in {
             "logit", "arcsine_sqrt", "log_odds", "logit_unconstrained", "log_ratio",
             "proportion_difference", "clr_log_ratio",
+            "natural_log_fold_change", "arcsine_sqrt_difference",
         }:
             return "direction_only"
     return "incompatible"

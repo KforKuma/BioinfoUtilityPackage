@@ -135,7 +135,13 @@ def _neg_loglik_and_grad_DM(
     
     grad_beta = np.zeros((K - 1, P))
     for k in range(K - 1):
-        grad_beta[k, :] = -(X.T @ H[:, k])
+        # d alpha_ij / d eta_ik includes alpha_sum * p_ik.  The historical
+        # implementation omitted this chain-rule factor, so BFGS compared the
+        # correct likelihood with an unrelated gradient and commonly stopped
+        # with precision-loss/nonconvergence.
+        grad_beta[k, :] = -(
+            X.T @ (alpha_sum * P_hat[:, k] * H[:, k])
+        )
     
     term_alpha_sum = (
             psi(alpha_sum) - psi(alpha_sum + N)
@@ -240,7 +246,9 @@ def run_Dirichlet_Wald(df_all: pd.DataFrame,
                        group_label="sample_id",
                        maxiter: int = 1000,
                        alpha: float = 0.05,
-                       verbose: bool = False) -> Dict[str, Any]:
+                       verbose: bool = False,
+                       composition_reference_cell_type: str | None = None,
+                       return_all_celltypes: bool = False) -> Dict[str, Any]:
     """运行 Dirichlet 回归 Wald 检验。
 
     该实现面向 cell subtype/subpopulation 组成数据：先把 count 长表转为
@@ -308,8 +316,12 @@ def run_Dirichlet_Wald(df_all: pd.DataFrame,
                            alpha=alpha)
     
     
-    best_ref = find_stable_reference(wide)
-    if best_ref == cell_type and K >= 2:
+    best_ref = (
+        composition_reference_cell_type
+        if composition_reference_cell_type in celltypes
+        else find_stable_reference(wide)
+    )
+    if best_ref == cell_type and K >= 2 and not return_all_celltypes:
         # ALR 的最后一列是隐式参考类，目标亚群不能放在最后，否则没有对应参数行。
         non_target = [ct for ct in celltypes if ct != cell_type]
         best_ref = non_target[0]
@@ -461,6 +473,30 @@ def run_Dirichlet_Wald(df_all: pd.DataFrame,
             })
         
         contrast_table = pd.DataFrame(contrast_rows).set_index("other")
+        if return_all_celltypes:
+            all_rows = []
+            for target_index, target_cell_type in enumerate(celltypes[:-1]):
+                for g in groups:
+                    if g == ref_label:
+                        continue
+                    delta_x = mean_X_by_group[g] - mean_X_ref
+                    delta = float(delta_x @ params[target_index, :])
+                    c_vec = np.zeros(((K - 1) * P,))
+                    c_vec[target_index * P:(target_index + 1) * P] = delta_x
+                    variance = float(c_vec @ (hess_inv @ c_vec))
+                    standard_error = float(np.sqrt(max(abs(variance), 1e-12)))
+                    statistic = delta / standard_error
+                    pvalue = float(2.0 * (1.0 - norm.cdf(abs(statistic))))
+                    predicted_ref = safe_exp_prop(mean_X_ref, params, target_index)
+                    predicted_group = safe_exp_prop(mean_X_by_group[g], params, target_index)
+                    all_rows.append({
+                        "cell_type": target_cell_type, "ref": ref_label, "other": g,
+                        "mean_ref": predicted_ref, "mean_other": predicted_group,
+                        "prop_diff": predicted_group - predicted_ref, "Coef.": delta,
+                        "Std.Err": standard_error, "z": statistic, "P>|z|": pvalue,
+                    })
+            extra["all_celltype_contrasts"] = all_rows
+            extra["composition_reference_cell_type"] = celltypes[-1]
         extra.update({"groups": groups})
     
     except Exception as e:
@@ -535,7 +571,9 @@ def run_Dirichlet_Multinomial_Wald(df_all: pd.DataFrame,
                                    group_label: str = "sample_id",
                                    maxiter: int = 1000,
                                    alpha: float = 0.05,
-                                   verbose: bool = False) -> Dict[str, Any]:
+                                   verbose: bool = False,
+                                   composition_reference_cell_type: str | None = None,
+                                   return_all_celltypes: bool = False) -> Dict[str, Any]:
     """运行 Dirichlet-Multinomial Wald 检验。
 
     该版本额外估计 ``alpha_sum`` 以表达 overdispersion，因此 p 值通常比普通
@@ -589,9 +627,15 @@ def run_Dirichlet_Multinomial_Wald(df_all: pd.DataFrame,
                            contrast_table=None,
                            extra={"error": "Need at least two cell_type columns for Dirichlet-Multinomial regression."})
     
-    # Target Swap Logic
+    # Use an explicitly registered compositional reference for one common fit.
+    if composition_reference_cell_type in celltypes:
+        cols_to_swap = [
+            value for value in celltypes if value != composition_reference_cell_type
+        ] + [composition_reference_cell_type]
+        wide = wide[cols_to_swap]
+        celltypes = list(wide.columns)
     target_idx = celltypes.index(cell_type)
-    if target_idx == K - 1:
+    if target_idx == K - 1 and not return_all_celltypes:
         cols_to_swap = celltypes.copy()
         cols_to_swap[target_idx], cols_to_swap[-2] = cols_to_swap[-2], cols_to_swap[target_idx]
         wide = wide[cols_to_swap]
@@ -655,6 +699,22 @@ def run_Dirichlet_Multinomial_Wald(df_all: pd.DataFrame,
     
     extra = {"message": res.message} if res.success else {"warning": "optimizer did not converge",
                                                           "message": res.message}
+    extra["optimizer_success"] = bool(res.success)
+    extra["optimizer_objective"] = float(res.fun) if np.isfinite(res.fun) else np.nan
+    extra["optimizer_gradient_inf_norm"] = (
+        float(np.linalg.norm(res.jac, ord=np.inf))
+        if getattr(res, "jac", None) is not None and np.isfinite(res.jac).all()
+        else np.nan
+    )
+    extra["convergence_accepted"] = bool(
+        res.success
+        or (
+            np.isfinite(extra["optimizer_gradient_inf_norm"])
+            and extra["optimizer_gradient_inf_norm"] <= 1e-4
+            and np.isfinite(extra["optimizer_objective"])
+            and np.isfinite(res.x).all()
+        )
+    )
     
     # Extract Params
     params_full = res.x
@@ -765,6 +825,32 @@ def run_Dirichlet_Multinomial_Wald(df_all: pd.DataFrame,
                     "significant": row["P>|z|"] < 0.05
                 })
         contrast_table = pd.DataFrame(contrast_rows).set_index("other")
+        if return_all_celltypes:
+            all_rows = []
+            for target_index, target_cell_type in enumerate(celltypes[:-1]):
+                for g in groups:
+                    if g == ref_label:
+                        continue
+                    delta_x = mean_X_by_group[g] - mean_X_ref
+                    delta = float(delta_x @ params[target_index, :])
+                    c = np.zeros((nparam_total,), dtype=float)
+                    c[target_index * P:(target_index + 1) * P] = delta_x
+                    variance = float(c @ (hess_inv @ c))
+                    standard_error = float(np.sqrt(max(abs(variance), 1e-12)))
+                    statistic = delta / standard_error
+                    pvalue = float(2.0 * (1.0 - norm.cdf(abs(statistic))))
+                    eta_ref = np.concatenate([mean_X_ref @ params.T, [0.0]])
+                    eta_group = np.concatenate([mean_X_by_group[g] @ params.T, [0.0]])
+                    predicted_ref = float(np.exp(eta_ref)[target_index] / np.exp(eta_ref).sum())
+                    predicted_group = float(np.exp(eta_group)[target_index] / np.exp(eta_group).sum())
+                    all_rows.append({
+                        "cell_type": target_cell_type, "ref": ref_label, "other": g,
+                        "mean_ref": predicted_ref, "mean_other": predicted_group,
+                        "prop_diff": predicted_group - predicted_ref, "Coef.": delta,
+                        "Std.Err": standard_error, "z": statistic, "P>|z|": pvalue,
+                    })
+            extra["all_celltype_contrasts"] = all_rows
+            extra["composition_reference_cell_type"] = celltypes[-1]
         extra.update({"fixed_effect": fixed_effect_df,
                       "groups": groups,
                       "estimated_alpha_sum": float(alpha_sum_est)})

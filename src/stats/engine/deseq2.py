@@ -173,6 +173,7 @@ class PyDESeq2Manager:
                         "Std.Err.": row["lfcSE"] * np.log(2),
                         "z": row["stat"],
                         "P>|z|": row["pvalue"],
+                        "p_adj": row.get("padj", np.nan),
                         "significant": row["pvalue"] < alpha,
                         "direction": "other_greater" if coef_ln > 0 else "ref_greater"
                     })
@@ -186,6 +187,7 @@ class PyDESeq2Manager:
                     tissue_rows.append({
                         "other": t_label, "ref": "nif", "Coef.": lfc_ln,
                         "P>|z|": row["pvalue"], "significant": row["pvalue"] < alpha,
+                        "p_adj": row.get("padj", np.nan),
                         "direction": "other_greater" if lfc_ln > 0 else "ref_greater"
                     })
             

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone
 from hashlib import sha256
 import importlib.metadata
@@ -233,13 +234,35 @@ def _save_frozen_replicate(
     replicate_id = f"r{replicate_number:03d}"
     run_id = f"{benchmark_id}:{scenario_id}:{replicate_id}"
     analysis_id = f"{scenario_id}-{replicate_id}"
-    phase_offset = 0 if phase == "pilot" else 100_000
-    seed = (
-        int(benchmark_config["base_seed"])
-        + phase_offset
-        + int(scenario.name) * 1000
-        + replicate_number
-    )
+    seed_strategy = str(benchmark_config.get("seed_strategy", "offset"))
+    if seed_strategy == "sha256_benchmark_scenario_replicate":
+        excluded: set[int] = set()
+        excluded_path = benchmark_config.get("excluded_seed_manifest")
+        if excluded_path:
+            excluded_frame = pd.read_csv(excluded_path)
+            if "simulation_seed" not in excluded_frame:
+                raise ValueError("excluded_seed_manifest requires simulation_seed.")
+            excluded = set(pd.to_numeric(
+                excluded_frame["simulation_seed"], errors="raise"
+            ).astype(int))
+        attempt = 0
+        while True:
+            suffix = "" if attempt == 0 else f"|retry={attempt}"
+            token = f"{benchmark_id}|{scenario_id}|{replicate_id}{suffix}"
+            seed = int(sha256(token.encode("utf-8")).hexdigest()[:8], 16)
+            if seed not in excluded:
+                break
+            attempt += 1
+    elif seed_strategy == "offset":
+        phase_offset = 0 if phase == "pilot" else 100_000
+        seed = (
+            int(benchmark_config["base_seed"])
+            + phase_offset
+            + int(scenario.name) * 1000
+            + replicate_number
+        )
+    else:
+        raise ValueError(f"Unknown benchmark seed_strategy: {seed_strategy!r}")
     paths = _replicate_paths(benchmark_root, scenario_id, replicate_id)
     paths["root"].mkdir(parents=True, exist_ok=False)
     for key in ("simulation", "truth", "methods", "manifests"):
@@ -427,6 +450,135 @@ def initialize_benchmark(
     return root
 
 
+def derive_expanded_benchmark(
+    source_benchmark_root: str | Path,
+    benchmark_id: str,
+    *,
+    output_base: str | Path = REPOSITORY_ROOT / "benchmark_runs",
+    registry_path: str | Path = REPOSITORY_ROOT / "config" / "phase6_method_benchmark_registry.yaml",
+    config_path: str | Path = REPOSITORY_ROOT / "config" / "phase6_benchmark.yaml",
+) -> Path:
+    """Create a new immutable benchmark lineage from frozen inputs and completed outputs.
+
+    The source tree is never modified. Frozen canonical inputs are copied byte-for-byte,
+    existing method outputs are re-keyed to the new run lineage, and methods newly enabled
+    by the supplied registry become pending tasks. Evaluation/report artifacts are not
+    copied, preventing stale summaries from entering the expanded review package.
+    """
+    source = Path(source_benchmark_root).resolve()
+    target = Path(output_base).resolve() / benchmark_id
+    if target.exists():
+        raise FileExistsError(f"Derived benchmark already exists: {target}")
+    source_manifest = json.loads((source / "benchmark_manifest.json").read_text(encoding="utf-8"))
+    if source_manifest.get("status") != "stop_point_d_awaiting_human_review":
+        raise RuntimeError("The source benchmark must be sealed at Stop Point D.")
+    registry = load_method_registry(registry_path)
+    enabled_methods = set(
+        registry.loc[registry["enabled"].astype(bool), "method_id"].astype(str)
+    )
+    registry_lookup = registry.set_index("method_id")
+    excluded_root_entries = {
+        "evaluation", "summaries", "figures", "diagnostics", "logs", "final_report",
+        "method_completion_matrix.csv", "missing_success_outputs.csv",
+        "evaluation_readiness_report.md", "runtime_summary.csv", "method_failure_summary.csv",
+    }
+
+    def ignore_stale(path: str, names: list[str]) -> set[str]:
+        return excluded_root_entries & set(names) if Path(path).resolve() == source else set()
+
+    shutil.copytree(source, target, ignore=ignore_stale)
+    for name in ("evaluation", "summaries", "figures", "diagnostics", "logs", "final_report"):
+        (target / name).mkdir()
+    shutil.copyfile(config_path, target / "benchmark_config" / "benchmark_config.yaml")
+    shutil.copyfile(registry_path, target / "method_registry" / "method_benchmark_registry.yaml")
+
+    tasks = pd.read_csv(target / "benchmark_task_manifest.csv")
+    tasks["benchmark_id"] = benchmark_id
+    for (scenario_id, replicate_id), indices in tasks.groupby(
+        ["scenario_id", "replicate_id"], sort=False
+    ).groups.items():
+        new_run_id = f"{benchmark_id}:{scenario_id}:{replicate_id}"
+        tasks.loc[list(indices), "run_id"] = new_run_id
+        replicate = _replicate_paths(target, str(scenario_id), str(replicate_id))
+        run_manifest_path = replicate["manifests"] / "run_manifest.json"
+        run_manifest = json.loads(run_manifest_path.read_text(encoding="utf-8"))
+        old_run_id = str(run_manifest["run_id"])
+        run_manifest.update({
+            "run_id": new_run_id,
+            "derived_from_run_id": old_run_id,
+            "derived_from_benchmark_id": source.name,
+            "status": "frozen_input_reused_for_expanded_methods",
+        })
+        for truth_csv in replicate["truth"].glob("*.csv"):
+            frame = pd.read_csv(truth_csv)
+            if "run_id" in frame:
+                frame["run_id"] = new_run_id
+                frame.to_csv(truth_csv, index=False)
+        for index in indices:
+            method = str(tasks.at[index, "method"])
+            if method not in registry_lookup.index:
+                continue
+            registered = registry_lookup.loc[method]
+            tasks.at[index, "benchmark_role"] = registered["benchmark_role"]
+            tasks.at[index, "scientific_status"] = registered["scientific_status"]
+            if method in enabled_methods and str(tasks.at[index, "status"]) == "skipped_with_reason":
+                tasks.at[index, "status"] = "pending"
+                tasks.at[index, "failure_reason"] = pd.NA
+                tasks.at[index, "attempt_count"] = 0
+                tasks.at[index, "started_at"] = pd.NA
+                tasks.at[index, "finished_at"] = pd.NA
+                tasks.at[index, "runtime_seconds"] = pd.NA
+                tasks.at[index, "result_subdir"] = "."
+            elif method not in enabled_methods:
+                tasks.at[index, "status"] = "skipped_with_reason"
+                tasks.at[index, "failure_reason"] = registered["notes"]
+            method_root = replicate["methods"] / method
+            if method_root.is_dir() and str(tasks.at[index, "status"]) != "pending":
+                for csv_name in ("public_contrast.csv", "evidence.csv", "diagnostics.csv"):
+                    csv_path = method_root / csv_name
+                    if csv_path.is_file() and csv_path.stat().st_size > 1:
+                        try:
+                            frame = pd.read_csv(csv_path)
+                        except pd.errors.EmptyDataError:
+                            continue
+                        if "run_id" in frame:
+                            frame["run_id"] = new_run_id
+                            frame.to_csv(csv_path, index=False)
+                task_manifest_path = method_root / "task_manifest.json"
+                if task_manifest_path.is_file():
+                    task_manifest = json.loads(task_manifest_path.read_text(encoding="utf-8"))
+                    task_manifest["benchmark_id"] = benchmark_id
+                    task_manifest["run_id"] = new_run_id
+                    task_manifest["files"] = _file_records(
+                        method_root, excluded={"task_manifest.json"}
+                    )
+                    _write_json(task_manifest_path, task_manifest)
+        run_manifest["files"] = _file_records(
+            replicate["root"], excluded={"manifests/run_manifest.json"}
+        )
+        _write_json(run_manifest_path, run_manifest)
+
+    _write_task_manifest(tasks, target / "benchmark_task_manifest.csv")
+    derived_manifest = {
+        "schema_version": "phase6-expanded-benchmark-run-v1",
+        "benchmark_id": benchmark_id,
+        "phase": source_manifest["phase"],
+        "replicates_per_scenario": source_manifest["replicates_per_scenario"],
+        "scenario_ids": source_manifest["scenario_ids"],
+        "enabled_methods": sorted(enabled_methods),
+        "status": "derived_inputs_and_existing_outputs_frozen_new_methods_pending",
+        "created_at": _utc_now(),
+        "derived_from_benchmark_id": source.name,
+        "source_benchmark_status": source_manifest["status"],
+        "frozen_input_policy": "byte_identical_canonical_inputs_reused",
+        "files": _file_records(
+            target, excluded={"benchmark_manifest.json", "benchmark_task_manifest.csv"}
+        ),
+    }
+    _write_json(target / "benchmark_manifest.json", derived_manifest)
+    return target
+
+
 def _load_frozen_canonical(replicate_root: Path) -> CanonicalDAInput:
     simulation = replicate_root / "simulation"
     canonical = CanonicalDAInput(
@@ -534,6 +686,7 @@ def run_pending_tasks(
                 raise ValueError("Task input hash disagrees with frozen replicate input.")
             runtime = dict(config.get("runtime", {}))
             runtime["sccoda_rng_key"] = int(task["simulation_seed"])
+            runtime["engine_rng_seed"] = int(task["simulation_seed"])
             adapter_config = {
                 "methods": [method],
                 "contrast": canonical.contrast_specification.iloc[0].to_dict(),
@@ -609,6 +762,158 @@ def run_pending_tasks(
         "status": "method_tasks_complete",
         "methods_finished_at": _utc_now(),
         "task_status_counts": tasks["status"].value_counts().to_dict(),
+    })
+    _write_json(manifest_path, manifest)
+    return task_path
+
+
+def _execute_parallel_task(
+    root_value: str, task_record: dict[str, Any], config: dict[str, Any]
+) -> dict[str, Any]:
+    """Execute one isolated method/replicate task; the parent owns the CSV manifest."""
+    root = Path(root_value)
+    task = pd.Series(task_record)
+    method = str(task["method"])
+    replicate = _replicate_paths(root, str(task["scenario_id"]), str(task["replicate_id"]))
+    method_root = replicate["methods"] / method
+    method_root.mkdir(exist_ok=False)
+    started = time.perf_counter()
+    memory_before = _memory_rss()
+    final_status = "conversion_failed"
+    failure_reason: str | None = None
+    try:
+        canonical = _load_frozen_canonical(replicate["root"])
+        if canonical.input_hash() != str(task["input_hash"]):
+            raise ValueError("Task input hash disagrees with frozen replicate input.")
+        runtime = dict(config.get("runtime", {}))
+        runtime["sccoda_rng_key"] = int(task["simulation_seed"])
+        runtime["engine_rng_seed"] = int(task["simulation_seed"])
+        # Replicate-level processes provide the parallelism; avoiding nested
+        # cell-type pools prevents oversubscription and keeps each worker isolated.
+        runtime["engine_max_workers"] = 1
+        adapter = _build_adapters({
+            "methods": [method],
+            "contrast": canonical.contrast_specification.iloc[0].to_dict(),
+            "runtime": runtime,
+        }, method_root)[0]
+        _save_native_input(adapter, canonical, method_root / "native_input")
+        _write_json(method_root / "environment.json", _environment_record(method))
+        result = DifferentialAbundanceRunner(
+            method_root / "runner_outputs", _decision_registry([method])
+        ).run(
+            canonical, [adapter], analysis_id=str(task["analysis_id"]),
+            run_id=str(task["run_id"]),
+        )
+        result.public_view.to_csv(method_root / "public_contrast.csv", index=False)
+        result.evidence_layer.to_csv(method_root / "evidence.csv", index=False)
+        result.diagnostics.to_csv(method_root / "diagnostics.csv", index=False)
+        diagnostic = result.diagnostics.iloc[0]
+        details = diagnostic.get("details", {})
+        if not isinstance(details, dict):
+            details = {}
+        (method_root / "stdout.txt").write_text(str(details.get("stdout", "")), encoding="utf-8")
+        (method_root / "stderr.txt").write_text(str(details.get("stderr", "")), encoding="utf-8")
+        diagnostic_status = str(diagnostic["status"])
+        if diagnostic_status == "success" and bool(diagnostic.get("converged", False)):
+            final_status = "success"
+        elif diagnostic_status == "failed":
+            final_status = "runtime_failed"
+            failure_reason = str(diagnostic.get("error_message") or diagnostic_status)
+        elif diagnostic_status == "diagnostics_invalid" or not bool(diagnostic.get("converged", False)):
+            final_status = "diagnostics_invalid"
+            failure_reason = str(diagnostic.get("error_message") or "native_diagnostics_invalid")
+        else:
+            final_status = "runtime_failed"
+            failure_reason = str(diagnostic.get("error_message") or diagnostic_status)
+    except Exception as exc:
+        failure_reason = f"{type(exc).__name__}: {exc}"
+        (method_root / "stderr.txt").write_text(failure_reason, encoding="utf-8")
+        if not (method_root / "stdout.txt").exists():
+            (method_root / "stdout.txt").write_text("", encoding="utf-8")
+    runtime_seconds = time.perf_counter() - started
+    task_manifest = {
+        "benchmark_id": task["benchmark_id"], "scenario_id": task["scenario_id"],
+        "replicate_id": task["replicate_id"], "run_id": task["run_id"],
+        "analysis_id": task["analysis_id"], "method": method,
+        "benchmark_role": task["benchmark_role"],
+        "scientific_status": task["scientific_status"], "status": final_status,
+        "failure_reason": failure_reason, "input_hash": task["input_hash"],
+        "runtime_seconds": runtime_seconds, "memory_rss_before_bytes": memory_before,
+        "memory_rss_after_bytes": _memory_rss(),
+        "memory_measurement": "worker_process_rss_before_after; child_peak_unavailable",
+        "attempt_count": int(task["attempt_count"]),
+        "execution_scheduler": "replicate_level_process_pool",
+        "files": _file_records(method_root, excluded={"task_manifest.json"}),
+    }
+    _write_json(method_root / "task_manifest.json", task_manifest)
+    return {
+        "index": int(task["_manifest_index"]), "status": final_status,
+        "failure_reason": failure_reason, "runtime_seconds": runtime_seconds,
+        "finished_at": _utc_now(),
+    }
+
+
+def run_pending_tasks_parallel(
+    benchmark_root: str | Path, *, max_workers: int = 4,
+    only_methods: set[str] | None = None,
+) -> Path:
+    """Run independent replicate tasks in processes while serializing manifest writes."""
+    if max_workers < 2:
+        return run_pending_tasks(benchmark_root, only_methods=only_methods)
+    root = Path(benchmark_root).resolve()
+    task_path = root / "benchmark_task_manifest.csv"
+    tasks = pd.read_csv(task_path)
+    for column in ("failure_reason", "started_at", "finished_at", "result_subdir"):
+        if column not in tasks:
+            tasks[column] = "." if column == "result_subdir" else pd.NA
+        tasks[column] = tasks[column].astype("object")
+    config = yaml.safe_load(_run_config_path(root).read_text(encoding="utf-8"))
+    order = list(config["execution"]["enabled_task_order"])
+    selected = tasks["status"].eq("pending")
+    if only_methods:
+        selected &= tasks["method"].astype(str).isin(only_methods)
+    for method in order:
+        indices = tasks.index[selected & tasks["method"].astype(str).eq(method)].tolist()
+        if not indices:
+            continue
+        for index in indices:
+            method_root = _replicate_paths(
+                root, str(tasks.at[index, "scenario_id"]), str(tasks.at[index, "replicate_id"])
+            )["methods"] / method
+            if method_root.exists():
+                raise FileExistsError(f"Pending task output already exists: {method_root}")
+            tasks.at[index, "status"] = "running"
+            tasks.at[index, "attempt_count"] = int(tasks.at[index, "attempt_count"]) + 1
+            tasks.at[index, "started_at"] = _utc_now()
+        _write_task_manifest(tasks, task_path)
+        records = []
+        for index in indices:
+            record = tasks.loc[index].to_dict()
+            record["_manifest_index"] = int(index)
+            records.append(record)
+        method_workers = 1 if method == "pydeseq2" else min(max_workers, len(records))
+        with ProcessPoolExecutor(max_workers=method_workers) as pool:
+            futures = [
+                pool.submit(_execute_parallel_task, str(root), record, config)
+                for record in records
+            ]
+            for future in as_completed(futures):
+                outcome = future.result()
+                index = outcome.pop("index")
+                for key, value in outcome.items():
+                    tasks.at[index, key] = value
+                tasks.at[index, "result_subdir"] = "."
+                _write_task_manifest(tasks, task_path)
+    manifest_path = root / "benchmark_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update({
+        "status": "method_tasks_complete",
+        "methods_finished_at": _utc_now(),
+        "task_status_counts": tasks["status"].value_counts().to_dict(),
+        "execution_scheduler": {
+            "type": "replicate_level_process_pool", "max_workers": max_workers,
+            "nested_engine_workers": 1,
+        },
     })
     _write_json(manifest_path, manifest)
     return task_path
@@ -827,6 +1132,7 @@ def retry_failed_tasks(
                 raise ValueError("Retry input hash disagrees with the frozen first-attempt input.")
             runtime = dict(config.get("runtime", {}))
             runtime["sccoda_rng_key"] = int(task["simulation_seed"])
+            runtime["engine_rng_seed"] = int(task["simulation_seed"])
             adapter = _build_adapters({
                 "methods": [method],
                 "contrast": canonical.contrast_specification.iloc[0].to_dict(),
@@ -930,6 +1236,101 @@ def retry_failed_tasks(
     })
     _write_json(manifest_path, manifest)
     return task_path
+
+
+def migrate_dirichlet_estimand_contract(benchmark_root: str | Path) -> Path:
+    """Refresh only the deterministic public estimand classification for Dirichlet outputs.
+
+    The statistical estimates, evidence, decisions, diagnostics, and task status are left
+    unchanged.  The migration is deliberately narrow and records every before/after hash.
+    """
+    root = Path(benchmark_root).resolve()
+    task_path = root / "benchmark_task_manifest.csv"
+    tasks = pd.read_csv(task_path)
+    methods = {"dirichlet_wald", "dirichlet_multinomial_wald"}
+    selected = tasks.loc[
+        tasks["method"].astype(str).isin(methods)
+        & tasks["status"].astype(str).eq("success")
+    ].copy()
+    if len(selected) != 280:
+        raise ValueError(
+            "The Phase-6 Dirichlet contract migration requires exactly 280 successful tasks."
+        )
+    records: list[dict[str, Any]] = []
+    for task in selected.itertuples(index=False):
+        replicate = _replicate_paths(root, str(task.scenario_id), str(task.replicate_id))
+        result_subdir = str(getattr(task, "result_subdir", ".") or ".")
+        result_root = replicate["methods"] / str(task.method) / result_subdir
+        public_path = result_root / "public_contrast.csv"
+        manifest_path = result_root / "task_manifest.json"
+        before_hash = _sha256(public_path)
+        public = pd.read_csv(public_path)
+        required = {
+            "effect_estimand", "effect_scale", "reference_cell_type",
+            "estimand_compatibility",
+        }
+        if missing := required - set(public.columns):
+            raise ValueError(f"Dirichlet public output lacks contract fields: {sorted(missing)}")
+        assessable_mask = public["estimand_compatibility"].astype(str).ne("unavailable")
+        expected_estimand = {
+            "dirichlet_wald": "dirichlet_log_alpha_contrast",
+            "dirichlet_multinomial_wald": "dirichlet_multinomial_log_alpha_contrast",
+        }[str(task.method)]
+        if not public.loc[assessable_mask, "effect_estimand"].astype(str).eq(
+            expected_estimand
+        ).all():
+            raise ValueError("Migration encountered an unexpected Dirichlet estimand.")
+        if not public.loc[assessable_mask, "effect_scale"].astype(str).eq("log_ratio").all():
+            raise ValueError("Migration encountered an unexpected Dirichlet effect scale.")
+        if public.loc[assessable_mask, "reference_cell_type"].isna().any() or public.loc[
+            assessable_mask, "reference_cell_type"
+        ].astype(str).eq("").any():
+            raise ValueError("Dirichlet reference cell type must be explicit for migration.")
+        existing = set(public["estimand_compatibility"].astype(str))
+        if not existing.issubset({"incompatible", "direction_only", "unavailable"}):
+            raise ValueError(f"Unexpected pre-migration compatibility values: {sorted(existing)}")
+        migration_mask = public["estimand_compatibility"].astype(str).eq("incompatible")
+        changed_rows = int(migration_mask.sum())
+        public.loc[migration_mask, "estimand_compatibility"] = "direction_only"
+        public.to_csv(public_path, index=False)
+        after_hash = _sha256(public_path)
+        task_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        task_manifest["files"] = _file_records(
+            result_root, excluded={"task_manifest.json"}
+        )
+        task_manifest["public_contract_migration"] = {
+            "migration_id": "dirichlet-reference-estimand-direction-v1",
+            "changed_rows": changed_rows,
+            "statistical_values_changed": False,
+        }
+        _write_json(manifest_path, task_manifest)
+        records.append({
+            "scenario_id": task.scenario_id,
+            "replicate_id": task.replicate_id,
+            "method": task.method,
+            "result_subdir": result_subdir,
+            "changed_rows": changed_rows,
+            "public_sha256_before": before_hash,
+            "public_sha256_after": after_hash,
+        })
+    migration_root = root / "contract_migrations"
+    migration_root.mkdir(parents=True, exist_ok=True)
+    record_path = migration_root / "dirichlet-reference-estimand-direction-v1.csv"
+    pd.DataFrame(records).to_csv(record_path, index=False)
+    manifest_path = root / "benchmark_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    migrations = list(manifest.get("contract_migrations", []))
+    migrations.append({
+        "migration_id": "dirichlet-reference-estimand-direction-v1",
+        "created_at": _utc_now(),
+        "number_tasks": len(records),
+        "number_rows_changed": int(sum(row["changed_rows"] for row in records)),
+        "statistical_values_changed": False,
+        "record": record_path.relative_to(root).as_posix(),
+    })
+    manifest["contract_migrations"] = migrations
+    _write_json(manifest_path, manifest)
+    return record_path
 
 
 def accept_phase6_stop_point_c(benchmark_root: str | Path) -> Path:
@@ -1434,7 +1835,7 @@ def _plot_from_summaries(root: Path, *, pilot: bool) -> list[dict[str, str]]:
         mean_fpr=("mean_FPR", "mean"),
         mean_fdr=("empirical_FDR", "mean"),
     )
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4.5))
+    fig, axes = plt.subplots(1, 3, figsize=(22, 6.5))
     role_colors = {
         "sanity_check": "tab:orange",
         "formal_candidate": "tab:blue",
@@ -1452,7 +1853,9 @@ def _plot_from_summaries(root: Path, *, pilot: bool) -> list[dict[str, str]]:
     ):
         values = pd.to_numeric(sanity_summary[metric], errors="coerce")
         axis.bar(sanity_summary["method"], values, color=bar_colors)
-        axis.tick_params(axis="x", rotation=55)
+        axis.tick_params(axis="x", rotation=68, labelsize=8)
+        for label in axis.get_xticklabels():
+            label.set_horizontalalignment("right")
         axis.set_ylim(0, 1.02)
         axis.set_title(title)
         if metric in {"mean_fpr", "mean_fdr"}:
@@ -1539,6 +1942,35 @@ def _plot_from_summaries(root: Path, *, pilot: bool) -> list[dict[str, str]]:
         yaml.safe_dump(config, sort_keys=False), encoding="utf-8"
     )
     return figures
+
+
+def regenerate_figures_from_summaries(benchmark_root: str | Path) -> Path:
+    """Regenerate review figures from frozen plot-ready summary tables only."""
+    root = Path(benchmark_root).resolve()
+    if not (root / "summaries" / "scenario_level_metrics.csv").is_file():
+        raise FileNotFoundError("Plot-ready benchmark summaries are missing.")
+    manifest = json.loads((root / "benchmark_manifest.json").read_text(encoding="utf-8"))
+    pilot = str(manifest["phase"]) == "pilot"
+    figures = _plot_from_summaries(root, pilot=pilot)
+    final_report = root / "final_report"
+    final_report.mkdir(exist_ok=True)
+    figure_index = ["# Figure index", ""]
+    for record in figures:
+        figure_index.append(
+            f"- `{record['figure']}.png` / `.pdf` — source `{record['plot_ready_csv']}`"
+        )
+    index_path = final_report / "figure_index.md"
+    index_path.write_text("\n".join(figure_index) + "\n", encoding="utf-8")
+    source_root = root / ("pilot_figures" if pilot else "figures")
+    final_figures = final_report / "figures"
+    final_figures.mkdir(exist_ok=True)
+    for figure in source_root.iterdir():
+        if figure.is_file():
+            shutil.copyfile(figure, final_figures / figure.name)
+    manifest["figures_regenerated_at"] = _utc_now()
+    manifest["figure_source"] = "frozen_plot_ready_summaries"
+    _write_json(root / "benchmark_manifest.json", manifest)
+    return index_path
 
 
 def _write_pilot_validation_tables(root: Path, tasks: pd.DataFrame) -> None:
@@ -1949,17 +2381,37 @@ def main(argv: list[str] | None = None) -> None:
     initialize.add_argument("--scenarios", type=Path, default=DEFAULT_SCENARIOS)
     initialize.add_argument("--evaluation", type=Path, default=DEFAULT_EVALUATION)
     initialize.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    derive = subparsers.add_parser("derive-expanded")
+    derive.add_argument("source_benchmark_root", type=Path)
+    derive.add_argument("benchmark_id")
+    derive.add_argument("--output-base", type=Path, default=REPOSITORY_ROOT / "benchmark_runs")
+    derive.add_argument(
+        "--registry", type=Path,
+        default=REPOSITORY_ROOT / "config" / "phase6_method_benchmark_registry.yaml",
+    )
+    derive.add_argument(
+        "--config", type=Path,
+        default=REPOSITORY_ROOT / "config" / "phase6_benchmark.yaml",
+    )
     run = subparsers.add_parser("run")
     run.add_argument("benchmark_root", type=Path)
     run.add_argument("--only-method", action="append", default=[])
     run.add_argument("--exclude-method", action="append", default=[])
     run.add_argument("--only-replicate", action="append", default=[])
+    run_parallel = subparsers.add_parser("run-parallel")
+    run_parallel.add_argument("benchmark_root", type=Path)
+    run_parallel.add_argument("--workers", type=int, default=4)
+    run_parallel.add_argument("--only-method", action="append", default=[])
     evaluate = subparsers.add_parser("evaluate")
     evaluate.add_argument("benchmark_root", type=Path)
     retry = subparsers.add_parser("retry")
     retry.add_argument("benchmark_root", type=Path)
     retry.add_argument("--method", required=True)
     retry.add_argument("--reason-contains", required=True)
+    migrate_dirichlet = subparsers.add_parser("migrate-dirichlet-estimand-contract")
+    migrate_dirichlet.add_argument("benchmark_root", type=Path)
+    regenerate_plots = subparsers.add_parser("regenerate-plots")
+    regenerate_plots.add_argument("benchmark_root", type=Path)
     interrupted = subparsers.add_parser("record-interrupted")
     interrupted.add_argument("benchmark_root", type=Path)
     interrupted.add_argument("--method", required=True)
@@ -1985,6 +2437,12 @@ def main(argv: list[str] | None = None) -> None:
             evaluation_path=args.evaluation,
             config_path=args.config,
         )
+    elif args.command == "derive-expanded":
+        result = derive_expanded_benchmark(
+            args.source_benchmark_root, args.benchmark_id,
+            output_base=args.output_base, registry_path=args.registry,
+            config_path=args.config,
+        )
     elif args.command == "run":
         result = run_pending_tasks(
             args.benchmark_root,
@@ -1992,12 +2450,21 @@ def main(argv: list[str] | None = None) -> None:
             exclude_methods=set(args.exclude_method) or None,
             only_replicates=set(args.only_replicate) or None,
         )
+    elif args.command == "run-parallel":
+        result = run_pending_tasks_parallel(
+            args.benchmark_root, max_workers=args.workers,
+            only_methods=set(args.only_method) or None,
+        )
     elif args.command == "retry":
         result = retry_failed_tasks(
             args.benchmark_root,
             method=args.method,
             reason_contains=args.reason_contains,
         )
+    elif args.command == "migrate-dirichlet-estimand-contract":
+        result = migrate_dirichlet_estimand_contract(args.benchmark_root)
+    elif args.command == "regenerate-plots":
+        result = regenerate_figures_from_summaries(args.benchmark_root)
     elif args.command == "record-interrupted":
         result = record_interrupted_tasks(
             args.benchmark_root,

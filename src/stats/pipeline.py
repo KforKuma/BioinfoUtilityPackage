@@ -15,6 +15,7 @@ import yaml
 from src.stats.adapters import (
     CLRLMMAdapter,
     DCATSAdapter,
+    EngineMethodAdapter,
     MockBayesianAdapter,
     MockFailureAdapter,
     MockFrequentistAdapter,
@@ -429,6 +430,19 @@ def _build_adapters(config: dict[str, Any], run_root: Path):
                 pseudocount=float(runtime.get("clr_lmm_pseudocount", 1.0)),
                 group_label=str(runtime.get("clr_lmm_group_label", "donor_id")),
                 covariates=tuple(runtime.get("clr_lmm_covariates", ["tissue"])),
+            ))
+        elif method in {
+            "dirichlet_multinomial_wald", "dirichlet_wald", "dkd", "pydeseq2",
+            "permutation_mixed", "pclr_ols", "pclr_lmm", "anova_naive",
+            "anova_transformed",
+        }:
+            adapters.append(EngineMethodAdapter(
+                method,
+                max_workers=int(runtime.get("engine_max_workers", 4)),
+                random_seed=int(runtime.get("engine_rng_seed", 0)),
+                n_permutations=int(runtime.get("permutation_mixed_n_permutations", 499)),
+                pclr_samples=int(runtime.get("pclr_n_samples", 4)),
+                dirichlet_maxiter=int(runtime.get("dirichlet_maxiter", 300)),
             ))
         else:
             raise ValueError(f"Unsupported pipeline method: {method!r}")
