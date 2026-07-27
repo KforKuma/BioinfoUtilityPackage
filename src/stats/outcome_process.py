@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from src.stats.support import *
-from src.stats.benchmark_metrics import calculate_binary_metrics, estimate_fdr_from_replicates
+from src.stats.evaluation.benchmark_metrics import calculate_binary_metrics, estimate_fdr_from_replicates
 from src.stats.validation import parse_boolean_series, parse_boolean_value
 from src.utils.hier_logger import logged
 

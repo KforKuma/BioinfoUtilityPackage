@@ -25,7 +25,10 @@ class RScriptBridge:
         timeout_seconds: int = 3600,
     ) -> None:
         self.rscript = Path(rscript)
-        self.script = Path(script) if script else Path(__file__).parent / "r_backends" / "run_da_method.R"
+        self.script = (
+            Path(script) if script else
+            Path(__file__).resolve().parents[1] / "backends" / "r" / "run_da_method.R"
+        )
         self.library_path = Path(library_path) if library_path else None
         self.cmdstan_path = Path(cmdstan_path) if cmdstan_path else None
         if self.cmdstan_path is None and self.library_path is not None:

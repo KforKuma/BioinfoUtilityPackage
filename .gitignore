@@ -6,6 +6,13 @@
 !/project/Step08_Abundance/Step08c_Realdata.py
 !/project/Step08_Abundance/Step08d_Additional_Analysis.py
 !/project/Step08_Abundance/Test_Sccoda.py
+!/project/Step08_Abundance/Step08b_BuildFigureData.py
+!/project/Step08_Abundance/Step08c_PlotMainFigure2.py
+!/project/Step08_Abundance/Step08d_PlotSupplementaryFigure2.py
+!/project/Step08_Abundance/phase12_figure_utils.py
+!/project/Step08_Abundance/configs/
+/project/Step08_Abundance/configs/*
+!/project/Step08_Abundance/configs/phase12_figure_config.yaml
 __pycache__/
 *.py[cod]
 .pytest_cache/

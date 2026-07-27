@@ -39,6 +39,9 @@ class SccompAdapter(BaseDifferentialAbundanceAdapter):
         inference_method: str = "hmc",
         max_sampling_iterations: int = 1000,
         adapt_delta: float = 0.95,
+        posterior_prediction_draws: int = 0,
+        posterior_prediction_seed: int = 1212,
+        prediction_model_cache_dir: str | None = None,
     ) -> None:
         super().__init__(method_version=method_version)
         if nominal_alpha != 0.05:
@@ -57,6 +60,11 @@ class SccompAdapter(BaseDifferentialAbundanceAdapter):
         self.inference_method = inference_method
         self.max_sampling_iterations = max_sampling_iterations
         self.adapt_delta = adapt_delta
+        if posterior_prediction_draws < 0:
+            raise ValueError("posterior_prediction_draws cannot be negative.")
+        self.posterior_prediction_draws = int(posterior_prediction_draws)
+        self.posterior_prediction_seed = int(posterior_prediction_seed)
+        self.prediction_model_cache_dir = prediction_model_cache_dir
 
     @classmethod
     def decision_rules(cls, alpha: float = 0.05) -> list[DecisionRule]:
@@ -76,6 +84,9 @@ class SccompAdapter(BaseDifferentialAbundanceAdapter):
             "inference_method": self.inference_method,
             "max_sampling_iterations": self.max_sampling_iterations,
             "adapt_delta": self.adapt_delta,
+            "posterior_prediction_draws": self.posterior_prediction_draws,
+            "posterior_prediction_seed": self.posterior_prediction_seed,
+            "prediction_model_cache_dir": self.prediction_model_cache_dir,
         })
         sample_ids = prepared.sample_manifest["sample_id"].astype(str).tolist()
         cell_types = prepared.cell_type_manifest["cell_type"].astype(str).tolist()

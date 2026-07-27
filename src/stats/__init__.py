@@ -6,7 +6,7 @@ method dependencies. Established entry points are resolved on first access.
 
 from importlib import import_module
 
-from .benchmark_metrics import (
+from .evaluation.benchmark_metrics import (
     ConfusionCounts,
     calculate_binary_metrics,
     confusion_counts,
@@ -43,7 +43,7 @@ _LAZY_EXPORTS = {
         "simulate_CLR_resample_data",
     ),
     "collect_real_data_results": (
-        "src.stats.real_data_analysis",
+        "src.stats.pipeline.real_data_analysis",
         "collect_real_data_results",
     ),
     "run_Meta_Ensemble": ("src.stats.meta_engine.Tri_anchor", "run_Meta_Ensemble"),

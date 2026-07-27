@@ -18,7 +18,7 @@ from src.stats.pipeline import PipelineRunResult, run_abundance_pipeline
 
 
 # %% Configuration
-CONFIG_PATH = REPOSITORY_ROOT / "config" / "phase4_step08_real_data.yml"
+CONFIG_PATH = REPOSITORY_ROOT / "project" / "Step08_Abundance" / "configs" / "phase4_step08_real_data.yml"
 METHODS = ("propeller", "sccomp", "tri_anchor")
 PREPARATION_MANIFEST: Path | None = None
 

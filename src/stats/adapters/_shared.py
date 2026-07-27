@@ -193,7 +193,10 @@ def frequentist_evidence(
 ) -> dict[str, Any]:
     raw = pd.to_numeric(pd.Series([pvalue_raw]), errors="coerce").iloc[0]
     adjusted = pd.to_numeric(pd.Series([pvalue_adjusted]), errors="coerce").iloc[0]
-    native = bool(np.isfinite(adjusted) and adjusted < alpha)
+    # A missing adjusted p-value is an unavailable native decision, not a
+    # negative discovery.  Keeping the decision missing also preserves the
+    # evidence contract: a populated decision must carry a finite value.
+    native = bool(adjusted < alpha) if np.isfinite(adjusted) else pd.NA
     row = {
         "evidence_id": evidence_id,
         "result_id": result_id,

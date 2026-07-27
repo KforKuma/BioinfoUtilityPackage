@@ -19,3 +19,4 @@ scikit-learn>=1.3
 tqdm
 adjustText
 xlsxwriter
+pypdf>=6.10,<7

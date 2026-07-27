@@ -35,8 +35,8 @@ Every finite effect records its estimand, scale, direction, and direction basis.
 Phase 2 provides one configuration-driven entry point for both simulation and real-data work:
 
 ```powershell
-python -m src.stats.pipeline config/phase2_simulation.yml
-python -m src.stats.pipeline config/phase2_real_data.yml
+python -m src.stats.pipeline project/Step08_Abundance/configs/phase2_simulation.yml
+python -m src.stats.pipeline project/Step08_Abundance/configs/phase2_real_data.yml
 ```
 
 Simulation results are evaluated only through `src.stats.evaluation.evaluate_contrasts`, using an explicitly selected truth source and a common complete method universe. Real-data mode never emits truth-dependent Power, FPR, FDP, or FDR. Every run uses a distinct immutable `run_id`, writes a file-hash manifest, and refuses to overwrite an existing run directory.

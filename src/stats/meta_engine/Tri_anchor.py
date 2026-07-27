@@ -96,7 +96,10 @@ class TriAnchorRule:
 
 
 def default_tri_anchor_rule_path() -> Path:
-    return Path(__file__).resolve().parents[3] / "config" / "tri_anchor_rules.yaml"
+    return (
+        Path(__file__).resolve().parents[3]
+        / "project" / "Step08_Abundance" / "configs" / "tri_anchor_rules.yaml"
+    )
 
 
 def load_tri_anchor_rule(

@@ -136,7 +136,10 @@ class DecisionRuleRegistry:
 
 
 def default_decision_rule_path() -> Path:
-    return Path(__file__).resolve().parents[3] / "config" / "decision_rules.yaml"
+    return (
+        Path(__file__).resolve().parents[3]
+        / "project" / "Step08_Abundance" / "configs" / "decision_rules.yaml"
+    )
 
 
 def load_default_decision_rules() -> DecisionRuleRegistry:
